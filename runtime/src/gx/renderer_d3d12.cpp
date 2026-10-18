@@ -240,11 +240,11 @@ const char* game_language_name(GameLanguage language) {
     return "ENGLISH";
 }
 
-const char* animation_blend_name(AnimationBlend blend) {
-    switch (blend) {
-    case AnimationBlend::Smooth: return "SMOOTH";
-    case AnimationBlend::Smoother: return "SMOOTHER";
-    case AnimationBlend::Original: break;
+const char* motion_style_name(MotionStyle style) {
+    switch (style) {
+    case MotionStyle::Smooth: return "SMOOTH";
+    case MotionStyle::Modern: return "MODERN";
+    case MotionStyle::Original: break;
     }
     return "ORIGINAL";
 }
@@ -1171,11 +1171,11 @@ void adjust_native_setting_unlogged(int delta) {
         }
     }
     if (tab == 4u && row == 2u) {
-        // Animation blending changes live (no apply): the next cross-fade takes it.
-        const auto next = static_cast<AnimationBlend>(
-            step(std::min(static_cast<unsigned>(settings.animation_blend), 2u), 3u));
-        if (next != settings.animation_blend) {
-            settings.animation_blend = next;
+        // The motion style changes live (no apply).
+        const auto next = static_cast<MotionStyle>(
+            step(std::min(static_cast<unsigned>(settings.motion_style), 2u), 3u));
+        if (next != settings.motion_style) {
+            settings.motion_style = next;
             set_runtime_settings(settings);
             s_native_settings_dirty.store(true, std::memory_order_release);
         }
@@ -9514,7 +9514,7 @@ std::string native_settings_row_text(
             return text;
         }
         if (row == 1u) return std::string("LANGUAGE: ") + game_language_name(runtime.language);
-        if (row == 2u) return std::string("ANIMATION BLENDING: ") + animation_blend_name(runtime.animation_blend);
+        if (row == 2u) return std::string("MOTION: ") + motion_style_name(runtime.motion_style);
         return {};
     default:
         return {};

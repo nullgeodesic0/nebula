@@ -591,32 +591,32 @@ int main() {
     passed &= expect(galaxy::get_runtime_settings().language == GameLanguage::English,
                      "a language code outside the three is replaced by English");
 
-    using galaxy::AnimationBlend;
-    write_text(settings_path, "animation_blend=smooth\n");
+    using galaxy::MotionStyle;
+    write_text(settings_path, "motion_style=smooth\n");
     galaxy::load_runtime_settings_from_file();
-    passed &= expect(galaxy::get_runtime_settings().animation_blend == AnimationBlend::Smooth, "smooth blending loads");
-    write_text(settings_path, "animation_blend=Smoother\n");
+    passed &= expect(galaxy::get_runtime_settings().motion_style == MotionStyle::Smooth, "the smooth motion style loads");
+    write_text(settings_path, "motion_style=Modern\n");
     galaxy::load_runtime_settings_from_file();
-    passed &= expect(galaxy::get_runtime_settings().animation_blend == AnimationBlend::Smoother,
-                     "a blending name in any case loads");
-    write_text(settings_path, "animation_blend=wobbly\n");
+    passed &= expect(galaxy::get_runtime_settings().motion_style == MotionStyle::Modern,
+                     "a motion style name in any case loads");
+    write_text(settings_path, "motion_style=wobbly\n");
     galaxy::load_runtime_settings_from_file();
-    passed &= expect(galaxy::get_runtime_settings().animation_blend == AnimationBlend::Original,
-                     "an unknown blending keeps the game's");
-    _putenv_s("GALAXY_ANIMATION_BLEND", "smooth");
+    passed &= expect(galaxy::get_runtime_settings().motion_style == MotionStyle::Original,
+                     "an unknown motion style keeps the game's");
+    _putenv_s("GALAXY_MOTION_STYLE", "smooth");
     galaxy::load_runtime_settings_from_file();
-    passed &= expect(galaxy::get_runtime_settings().animation_blend == AnimationBlend::Smooth,
-                     "animation blending has an environment override");
-    _putenv_s("GALAXY_ANIMATION_BLEND", "");
+    passed &= expect(galaxy::get_runtime_settings().motion_style == MotionStyle::Smooth,
+                     "the motion style has an environment override");
+    _putenv_s("GALAXY_MOTION_STYLE", "");
     passed &= expect(
         galaxy::save_runtime_settings_to_file() &&
-            read_text(settings_path).find("animation_blend=smooth") != std::string::npos,
-        "animation blending is saved with the other settings");
-    galaxy::RuntimeSettings odd_blend = galaxy::get_runtime_settings();
-    odd_blend.animation_blend = static_cast<AnimationBlend>(7);
-    galaxy::set_runtime_settings(odd_blend);
-    passed &= expect(galaxy::get_runtime_settings().animation_blend == AnimationBlend::Original,
-                     "a blending code outside the three is replaced by the game's");
+            read_text(settings_path).find("motion_style=smooth") != std::string::npos,
+        "the motion style is saved with the other settings");
+    galaxy::RuntimeSettings odd_style = galaxy::get_runtime_settings();
+    odd_style.motion_style = static_cast<MotionStyle>(7);
+    galaxy::set_runtime_settings(odd_style);
+    passed &= expect(galaxy::get_runtime_settings().motion_style == MotionStyle::Original,
+                     "a motion style outside the three is replaced by the game's");
 
     // The game's first question fixes the language for the session.
     GameLanguage running{};

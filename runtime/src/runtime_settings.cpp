@@ -60,8 +60,8 @@ RuntimeSettings sanitize_settings(RuntimeSettings settings) {
     if (settings.language != GameLanguage::French && settings.language != GameLanguage::Spanish) {
         settings.language = GameLanguage::English;
     }
-    if (settings.animation_blend != AnimationBlend::Smooth && settings.animation_blend != AnimationBlend::Smoother) {
-        settings.animation_blend = AnimationBlend::Original;
+    if (settings.motion_style != MotionStyle::Smooth && settings.motion_style != MotionStyle::Modern) {
+        settings.motion_style = MotionStyle::Original;
     }
     return settings;
 }
@@ -155,9 +155,9 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
         for (const GameLanguage language : {GameLanguage::English, GameLanguage::French, GameLanguage::Spanish}) {
             if (_stricmp(value, game_language_key(language)) == 0) settings.language = language;
         }
-    } else if (std::strcmp(key, "animation_blend") == 0) {
-        for (const AnimationBlend blend : {AnimationBlend::Original, AnimationBlend::Smooth, AnimationBlend::Smoother}) {
-            if (_stricmp(value, animation_blend_key(blend)) == 0) settings.animation_blend = blend;
+    } else if (std::strcmp(key, "motion_style") == 0) {
+        for (const MotionStyle style : {MotionStyle::Original, MotionStyle::Smooth, MotionStyle::Modern}) {
+            if (_stricmp(value, motion_style_key(style)) == 0) settings.motion_style = style;
         }
     }
 }
@@ -294,7 +294,7 @@ void apply_env_overrides(RuntimeSettings& settings) {
         settings, "GALAXY_AUDIO_CUTSCENE_GAIN", "audio_cutscene_gain");
     apply_env(settings, "GALAXY_TEXT_SPEED", "text_speed");
     apply_env(settings, "GALAXY_LANGUAGE", "language");
-    apply_env(settings, "GALAXY_ANIMATION_BLEND", "animation_blend");
+    apply_env(settings, "GALAXY_MOTION_STYLE", "motion_style");
 }
 
 }  // namespace
@@ -338,11 +338,11 @@ const char* game_language_key(GameLanguage language) noexcept {
     return "english";
 }
 
-const char* animation_blend_key(AnimationBlend blend) noexcept {
-    switch (blend) {
-    case AnimationBlend::Smooth: return "smooth";
-    case AnimationBlend::Smoother: return "smoother";
-    case AnimationBlend::Original: break;
+const char* motion_style_key(MotionStyle style) noexcept {
+    switch (style) {
+    case MotionStyle::Smooth: return "smooth";
+    case MotionStyle::Modern: return "modern";
+    case MotionStyle::Original: break;
     }
     return "original";
 }
@@ -433,7 +433,7 @@ bool reload_runtime_audio_settings_if_changed() noexcept {
         settings.audio = parsed.audio;
         settings.text_speed = parsed.text_speed;
         settings.language = parsed.language;
-        settings.animation_blend = parsed.animation_blend;
+        settings.motion_style = parsed.motion_style;
         set_runtime_settings(settings);
         input::set_controls_config(controls);
         record_input_mode_sync(file_mode, settings.input_mode);
@@ -470,7 +470,7 @@ bool save_runtime_settings_to_file() {
                  << "audio_cutscene_gain=" << settings.audio.cutscene << '\n'
                  << "text_speed=" << settings.text_speed << '\n'
                  << "language=" << game_language_key(settings.language) << '\n'
-                 << "animation_blend=" << animation_blend_key(settings.animation_blend) << '\n'
+                 << "motion_style=" << motion_style_key(settings.motion_style) << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;

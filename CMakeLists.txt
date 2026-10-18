@@ -969,8 +969,8 @@ target_link_libraries(galaxy_native_input_tests PRIVATE galaxy_native_input)
 add_executable(galaxy_layout_aspect_tests runtime/src/layout_aspect_tests.cpp)
 target_link_libraries(galaxy_layout_aspect_tests PRIVATE galaxy_runtime_abi)
 
-add_executable(galaxy_animation_blend_tests runtime/src/animation_blend_tests.cpp)
-target_link_libraries(galaxy_animation_blend_tests PRIVATE galaxy_runtime_abi)
+add_executable(galaxy_motion_style_tests runtime/src/motion_style_tests.cpp)
+target_link_libraries(galaxy_motion_style_tests PRIVATE galaxy_runtime_abi)
 
 add_executable(
     galaxy_native_input_causality_tests
@@ -1169,7 +1169,7 @@ if(MSVC)
         galaxy_native_settings_overlay_tests
         galaxy_post_process_tests
         galaxy_controls_tests
-        galaxy_animation_blend_tests
+        galaxy_motion_style_tests
     )
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
     endforeach()
@@ -1223,7 +1223,7 @@ galaxy_add_native_test(
     galaxy_host_pointer_events_tests)
 galaxy_add_native_test(native_input_reports galaxy_native_input_tests)
 galaxy_add_native_test(layout_aspect_geometry galaxy_layout_aspect_tests)
-galaxy_add_native_test(animation_blend galaxy_animation_blend_tests)
+galaxy_add_native_test(motion_style galaxy_motion_style_tests)
 galaxy_add_native_test(diagnostic_stick_lease galaxy_diagnostic_stick_lease_tests)
 galaxy_add_native_test(simulation_cache_affinity galaxy_simulation_cache_affinity_tests)
 galaxy_add_native_test(

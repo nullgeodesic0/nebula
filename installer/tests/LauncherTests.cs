@@ -239,18 +239,18 @@ namespace Nebula.Launcher
             File.WriteAllText(path, "language=klingon\n");
             Check(GeneralSettings.Load().Language == 0, "an unknown language reads as English");
             File.WriteAllText(path, "text_speed=2\n");
-            Check(GeneralSettings.Load().AnimationBlend == 0 && GeneralSettings.AnimationBlends.Length == 3,
-                  "animation blending starts as the game's, with three choices");
+            Check(GeneralSettings.Load().MotionStyle == 0 && GeneralSettings.MotionStyles.Length == 3,
+                  "the motion style starts as the game's, with three choices");
             general = GeneralSettings.Load();
-            general.AnimationBlend = 2;
+            general.MotionStyle = 2;
             general.Save();
             saved = File.ReadAllText(path);
-            Check(saved.Contains("animation_blend=smoother") && saved.Contains("text_speed=2") &&
-                  GeneralSettings.Load().AnimationBlend == 2, "animation blending is saved for the runtime");
-            File.WriteAllText(path, "animation_blend=SMOOTH\n");
-            Check(GeneralSettings.Load().AnimationBlend == 1, "the runtime's blending values read in any case");
-            File.WriteAllText(path, "animation_blend=wobbly\n");
-            Check(GeneralSettings.Load().AnimationBlend == 0, "an unknown blending reads as the game's");
+            Check(saved.Contains("motion_style=modern") && saved.Contains("text_speed=2") &&
+                  GeneralSettings.Load().MotionStyle == 2, "the motion style is saved for the runtime");
+            File.WriteAllText(path, "motion_style=SMOOTH\n");
+            Check(GeneralSettings.Load().MotionStyle == 1, "the runtime's motion style values read in any case");
+            File.WriteAllText(path, "motion_style=wobbly\n");
+            Check(GeneralSettings.Load().MotionStyle == 0, "an unknown motion style reads as the game's");
             File.Delete(path);
         }
 

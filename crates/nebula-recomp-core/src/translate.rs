@@ -7632,7 +7632,7 @@ fn emit_direct_guest_call_with_exact_fpu(
         .map_err(|_| TranslationError::Formatting)?;
     }
     // XanimePlayer::updateInterpoleRatio, called and tail-called with the player in r3: the runtime
-    // reshapes the cross-fade it is about to step for the animation blend setting.
+    // reshapes the cross-fade it is about to step for the motion style setting.
     if is_animation_interpole_call(target) {
         output.push_str(&site_hook_call(pc, "AnimationInterpole", 0));
     }

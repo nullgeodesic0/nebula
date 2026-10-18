@@ -49,8 +49,9 @@ it is the original game code, translated instruction by instruction by the recom
   optional per-pixel lighting.
 - In-game settings menu (F1, View + Menu on Xbox, Minus + Plus on Switch).
 - Text speed: dialogue and Rosalina's storybook at the original pace, 2x or 3x.
-- Animation blending: the game's own cross-fades between character animations, or eased ones
-  (Smooth) that also last longer (Smoother). Only the drawn pose changes; the game plays the same.
+- Motion style: Original; Smooth, which eases every character's animation blends and Mario's lean
+  into turns without changing play; or Modern, which also makes Mario quicker to start, stop and turn
+  at a run. The spin, jumps and top speed stay the game's in every style.
 - The game in English, French or Spanish, the three languages of the USA release.
 - Saves stored in `%LOCALAPPDATA%\Nebula\saves`, with export, import and Dolphin saves
   (see [Saves](#saves)).
