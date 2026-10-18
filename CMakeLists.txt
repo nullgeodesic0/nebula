@@ -305,7 +305,7 @@ elseif(EXISTS "${galaxy_generated_dsp_source}")
     target_sources(galaxy_native_dsp PRIVATE "${galaxy_generated_dsp_source}")
     target_compile_definitions(galaxy_native_dsp PUBLIC GALAXY_HAVE_NATIVE_DSP=1)
     message(STATUS
-        "Nebula: native DSP ucode present â€” GALAXY_HAVE_NATIVE_DSP=1")
+        "Nebula: native DSP ucode present Ã¢â‚¬â€ GALAXY_HAVE_NATIVE_DSP=1")
 else()
     message(STATUS
         "Nebula: no generated DSP ucode "
@@ -982,6 +982,9 @@ target_link_libraries(galaxy_native_input_tests PRIVATE galaxy_native_input)
 add_executable(galaxy_layout_aspect_tests runtime/src/layout_aspect_tests.cpp)
 target_link_libraries(galaxy_layout_aspect_tests PRIVATE galaxy_runtime_abi)
 
+add_executable(galaxy_motion_style_tests runtime/src/motion_style_tests.cpp)
+target_link_libraries(galaxy_motion_style_tests PRIVATE galaxy_runtime_abi)
+
 add_executable(
     galaxy_native_input_causality_tests
     runtime/src/native_input_causality_tests.cpp)
@@ -1182,6 +1185,7 @@ if(MSVC)
         galaxy_post_process_tests
         galaxy_controls_tests
         galaxy_button_prompts_tests
+        galaxy_motion_style_tests
     )
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
     endforeach()
@@ -1235,6 +1239,7 @@ galaxy_add_native_test(
     galaxy_host_pointer_events_tests)
 galaxy_add_native_test(native_input_reports galaxy_native_input_tests)
 galaxy_add_native_test(layout_aspect_geometry galaxy_layout_aspect_tests)
+galaxy_add_native_test(motion_style galaxy_motion_style_tests)
 galaxy_add_native_test(diagnostic_stick_lease galaxy_diagnostic_stick_lease_tests)
 galaxy_add_native_test(simulation_cache_affinity galaxy_simulation_cache_affinity_tests)
 galaxy_add_native_test(

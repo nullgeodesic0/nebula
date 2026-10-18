@@ -513,6 +513,9 @@ enum class SiteHookKind : std::uint32_t {
     // SCGetLanguage returned (r3); the runtime answers with the language setting. 29 is the
     // development line's SunCenter.
     Language = 30,
+    // Before XanimePlayer::updateInterpoleRatio (r3 the player); the runtime reshapes the
+    // cross-fade for the motion style setting.
+    AnimationInterpole = 31,
 };
 
 inline void site_hook(

@@ -239,6 +239,15 @@ const char* game_language_name(GameLanguage language) {
     }
     return "ENGLISH";
 }
+
+const char* motion_style_name(MotionStyle style) {
+    switch (style) {
+    case MotionStyle::Smooth: return "SMOOTH";
+    case MotionStyle::Modern: return "MODERN";
+    case MotionStyle::Original: break;
+    }
+    return "ORIGINAL";
+}
 // Rows the panel shows at once; longer pages scroll.
 constexpr unsigned kNativeSettingsVisibleRows = 9u;
 
@@ -704,7 +713,7 @@ unsigned native_settings_row_count(unsigned tab) {
     case 1: return fsr3_available() ? 19u : 18u;
     case 2: return controls_row_count();
     case 3: return 6u;
-    case 4: return 3u;
+    case 4: return 4u;
     default: return 0u;
     }
 }
@@ -1232,6 +1241,16 @@ void adjust_native_setting_unlogged(int delta) {
         const GameLanguage next = kGameLanguages[step(std::min(index, 2u), 3u)];
         if (next != settings.language) {
             settings.language = next;
+            set_runtime_settings(settings);
+            s_native_settings_dirty.store(true, std::memory_order_release);
+        }
+    }
+    if (tab == 4u && row == 3u) {
+        // The motion style changes live (no apply).
+        const auto next = static_cast<MotionStyle>(
+            step(std::min(static_cast<unsigned>(settings.motion_style), 2u), 3u));
+        if (next != settings.motion_style) {
+            settings.motion_style = next;
             set_runtime_settings(settings);
             s_native_settings_dirty.store(true, std::memory_order_release);
         }
@@ -9761,6 +9780,7 @@ std::string native_settings_row_text(
             static constexpr const char* kNames[] = {"AUTO", "WII REMOTE", "XBOX", "DUALSENSE"};
             return std::string("BUTTON PROMPTS: ") + kNames[static_cast<unsigned>(runtime.button_prompts) % 4u];
         }
+        if (row == 3u) return std::string("MOTION: ") + motion_style_name(runtime.motion_style);
         return {};
     default:
         return {};

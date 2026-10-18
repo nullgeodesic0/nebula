@@ -7,8 +7,8 @@ namespace Nebula.Launcher
 {
     /// <summary>
     /// General keys of the runtime's runtime_settings.ini (runtime_settings.cpp). The in-game GENERAL page
-    /// saves the same file, and a running game takes the file's text speed (and its language at the next
-    /// start). Save writes only the settings changed here since Load (SettingsFile); unknown keys are kept.
+    /// saves the same file, and a running game takes the file's text speed and motion style (and its
+    /// language at the next start). Save writes only the settings changed here since Load (SettingsFile); unknown keys are kept.
     /// </summary>
     internal sealed class GeneralSettings
     {
@@ -18,11 +18,18 @@ namespace Nebula.Launcher
         public static readonly string[] Languages = { "English", "Français", "Español" };
         private static readonly string[] LanguageKeys = { "english", "french", "spanish" };
 
+        /// <summary>How characters move (motion_style.h), and their runtime_settings.ini values.</summary>
+        public static readonly string[] MotionStyles = { "Original", "Smooth (looks only)", "Modern (smooth, more responsive Mario)" };
+        private static readonly string[] MotionStyleKeys = { "original", "smooth", "modern" };
+
         /// <summary>Steps of dialogue text revealed per frame, 1 to 3.</summary>
         public int TextSpeed = 1;
 
         /// <summary>Index into <see cref="Languages"/>; the game starts in it.</summary>
         public int Language = 0;
+
+        /// <summary>Index into <see cref="MotionStyles"/>; a running game takes it at once.</summary>
+        public int MotionStyle = 0;
 
         public static GeneralSettings Load()
         {
@@ -45,6 +52,11 @@ namespace Nebula.Launcher
                     int index = Array.FindIndex(LanguageKeys, k => string.Equals(k, value, StringComparison.OrdinalIgnoreCase));
                     if (index >= 0) settings.Language = index;
                 }
+                if (key == "motion_style")
+                {
+                    int index = Array.FindIndex(MotionStyleKeys, k => string.Equals(k, value, StringComparison.OrdinalIgnoreCase));
+                    if (index >= 0) settings.MotionStyle = index;
+                }
             }
             settings.read = SettingsFile.Snapshot(settings.Values());
             return settings;
@@ -59,6 +71,7 @@ namespace Nebula.Launcher
             {
                 new KeyValuePair<string, string>("text_speed", Math.Max(1, Math.Min(TextSpeed, 3)).ToString(System.Globalization.CultureInfo.InvariantCulture)),
                 new KeyValuePair<string, string>("language", LanguageKeys[Math.Max(0, Math.Min(Language, LanguageKeys.Length - 1))]),
+                new KeyValuePair<string, string>("motion_style", MotionStyleKeys[Math.Max(0, Math.Min(MotionStyle, MotionStyleKeys.Length - 1))]),
             };
         }
 

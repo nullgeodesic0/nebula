@@ -591,6 +591,33 @@ int main() {
     passed &= expect(galaxy::get_runtime_settings().language == GameLanguage::English,
                      "a language code outside the three is replaced by English");
 
+    using galaxy::MotionStyle;
+    write_text(settings_path, "motion_style=smooth\n");
+    galaxy::load_runtime_settings_from_file();
+    passed &= expect(galaxy::get_runtime_settings().motion_style == MotionStyle::Smooth, "the smooth motion style loads");
+    write_text(settings_path, "motion_style=Modern\n");
+    galaxy::load_runtime_settings_from_file();
+    passed &= expect(galaxy::get_runtime_settings().motion_style == MotionStyle::Modern,
+                     "a motion style name in any case loads");
+    write_text(settings_path, "motion_style=wobbly\n");
+    galaxy::load_runtime_settings_from_file();
+    passed &= expect(galaxy::get_runtime_settings().motion_style == MotionStyle::Original,
+                     "an unknown motion style keeps the game's");
+    _putenv_s("GALAXY_MOTION_STYLE", "smooth");
+    galaxy::load_runtime_settings_from_file();
+    passed &= expect(galaxy::get_runtime_settings().motion_style == MotionStyle::Smooth,
+                     "the motion style has an environment override");
+    _putenv_s("GALAXY_MOTION_STYLE", "");
+    passed &= expect(
+        galaxy::save_runtime_settings_to_file() &&
+            read_text(settings_path).find("motion_style=smooth") != std::string::npos,
+        "the motion style is saved with the other settings");
+    galaxy::RuntimeSettings odd_style = galaxy::get_runtime_settings();
+    odd_style.motion_style = static_cast<MotionStyle>(7);
+    galaxy::set_runtime_settings(odd_style);
+    passed &= expect(galaxy::get_runtime_settings().motion_style == MotionStyle::Original,
+                     "a motion style outside the three is replaced by the game's");
+
     // The game's first question fixes the language for the session.
     GameLanguage running{};
     passed &= expect(!galaxy::running_game_language(running), "no language is fixed before the game asks");
