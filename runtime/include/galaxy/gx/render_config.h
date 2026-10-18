@@ -132,7 +132,7 @@ struct RenderConfig {
     unsigned depth_of_field      = 40;
     // Camera-rotation motion blur 0-100 (shutter, 0 = off); key motion_blur,
     // env GALAXY_MOTION_BLUR.
-    unsigned motion_blur         = 50;
+    unsigned motion_blur         = 0;
     // Screen-space reflections 0-100 on reflective materials (0 = off); key
     // reflections, env GALAXY_REFLECTIONS, world-unit ray length
     // GALAXY_REFLECTION_DISTANCE.
