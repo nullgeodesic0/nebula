@@ -259,6 +259,14 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 // viewport in target pixels (x, y, w, h); g_con0 = (near, far, A, B) and
 // g_con1 = (C, D, radius, strength) as floats, A..D the GX projection terms
 // (clip x = A x + B z, clip y = C y + D z); g_con2.x = bias.
+//
+// The same pass marches contact shadows (screen-space shadows): a short ray from
+// each pixel toward the scene's main light, tested against the depth buffer, so
+// small occluders (Mario's limbs and cap, ledges, grass, coins) shadow what is
+// right behind them. g_con2.yzw = the light's view-space position; g_con3 =
+// (shadow strength 0-1, ray length, occluder thickness) as floats, lengths in
+// world units. The target holds R = occlusion, G = shadow visibility; blur and
+// apply treat both channels alike and the apply multiplies their product.
 #endif
 
 #if defined(PASS_SSAO_AO) || defined(PASS_SSAO_BLUR)
@@ -288,11 +296,70 @@ bool SsaoInView(int2 p) {
 #endif
 
 #if defined(PASS_SSAO_AO)
+// Target pixel of a view-space point (inverse of SsaoViewPos).
+float2 SsaoProject(float3 v) {
+    const float zv = -v.z;
+    const float nx = asfloat(g_con0.z) * v.x / zv - asfloat(g_con0.w);
+    const float ny = asfloat(g_con1.x) * v.y / zv - asfloat(g_con1.y);
+    return float2(g_params.x + (nx + 1.0) * 0.5 * g_params.z,
+                  g_params.y + (1.0 - ny) * 0.5 * g_params.w);
+}
+
+// Visibility of the light from P (pixel p), 1 = lit. Facing away from the light
+// returns 1: the game's own lighting already darkens those surfaces. `slope` is
+// the depth change to the next pixel on P's own surface, the tolerance that
+// keeps surfaces seen at a grazing angle from shadowing themselves.
+float ContactShadow(int2 p, float3 P, float3 N, float zv, float slope, float noise) {
+    const float strength = asfloat(g_con3.x);
+    if (strength <= 0.0) return 1.0;
+    const float3 L = normalize(float3(asfloat(g_con2.y), asfloat(g_con2.z), asfloat(g_con2.w)) - P);
+    const float ndl = dot(N, L);
+    if (ndl <= 0.0) return 1.0;
+    const float ray_length = asfloat(g_con3.y);
+    const float thickness = asfloat(g_con3.z) + 0.01 * zv;
+    // Lift the start off the surface by about a pixel's depth error so flat
+    // ground does not shadow itself.
+    const float lift = 0.0015 * zv;
+    const float3 origin = P + N * lift;
+    // A ray toward the camera stops at the near plane.
+    const float3 ray = L * ray_length;
+    const float reach = ray.z > 0.0 ? saturate((-origin.z - asfloat(g_con0.x)) / ray.z) : 1.0;
+    const float3 end = origin + ray * reach;
+    // Rays shorter than two pixels on screen cannot find an occluder.
+    const float2 span = SsaoProject(end) - SsaoProject(origin);
+    if (dot(span, span) < 4.0) return 1.0;
+
+    const int kSteps = 16;
+    float occlusion = 0.0;
+    [loop] for (int k = 0; k < kSteps; ++k) {
+        // Steps grow toward the end of the ray, where precision matters less.
+        const float t = (float(k) + noise) / float(kSteps);
+        const float3 S = lerp(origin, end, t * t);
+        const float2 sp = SsaoProject(S);
+        const int2 q = int2(floor(sp));
+        if (!SsaoInView(q)) break;
+        if (all(q == p)) continue;
+        const float zq = SsaoViewZ(q);
+        if (zq < 0.0) continue;
+        // Positive when the depth buffer holds a surface in front of the sample.
+        const float delta = -S.z - zq;
+        if (delta > 0.002 * zq + slope && delta < thickness) {
+            // Occluders near the end of the ray cast a softer, fainter shadow.
+            occlusion = 1.0 - t * t;
+            break;
+        }
+    }
+    // Near grazing angles the game's lighting is already dim; fade the shadow in
+    // with N.L so terminators do not get a hard double edge.
+    return 1.0 - occlusion * strength * saturate(ndl * 4.0);
+}
+
 float4 PSMain(FullscreenOut i) : SV_Target {
     const int2 p = int2(i.pos.xy);
     if (!SsaoInView(p)) return float4(1.0, 1.0, 1.0, 1.0);
     const float zv = SsaoViewZ(p);
-    if (zv < 0.0) return float4(1.0, 1.0, 1.0, 1.0);
+    // Nothing drawn, or the far-plane sky.
+    if (zv < 0.0 || zv > 0.98 * asfloat(g_con0.y)) return float4(1.0, 1.0, 1.0, 1.0);
     const float3 P = SsaoViewPos(p, zv);
 
     // Normal from the nearer neighbour on each axis (keeps silhouettes clean).
@@ -314,13 +381,17 @@ float4 PSMain(FullscreenOut i) : SV_Target {
         if (dot(N, P) > 0.0) N = -N;  // face the camera
     }
 
-    const float radius = asfloat(g_con1.z);
-    const float strength = asfloat(g_con1.w);
-    const float bias = asfloat(g_con2.x);
-    const float radius_px = clamp(radius * asfloat(g_con1.x) / zv * 0.5 * g_params.w, 3.0, 96.0);
     // A 4x4 ordered pattern that the blur pass averages away exactly.
     static const float kBayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
     const float noise = kBayer[(p.y & 3) * 4 + (p.x & 3)] / 16.0 + 0.03125;
+    const float slope = max(abs(dx.z), abs(dy.z));
+    const float shadow = ContactShadow(p, P, N, zv, slope, noise);
+
+    const float radius = asfloat(g_con1.z);
+    const float strength = asfloat(g_con1.w);
+    if (strength <= 0.0) return float4(1.0, shadow, 1.0, 1.0);
+    const float bias = asfloat(g_con2.x);
+    const float radius_px = clamp(radius * asfloat(g_con1.x) / zv * 0.5 * g_params.w, 3.0, 96.0);
     const float angle0 = noise * 6.2831853;
     const int kSamples = 12;
     float occlusion = 0.0;
@@ -338,7 +409,7 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     }
     const float ao = saturate(1.0 - occlusion * radius * 2.0 / float(kSamples));
     const float shaped = lerp(1.0, ao * ao, strength);
-    return float4(shaped, shaped, shaped, 1.0);
+    return float4(shaped, shadow, 1.0, 1.0);
 }
 #endif
 
@@ -348,19 +419,19 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     const int2 p = int2(i.pos.xy);
     const float zc = SsaoViewZ(p);
     if (zc < 0.0 || !SsaoInView(p)) return float4(1.0, 1.0, 1.0, 1.0);
-    float sum = 0.0;
+    float2 sum = float2(0.0, 0.0);
     float weight = 0.0;
     [unroll] for (int y = -2; y < 2; ++y) {
         [unroll] for (int x = -2; x < 2; ++x) {
             const int2 q = p + int2(x, y);
             const float zq = SsaoViewZ(q);
             if (zq < 0.0 || !SsaoInView(q) || abs(zq - zc) > 0.04 * zc) continue;
-            sum += aoTex.Load(int3(q, 0)).r;
+            sum += aoTex.Load(int3(q, 0)).rg;
             weight += 1.0;
         }
     }
-    const float ao = weight > 0.0 ? sum / weight : 1.0;
-    return float4(ao, ao, ao, 1.0);
+    const float2 ao = weight > 0.0 ? sum / weight : float2(1.0, 1.0);
+    return float4(ao, 1.0, 1.0);
 }
 #endif
 
@@ -369,7 +440,8 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 Texture2D aoTex : register(t0);
 FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
 float4 PSMain(FullscreenOut i) : SV_Target {
-    const float ao = aoTex.Load(int3(int2(i.pos.xy), 0)).r;
+    const float2 terms = aoTex.Load(int3(int2(i.pos.xy), 0)).rg;
+    const float ao = terms.r * terms.g;
     return float4(ao, ao, ao, 1.0);
 }
 #endif

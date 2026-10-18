@@ -65,7 +65,8 @@ constexpr DXGI_FORMAT kStencilFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 constexpr unsigned kRtvSlots = 16u;
 constexpr unsigned kSsaoAoSlot = 14u;
 constexpr unsigned kSsaoBlurSlot = 15u;
-constexpr DXGI_FORMAT kSsaoFormat = DXGI_FORMAT_R8_UNORM;
+// R ambient occlusion, G contact shadow visibility.
+constexpr DXGI_FORMAT kSsaoFormat = DXGI_FORMAT_R8G8_UNORM;
 constexpr DXGI_FORMAT kDepthSrvFormat = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
 constexpr DXGI_FORMAT kBloomFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr unsigned kFinalSlot = 4u;
@@ -1035,6 +1036,12 @@ bool PostProcessor::record_ssao(ID3D12GraphicsCommandList* list, DescriptorRing&
     c.con1[2] = bits(in.radius);
     c.con1[3] = bits(in.strength);
     c.con2[0] = bits(in.bias);
+    c.con2[1] = bits(in.light[0]);
+    c.con2[2] = bits(in.light[1]);
+    c.con2[3] = bits(in.light[2]);
+    c.con3[0] = bits(in.shadow_strength);
+    c.con3[1] = bits(in.shadow_length);
+    c.con3[2] = bits(in.shadow_thickness);
     const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
                             static_cast<float>(in.height), 0.0f, 1.0f};
     list->SetGraphicsRootSignature(root_signature_.Get());

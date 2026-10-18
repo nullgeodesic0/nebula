@@ -501,8 +501,13 @@ public:
     // draw; with set_scene_camera this makes the scene's depth usable for ambient
     // occlusion. Cleared at every scene begin.
     void set_scene_projection(const float abcd[4], const float viewport[4]) noexcept;
-    // At scene end: ambient occlusion from the EFB depth, multiplied onto the EFB
-    // colour. True when it recorded (GX bindings are then stale).
+    // View-space position of the light the scene's contact shadows are cast
+    // from (the XF light position, which the game places in view space).
+    // Cleared at every scene begin.
+    void set_scene_light(const float position[3]) noexcept;
+    // At scene end: ambient occlusion and contact shadows from the EFB depth,
+    // multiplied onto the EFB colour. True when it recorded (GX bindings are
+    // then stale).
     [[nodiscard]] bool record_scene_ssao();
     // GX copy-clear: color from the latched AR/GB regs, depth from z24
     // (converted z24 / 0xFFFFFF into the D24 target).  The clear is scoped to
@@ -852,6 +857,8 @@ private:
     float scene_proj_[4]{};
     float scene_viewport_[4]{};
     bool scene_projection_valid_ = false;
+    float scene_light_[3]{};
+    bool scene_light_valid_ = false;
     Microsoft::WRL::ComPtr<ID3D12Resource> motion_target_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> motion_rtv_heap_;
     D3D12_CPU_DESCRIPTOR_HANDLE motion_rtv_{};

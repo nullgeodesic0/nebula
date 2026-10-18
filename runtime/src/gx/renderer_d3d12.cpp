@@ -538,6 +538,7 @@ unsigned pending_settings_changes() {
     changes += d.contrast != live.contrast;
     changes += d.vignette != live.vignette;
     changes += d.ssao != live.ssao;
+    changes += d.contact_shadows != live.contact_shadows;
     changes += d.anisotropic_filtering != live.anisotropic_filtering;
     changes += d.enhanced_mipmaps != live.enhanced_mipmaps;
     changes += d.per_pixel_lighting != live.per_pixel_lighting;
@@ -695,7 +696,7 @@ unsigned graphics_row(unsigned row) {
 unsigned native_settings_row_count(unsigned tab) {
     switch (tab % kNativeSettingsTabCount) {
     case 0: return 8u;
-    case 1: return fsr3_available() ? 14u : 13u;
+    case 1: return fsr3_available() ? 15u : 14u;
     case 2: return controls_row_count();
     case 3: return 6u;
     case 4: return 2u;
@@ -799,6 +800,7 @@ void apply_native_settings_draft() {
     applied.contrast = next.contrast;
     applied.vignette = next.vignette;
     applied.ssao = next.ssao;
+    applied.contact_shadows = next.contact_shadows;
     applied.anisotropic_filtering = next.anisotropic_filtering;
     applied.enhanced_mipmaps = next.enhanced_mipmaps;
     applied.per_pixel_lighting = next.per_pixel_lighting;
@@ -1075,6 +1077,10 @@ void adjust_native_setting_unlogged(int delta) {
         case 13:
             draft.ssao = static_cast<unsigned>(std::clamp(
                 static_cast<int>(std::min(draft.ssao, 100u)) + delta * 5, 0, 100));
+            break;
+        case 14:
+            draft.contact_shadows = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.contact_shadows, 100u)) + delta * 5, 0, 100));
             break;
         default: return;
         }
@@ -7068,6 +7074,7 @@ bool RendererD3D12::scene_temporal_begin(float& jitter_x, float& jitter_y) {
     jitter_x = 0.0f;
     jitter_y = 0.0f;
     scene_projection_valid_ = false;
+    scene_light_valid_ = false;
     scene_temporal_ = false;
     if (!temporal_mode() || output_efb_active_) {
         temporal_.reset();
@@ -7125,6 +7132,22 @@ void RendererD3D12::set_scene_projection(const float abcd[4], const float viewpo
     scene_projection_valid_ = true;
 }
 
+void RendererD3D12::set_scene_light(const float position[3]) noexcept {
+    std::memcpy(scene_light_, position, sizeof(scene_light_));
+    scene_light_valid_ = true;
+}
+
+namespace {
+float env_float(const char* name, float fallback, float minimum) {
+    char v[32]{};
+    std::size_t n = 0;
+    if (getenv_s(&n, v, sizeof(v), name) == 0 && n > 1) {
+        return std::max(minimum, static_cast<float>(std::atof(v)));
+    }
+    return fallback;
+}
+}  // namespace
+
 bool RendererD3D12::record_scene_ssao() {
     if (!scene_projection_valid_ || output_efb_active_ || replay_recording_ ||
         !post_process_.ready() || !post_process_.ssao_ready() || !efb_color_ || !efb_depth_ ||
@@ -7132,7 +7155,8 @@ bool RendererD3D12::record_scene_ssao() {
         return false;
     }
     const RenderConfig cfg = get_render_config();
-    if (cfg.ssao == 0u) {
+    const bool shadows = cfg.contact_shadows != 0u && scene_light_valid_;
+    if (cfg.ssao == 0u && !shadows) {
         return false;
     }
     const float scale = static_cast<float>(efb_scale_);
@@ -7146,16 +7170,16 @@ bool RendererD3D12::record_scene_ssao() {
     in.camera_near = scene_camera_[0];
     in.camera_far = scene_camera_[1];
     for (unsigned i = 0; i < 4u; ++i) in.proj[i] = scene_proj_[i];
-    static const float radius = [] {
-        char v[32]{};
-        std::size_t n = 0;
-        if (getenv_s(&n, v, sizeof(v), "GALAXY_SSAO_RADIUS") == 0 && n > 1) {
-            return std::max(1.0f, static_cast<float>(std::atof(v)));
-        }
-        return 120.0f;
-    }();
+    static const float radius = env_float("GALAXY_SSAO_RADIUS", 120.0f, 1.0f);
     in.radius = radius;
     in.strength = static_cast<float>(std::min(cfg.ssao, 100u)) / 100.0f;
+    if (shadows) {
+        static const float shadow_length = env_float("GALAXY_CONTACT_SHADOW_LENGTH", 80.0f, 1.0f);
+        std::memcpy(in.light, scene_light_, sizeof(in.light));
+        in.shadow_strength = static_cast<float>(std::min(cfg.contact_shadows, 100u)) / 100.0f;
+        in.shadow_length = shadow_length;
+        in.shadow_thickness = shadow_length * 0.4f;
+    }
 
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -9508,6 +9532,9 @@ std::string native_settings_row_text(
             return text;
         case 13:
             std::snprintf(text, sizeof(text), "AMBIENT OCCLUSION: %u%%", std::min(render.ssao, 100u));
+            return text;
+        case 14:
+            std::snprintf(text, sizeof(text), "CONTACT SHADOWS: %u%%", std::min(render.contact_shadows, 100u));
             return text;
         default:
             return {};

@@ -211,6 +211,8 @@ static void apply_kv(RenderConfig& cfg, const char* key, const char* val) {
         cfg.vignette = std::min(parse_uint(val, cfg.vignette), 100u);
     } else if (std::strcmp(key, "ssao") == 0) {
         cfg.ssao = std::min(parse_uint(val, cfg.ssao), 100u);
+    } else if (std::strcmp(key, "contact_shadows") == 0) {
+        cfg.contact_shadows = std::min(parse_uint(val, cfg.contact_shadows), 100u);
     }
     else if (std::strcmp(key, "ray_tracing_enabled") == 0) cfg.ray_tracing_enabled = parse_bool(val, false);
     else if (std::strcmp(key, "rt_shadow_quality") == 0) cfg.rt_shadow_quality = std::clamp(parse_uint(val, 0), 0u, 3u);
@@ -295,6 +297,7 @@ static void apply_env_overrides(RenderConfig& cfg) {
     apply_env(cfg, "GALAXY_CONTRAST", "contrast");
     apply_env(cfg, "GALAXY_VIGNETTE", "vignette");
     apply_env(cfg, "GALAXY_SSAO", "ssao");
+    apply_env(cfg, "GALAXY_CONTACT_SHADOWS", "contact_shadows");
     apply_env(cfg, "GALAXY_RAY_TRACING_ENABLED", "ray_tracing_enabled");
     apply_env(cfg, "GALAXY_RT_SHADOW_QUALITY", "rt_shadow_quality");
     apply_env(cfg, "GALAXY_RT_AO_ENABLED", "rt_ao_enabled");
@@ -338,6 +341,7 @@ static void clamp_unimplemented_features(RenderConfig& cfg) {
     cfg.contrast = std::min(cfg.contrast, 200u);
     cfg.vignette = std::min(cfg.vignette, 100u);
     cfg.ssao = std::min(cfg.ssao, 100u);
+    cfg.contact_shadows = std::min(cfg.contact_shadows, 100u);
     // Win32 client geometry is signed-int based even though DXGI dimensions
     // are UINT. Keep direct API callers inside the common representable range.
     constexpr unsigned kMaxWindowDimension =
@@ -642,6 +646,7 @@ bool save_render_config_to_file() {
              << "contrast=" << cfg.contrast << '\n'
              << "vignette=" << cfg.vignette << '\n'
              << "ssao=" << cfg.ssao << '\n'
+             << "contact_shadows=" << cfg.contact_shadows << '\n'
              << "internal_follow_window="
              << (cfg.internal_follow_window ? 1u : 0u) << '\n'
              << "hud_output_resolution="

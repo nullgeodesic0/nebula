@@ -6256,6 +6256,45 @@ void GxBackend::apply_scene_jitter(const GxVsConstants& cpu, GxVsConstants& uplo
     capture_scene_camera();
 }
 
+void GxBackend::capture_scene_light() {
+    if (scene_light_captured_ ||
+        state_.xf(static_cast<std::uint16_t>(xf::kProjectionBase + 6u)) != 0u ||
+        state_.gen_mode().num_color_chans == 0u) {
+        return;
+    }
+    const XfChannelCtrl color0 = state_.channel_ctrl(0u);
+    if (!color0.lighting_enable || color0.diffuse_func == 0u || color0.light_mask == 0u) {
+        return;
+    }
+    // XF light layout (16 words): 3 colour RGBA8, 4-6 cos attenuation,
+    // 7-9 distance attenuation, 10-12 position, 13-15 direction.
+    int best = -1;
+    unsigned best_luma = 0u;
+    for (unsigned light = 0; light < 8u; ++light) {
+        if ((color0.light_mask & (1u << light)) == 0u) continue;
+        const std::uint32_t rgba = state_.xf(
+            static_cast<std::uint16_t>(xf::kLightsBase + light * 16u + 3u));
+        const unsigned luma = 2u * ((rgba >> 24) & 0xFFu) + 5u * ((rgba >> 16) & 0xFFu) +
+                              ((rgba >> 8) & 0xFFu);
+        if (luma > best_luma) {
+            best_luma = luma;
+            best = static_cast<int>(light);
+        }
+    }
+    if (best < 0) {
+        return;
+    }
+    scene_light_captured_ = true;
+    float position[3];
+    for (unsigned i = 0; i < 3u; ++i) {
+        position[i] = std::bit_cast<float>(state_.xf(static_cast<std::uint16_t>(
+            xf::kLightsBase + static_cast<unsigned>(best) * 16u + 10u + i)));
+    }
+    if (std::isfinite(position[0]) && std::isfinite(position[1]) && std::isfinite(position[2])) {
+        renderer_.set_scene_light(position);
+    }
+}
+
 void GxBackend::capture_scene_camera() {
     if (scene_camera_captured_ ||
         state_.xf(static_cast<std::uint16_t>(xf::kProjectionBase + 6u)) != 0u) {
@@ -6417,6 +6456,7 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
             scene_jitter_px_[0], scene_jitter_px_[1]);
         motion_scene_ = temporal_scene_ && renderer_.begin_motion_scene();
         scene_camera_captured_ = false;
+        scene_light_captured_ = false;
         history_scene_ = temporal_scene_ || interp_recording_;
         if (interp_recording_) {
             note_interp_log_completion();
@@ -10320,6 +10360,9 @@ ID3D12PipelineState* GxBackend::flush_draw_state(
         std::memcpy(vs_alloc.cpu, &vs_c, sizeof(vs_c));
         if (scene_phase_ && !scene_camera_captured_) {
             capture_scene_camera();
+        }
+        if (scene_phase_ && !scene_light_captured_) {
+            capture_scene_light();
         }
         if (history_scene_) [[unlikely]] {
             write_scene_vs_constants(vs_c, *reinterpret_cast<GxVsConstants*>(vs_alloc.cpu));

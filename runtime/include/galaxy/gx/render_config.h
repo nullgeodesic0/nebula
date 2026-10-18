@@ -123,6 +123,10 @@ struct RenderConfig {
     // Ambient occlusion strength 0-100 on the 3D scene (0 = off); key ssao,
     // env GALAXY_SSAO, world-unit radius GALAXY_SSAO_RADIUS.
     unsigned ssao                = 40;
+    // Screen-space contact shadows 0-100 from the scene's main light (0 = off);
+    // key contact_shadows, env GALAXY_CONTACT_SHADOWS, world-unit ray length
+    // GALAXY_CONTACT_SHADOW_LENGTH.
+    unsigned contact_shadows     = 50;
 
     // Reserved for future DXR work. Clamped off until there is a real DXR
     // capability query, acceleration-structure path, ray PSO, and visible

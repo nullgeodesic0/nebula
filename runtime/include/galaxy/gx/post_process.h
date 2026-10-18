@@ -141,8 +141,9 @@ public:
                 std::uint64_t frame_index,
                 unsigned frames_in_flight);
 
-    // Ambient occlusion on the scene EFB, multiplied onto its colour (see the
-    // SSAO notes in post_process.hlsl). All sizes are EFB pixels at the render scale.
+    // Ambient occlusion and contact shadows on the scene EFB, multiplied onto its
+    // colour (see the SSAO notes in post_process.hlsl). All sizes are EFB pixels
+    // at the render scale.
     struct SsaoInputs {
         ID3D12Resource* depth = nullptr;            // R24G8 typeless, DEPTH_WRITE-free (shader resource state)
         D3D12_CPU_DESCRIPTOR_HANDLE color_rtv{};    // the EFB colour render target
@@ -155,6 +156,11 @@ public:
         float radius = 120.0f;                      // world units
         float strength = 0.5f;                      // 0-1
         float bias = 0.02f;
+        // Contact shadows: march from each pixel toward the light through the depth.
+        float light[3]{};                           // view-space light position
+        float shadow_strength = 0.0f;               // 0-1; 0 skips the march
+        float shadow_length = 80.0f;                // world units
+        float shadow_thickness = 30.0f;             // world units an occluder is assumed deep
     };
     // True when the passes were recorded. The caller moves the depth buffer into
     // PIXEL_SHADER_RESOURCE before the call and restores it after.
