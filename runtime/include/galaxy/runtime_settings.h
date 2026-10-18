@@ -1,5 +1,7 @@
 #pragma once
 
+#include "galaxy/motion_style.h"
+
 #include <cstdint>
 
 namespace galaxy {
@@ -36,6 +38,8 @@ struct RuntimeSettings {
     unsigned text_speed = 1u;
     // The language to start the game in. A change takes effect at the next start.
     GameLanguage language = GameLanguage::English;
+    // Animation smoothing and Mario's movement feel (motion_style.h). Changes live.
+    MotionStyle motion_style = MotionStyle::Original;
 };
 
 // The language the game runs in this session: the setting when the game first asks (at boot), then
@@ -45,6 +49,8 @@ struct RuntimeSettings {
 [[nodiscard]] bool running_game_language(GameLanguage& language) noexcept;
 // "english", "french" or "spanish" (runtime_settings.ini).
 [[nodiscard]] const char* game_language_key(GameLanguage language) noexcept;
+// "original", "smooth" or "modern" (runtime_settings.ini).
+[[nodiscard]] const char* motion_style_key(MotionStyle style) noexcept;
 
 // A coherent input-source snapshot. The generation changes only when the selected input mode changes,
 // so device FIFOs can reject reports acquired under an older source. Unrelated audio-setting writes are

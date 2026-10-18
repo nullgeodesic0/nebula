@@ -2469,6 +2469,7 @@ fn lower_resident_integer_direct_calls(
                         && !(target == 0x8045_14EC && pc == 0x8038_D30C)
                         && pc != 0x803A_BDF0
                         && !(target == 0x8039_8D3C && pc == 0x8039_8E7C)
+                        && !is_animation_interpole_call(target)
                 });
                 let lean_contract = lean_body_call_contract(
                     target,
@@ -7630,6 +7631,11 @@ fn emit_direct_guest_call_with_exact_fpu(
         )
         .map_err(|_| TranslationError::Formatting)?;
     }
+    // XanimePlayer::updateInterpoleRatio, called and tail-called with the player in r3: the runtime
+    // reshapes the cross-fade it is about to step for the motion style setting.
+    if is_animation_interpole_call(target) {
+        output.push_str(&site_hook_call(pc, "AnimationInterpole", 0));
+    }
     fn emit_post_call_hook(
         output: &mut String,
         target: u32,
@@ -7948,6 +7954,10 @@ fn site_hook_call(pc: u32, kind: &str, argument: u32) -> String {
     format!(
         "    galaxy::site_hook(services, context, memory, 0x{pc:08X}u, galaxy::SiteHookKind::{kind}, {argument}u);\n"
     )
+}
+
+fn is_animation_interpole_call(target: u32) -> bool {
+    target == 0x8001_BB50
 }
 
 fn rmge01_native_screen_width_call(address: u32, function_end: u32, pc: u32, word: u32) -> bool {
@@ -14344,6 +14354,36 @@ mod tests {
         assert!(!lower_instruction_fixture(0x8034_1038, &words).contains(hook));
         words[(0x8034_10AC - 0x8034_103C) / 4] = 0x807F_0030;
         assert!(!lower_instruction_fixture(0x8034_103C, &words).contains(hook));
+    }
+
+    #[test]
+    fn rmge01_animation_interpole_hook_precedes_every_direct_call() {
+        const TARGET: u32 = 0x8001_BB50; // XanimePlayer::updateInterpoleRatio
+        let hook = "galaxy::site_hook(services, context, memory, 0x8001BAF0u, galaxy::SiteHookKind::AnimationInterpole, 0u);";
+        let link = [
+            0x4800_0001 | (TARGET.wrapping_sub(0x8001_BAF0) & 0x03FF_FFFC),
+            0x4E80_0020,
+        ];
+        let tail = [0x4800_0000 | (TARGET.wrapping_sub(0x8001_BAF0) & 0x03FF_FFFC)];
+        for words in [&link[..], &tail[..]] {
+            let output = lower_instruction_fixture(0x8001_BAF0, words);
+            assert_eq!(output.matches(hook).count(), 1);
+            let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_be_bytes()).collect();
+            let entries = BTreeMap::from([(TARGET, TARGET)]);
+            let output = lower_words_for_module(0x8001_BAF0, &bytes, &BTreeSet::new(), &entries)
+                .expect("resolved interpole call lowers");
+            let at = output.find(hook).expect("the resolved call keeps the hook");
+            assert!(
+                at < output
+                    .find(&format!("fn_{TARGET:08X}"))
+                    .expect("the call follows")
+            );
+        }
+        let other = [
+            0x4800_0001 | (0x8001_BB54u32.wrapping_sub(0x8001_BAF0) & 0x03FF_FFFC),
+            0x4E80_0020,
+        ];
+        assert!(!lower_instruction_fixture(0x8001_BAF0, &other).contains("AnimationInterpole"));
     }
 
     #[test]

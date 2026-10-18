@@ -388,7 +388,8 @@ int main() {
 
     passed &= expect(key(VK_TAB), "Tab enters the general page");
     snapshot = galaxy::gx::native_settings_overlay_snapshot();
-    passed &= expect(snapshot.tab == 4u && snapshot.row_count == 2u, "general page has text speed and language");
+    passed &= expect(snapshot.tab == 4u && snapshot.row_count == 3u,
+                     "general page has text speed, language and motion style");
     passed &= expect(galaxy::get_runtime_settings().text_speed == 1u, "text speed starts at the game's pace");
     passed &= expect(key(VK_RIGHT) && galaxy::get_runtime_settings().text_speed == 2u, "right raises text speed live");
     passed &= expect(key(VK_RIGHT) && key(VK_RIGHT) && galaxy::get_runtime_settings().text_speed == 3u,
@@ -402,7 +403,20 @@ int main() {
                      "language stops at Spanish");
     passed &= expect(key(VK_LEFT) && key(VK_LEFT) && galaxy::get_runtime_settings().language == galaxy::GameLanguage::English,
                      "left returns to English");
-    passed &= expect(key(VK_UP) && galaxy::gx::native_settings_overlay_snapshot().row == 0u, "up returns to text speed");
+    passed &= expect(key(VK_DOWN) && galaxy::gx::native_settings_overlay_snapshot().row == 2u,
+                     "down selects the motion style");
+    passed &= expect(galaxy::get_runtime_settings().motion_style == galaxy::MotionStyle::Original,
+                     "the motion style starts as the game's");
+    passed &= expect(key(VK_RIGHT) && galaxy::get_runtime_settings().motion_style == galaxy::MotionStyle::Smooth,
+                     "right chooses the smooth style live");
+    passed &= expect(key(VK_RIGHT) && key(VK_RIGHT) &&
+                         galaxy::get_runtime_settings().motion_style == galaxy::MotionStyle::Modern,
+                     "the motion style stops at modern");
+    passed &= expect(key(VK_LEFT) && key(VK_LEFT) &&
+                         galaxy::get_runtime_settings().motion_style == galaxy::MotionStyle::Original,
+                     "left returns to the game's motion");
+    passed &= expect(key(VK_UP) && key(VK_UP) && galaxy::gx::native_settings_overlay_snapshot().row == 0u,
+                     "up returns to text speed");
     passed &= expect(key(VK_TAB), "Tab navigation wraps");
     passed &= expect(
         galaxy::gx::native_settings_overlay_snapshot().tab == 0u,

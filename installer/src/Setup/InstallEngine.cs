@@ -62,9 +62,10 @@ namespace Nebula.Setup
         /// compiled objects); an update recompiles installed modules of a lower generation. 2 (1.0.1): the
         /// site hooks of the text speed (TextStep) and language (Language) settings; fused multiply-adds
         /// without the C runtime (a 1.0.0 SSE2 module calls its soft-float fma for every fused guest
-        /// instruction); no LodDistance hook.
+        /// instruction); no LodDistance hook. 3: the motion style setting's site hook
+        /// (AnimationInterpole) before XanimePlayer::updateInterpoleRatio.
         /// </summary>
-        public const int ModuleGeneration = 2;
+        public const int ModuleGeneration = 3;
 
         /// <summary>Installed modules an update must recompile rather than relink.</summary>
         private static bool ModulesNeedRebuild(InstalledInfo current)
