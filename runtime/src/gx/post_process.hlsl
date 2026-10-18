@@ -251,6 +251,129 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 }
 #endif
 
+#if defined(PASS_SSAO_AO) || defined(PASS_SSAO_BLUR) || defined(PASS_SSAO_APPLY)
+// Screen-space ambient occlusion on the EFB at the end of the 3D scene
+// (Alchemy-style, after McGuire et al. 2011). Depth is the renderer's reversed
+// 24-bit depth: d = 1 at the camera's near plane, 0 at far, linear in 1/z.
+// Constants: g_rt_metrics = target (1/w, 1/h, w, h); g_params = the scene
+// viewport in target pixels (x, y, w, h); g_con0 = (near, far, A, B) and
+// g_con1 = (C, D, radius, strength) as floats, A..D the GX projection terms
+// (clip x = A x + B z, clip y = C y + D z); g_con2.x = bias.
+#endif
+
+#if defined(PASS_SSAO_AO) || defined(PASS_SSAO_BLUR)
+Texture2D depthTex : register(t0);
+FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
+// Distance in front of the camera, or -1 where nothing was drawn.
+float SsaoViewZ(int2 p) {
+    if (any(p < 0) || any(float2(p) >= g_rt_metrics.zw)) return -1.0;
+    const float d = depthTex.Load(int3(p, 0)).r;
+    if (d <= 1e-6) return -1.0;
+    const float inv_near = 1.0 / asfloat(g_con0.x);
+    const float inv_far = 1.0 / asfloat(g_con0.y);
+    return 1.0 / (inv_far + d * (inv_near - inv_far));
+}
+float3 SsaoViewPos(int2 p, float zv) {
+    const float4 vp = g_params;
+    const float nx = 2.0 * ((float(p.x) + 0.5) - vp.x) / vp.z - 1.0;
+    const float ny = 1.0 - 2.0 * ((float(p.y) + 0.5) - vp.y) / vp.w;
+    return float3((nx + asfloat(g_con0.w)) * zv / asfloat(g_con0.z),
+                  (ny + asfloat(g_con1.y)) * zv / asfloat(g_con1.x), -zv);
+}
+bool SsaoInView(int2 p) {
+    const float4 vp = g_params;
+    return float(p.x) >= vp.x && float(p.y) >= vp.y &&
+           float(p.x) < vp.x + vp.z && float(p.y) < vp.y + vp.w;
+}
+#endif
+
+#if defined(PASS_SSAO_AO)
+float4 PSMain(FullscreenOut i) : SV_Target {
+    const int2 p = int2(i.pos.xy);
+    if (!SsaoInView(p)) return float4(1.0, 1.0, 1.0, 1.0);
+    const float zv = SsaoViewZ(p);
+    if (zv < 0.0) return float4(1.0, 1.0, 1.0, 1.0);
+    const float3 P = SsaoViewPos(p, zv);
+
+    // Normal from the nearer neighbour on each axis (keeps silhouettes clean).
+    const float zl = SsaoViewZ(p + int2(-1, 0));
+    const float zr = SsaoViewZ(p + int2(1, 0));
+    const float zu = SsaoViewZ(p + int2(0, -1));
+    const float zd = SsaoViewZ(p + int2(0, 1));
+    float3 dx = float3(0.0, 0.0, 0.0);
+    float3 dy = float3(0.0, 0.0, 0.0);
+    if (zr > 0.0 && (zl < 0.0 || abs(zr - zv) < abs(zl - zv))) dx = SsaoViewPos(p + int2(1, 0), zr) - P;
+    else if (zl > 0.0) dx = P - SsaoViewPos(p + int2(-1, 0), zl);
+    if (zd > 0.0 && (zu < 0.0 || abs(zd - zv) < abs(zu - zv))) dy = SsaoViewPos(p + int2(0, 1), zd) - P;
+    else if (zu > 0.0) dy = P - SsaoViewPos(p + int2(0, -1), zu);
+    float3 N = cross(dx, dy);
+    if (dot(N, N) < 1e-12) {
+        N = -normalize(P);
+    } else {
+        N = normalize(N);
+        if (dot(N, P) > 0.0) N = -N;  // face the camera
+    }
+
+    const float radius = asfloat(g_con1.z);
+    const float strength = asfloat(g_con1.w);
+    const float bias = asfloat(g_con2.x);
+    const float radius_px = clamp(radius * asfloat(g_con1.x) / zv * 0.5 * g_params.w, 3.0, 96.0);
+    // A 4x4 ordered pattern that the blur pass averages away exactly.
+    static const float kBayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+    const float noise = kBayer[(p.y & 3) * 4 + (p.x & 3)] / 16.0 + 0.03125;
+    const float angle0 = noise * 6.2831853;
+    const int kSamples = 12;
+    float occlusion = 0.0;
+    [unroll] for (int k = 0; k < kSamples; ++k) {
+        const float t = (float(k) + 0.5) / float(kSamples);
+        const float angle = angle0 + float(k) * 2.39996323;
+        const float r = radius_px * sqrt(t);
+        const int2 q = p + int2(round(float2(cos(angle), sin(angle)) * r));
+        const float zq = SsaoViewZ(q);
+        if (zq < 0.0 || !SsaoInView(q)) continue;
+        const float3 v = SsaoViewPos(q, zq) - P;
+        const float d2 = dot(v, v);
+        const float range = 1.0 - saturate(d2 / (4.0 * radius * radius));
+        occlusion += max(0.0, dot(v, N) - bias * zv) / (d2 + 1e-4 * radius * radius) * range;
+    }
+    const float ao = saturate(1.0 - occlusion * radius * 2.0 / float(kSamples));
+    const float shaped = lerp(1.0, ao * ao, strength);
+    return float4(shaped, shaped, shaped, 1.0);
+}
+#endif
+
+#if defined(PASS_SSAO_BLUR)
+Texture2D aoTex : register(t1);
+float4 PSMain(FullscreenOut i) : SV_Target {
+    const int2 p = int2(i.pos.xy);
+    const float zc = SsaoViewZ(p);
+    if (zc < 0.0 || !SsaoInView(p)) return float4(1.0, 1.0, 1.0, 1.0);
+    float sum = 0.0;
+    float weight = 0.0;
+    [unroll] for (int y = -2; y < 2; ++y) {
+        [unroll] for (int x = -2; x < 2; ++x) {
+            const int2 q = p + int2(x, y);
+            const float zq = SsaoViewZ(q);
+            if (zq < 0.0 || !SsaoInView(q) || abs(zq - zc) > 0.04 * zc) continue;
+            sum += aoTex.Load(int3(q, 0)).r;
+            weight += 1.0;
+        }
+    }
+    const float ao = weight > 0.0 ? sum / weight : 1.0;
+    return float4(ao, ao, ao, 1.0);
+}
+#endif
+
+#if defined(PASS_SSAO_APPLY)
+// Multiplied onto the EFB colour by the pipeline's blend state.
+Texture2D aoTex : register(t0);
+FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
+float4 PSMain(FullscreenOut i) : SV_Target {
+    const float ao = aoTex.Load(int3(int2(i.pos.xy), 0)).r;
+    return float4(ao, ao, ao, 1.0);
+}
+#endif
+
 #if defined(PASS_BLOOM_DOWN)
 // Bloom pyramid, downsample (13-tap, Jimenez 2014). g_rt_metrics describes the
 // source, g_params.xy is 1/destination size. The first level (g_con0.x = 1)

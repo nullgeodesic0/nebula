@@ -120,6 +120,9 @@ struct RenderConfig {
     unsigned saturation          = 108;
     unsigned contrast            = 104;
     unsigned vignette            = 8;
+    // Ambient occlusion strength 0-100 on the 3D scene (0 = off); key ssao,
+    // env GALAXY_SSAO, world-unit radius GALAXY_SSAO_RADIUS.
+    unsigned ssao                = 40;
 
     // Reserved for future DXR work. Clamped off until there is a real DXR
     // capability query, acceleration-structure path, ray PSO, and visible

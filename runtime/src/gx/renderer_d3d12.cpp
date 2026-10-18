@@ -537,6 +537,7 @@ unsigned pending_settings_changes() {
     changes += d.saturation != live.saturation;
     changes += d.contrast != live.contrast;
     changes += d.vignette != live.vignette;
+    changes += d.ssao != live.ssao;
     changes += d.anisotropic_filtering != live.anisotropic_filtering;
     changes += d.enhanced_mipmaps != live.enhanced_mipmaps;
     changes += d.per_pixel_lighting != live.per_pixel_lighting;
@@ -694,7 +695,7 @@ unsigned graphics_row(unsigned row) {
 unsigned native_settings_row_count(unsigned tab) {
     switch (tab % kNativeSettingsTabCount) {
     case 0: return 8u;
-    case 1: return fsr3_available() ? 13u : 12u;
+    case 1: return fsr3_available() ? 14u : 13u;
     case 2: return controls_row_count();
     case 3: return 6u;
     case 4: return 2u;
@@ -797,6 +798,7 @@ void apply_native_settings_draft() {
     applied.saturation = next.saturation;
     applied.contrast = next.contrast;
     applied.vignette = next.vignette;
+    applied.ssao = next.ssao;
     applied.anisotropic_filtering = next.anisotropic_filtering;
     applied.enhanced_mipmaps = next.enhanced_mipmaps;
     applied.per_pixel_lighting = next.per_pixel_lighting;
@@ -1069,6 +1071,10 @@ void adjust_native_setting_unlogged(int delta) {
         case 12:
             draft.vignette = static_cast<unsigned>(std::clamp(
                 static_cast<int>(std::min(draft.vignette, 100u)) + delta * 5, 0, 100));
+            break;
+        case 13:
+            draft.ssao = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.ssao, 100u)) + delta * 5, 0, 100));
             break;
         default: return;
         }
@@ -7061,6 +7067,7 @@ bool RendererD3D12::begin_motion_scene() {
 bool RendererD3D12::scene_temporal_begin(float& jitter_x, float& jitter_y) {
     jitter_x = 0.0f;
     jitter_y = 0.0f;
+    scene_projection_valid_ = false;
     scene_temporal_ = false;
     if (!temporal_mode() || output_efb_active_) {
         temporal_.reset();
@@ -7110,6 +7117,65 @@ void RendererD3D12::set_scene_camera(float near_plane, float far_plane, float fo
     scene_camera_[0] = near_plane;
     scene_camera_[1] = far_plane;
     scene_camera_[2] = fov_y;
+}
+
+void RendererD3D12::set_scene_projection(const float abcd[4], const float viewport[4]) noexcept {
+    std::memcpy(scene_proj_, abcd, sizeof(scene_proj_));
+    std::memcpy(scene_viewport_, viewport, sizeof(scene_viewport_));
+    scene_projection_valid_ = true;
+}
+
+bool RendererD3D12::record_scene_ssao() {
+    if (!scene_projection_valid_ || output_efb_active_ || replay_recording_ ||
+        !post_process_.ready() || !post_process_.ssao_ready() || !efb_color_ || !efb_depth_ ||
+        command_list_ == nullptr) {
+        return false;
+    }
+    const RenderConfig cfg = get_render_config();
+    if (cfg.ssao == 0u) {
+        return false;
+    }
+    const float scale = static_cast<float>(efb_scale_);
+    const D3D12_RESOURCE_DESC color_desc = efb_color_->GetDesc();
+    PostProcessor::SsaoInputs in{};
+    in.depth = efb_depth_.Get();
+    in.color_rtv = efb_rtv_;
+    in.width = static_cast<unsigned>(color_desc.Width);
+    in.height = color_desc.Height;
+    for (unsigned i = 0; i < 4u; ++i) in.viewport[i] = scene_viewport_[i] * scale;
+    in.camera_near = scene_camera_[0];
+    in.camera_far = scene_camera_[1];
+    for (unsigned i = 0; i < 4u; ++i) in.proj[i] = scene_proj_[i];
+    static const float radius = [] {
+        char v[32]{};
+        std::size_t n = 0;
+        if (getenv_s(&n, v, sizeof(v), "GALAXY_SSAO_RADIUS") == 0 && n > 1) {
+            return std::max(1.0f, static_cast<float>(std::atof(v)));
+        }
+        return 120.0f;
+    }();
+    in.radius = radius;
+    in.strength = static_cast<float>(std::min(cfg.ssao, 100u)) / 100.0f;
+
+    D3D12_RESOURCE_BARRIER bar{};
+    bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    bar.Transition.pResource = efb_depth_.Get();
+    bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    bar.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    command_list_->ResourceBarrier(1, &bar);
+    ID3D12DescriptorHeap* heaps[] = {srv_ring_.heap(), sampler_heap_.Get()};
+    command_list_->SetDescriptorHeaps(2, heaps);
+    const bool recorded = post_process_.record_ssao(
+        command_list_.Get(), srv_ring_, in, frame_index_, kFramesInFlight);
+    std::swap(bar.Transition.StateBefore, bar.Transition.StateAfter);
+    command_list_->ResourceBarrier(1, &bar);
+    // The upscaler and output-EFB paths do the same after their own passes.
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    invalidate_gx_bindings();
+    bound_scissor_input_scale_ = 0u;
+    bind_efb(nullptr);
+    return recorded;
 }
 
 bool RendererD3D12::record_temporal_upscale(unsigned output_scale) {
@@ -9439,6 +9505,9 @@ std::string native_settings_row_text(
             return text;
         case 12:
             std::snprintf(text, sizeof(text), "VIGNETTE: %u%%", std::min(render.vignette, 100u));
+            return text;
+        case 13:
+            std::snprintf(text, sizeof(text), "AMBIENT OCCLUSION: %u%%", std::min(render.ssao, 100u));
             return text;
         default:
             return {};

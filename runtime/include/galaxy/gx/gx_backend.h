@@ -887,6 +887,9 @@ private:
     // `jitter_ndc` receives the offset (zero for orthographic draws).
     void apply_scene_jitter(const GxVsConstants& cpu, GxVsConstants& upload,
                             float jitter_ndc[2]);
+    // The scene's first perspective draw supplies the camera planes, projection
+    // terms and viewport (renderer set_scene_camera / set_scene_projection).
+    void capture_scene_camera();
     void adopt_pointer_depth_fence_if_needed();
     // Asynchronous EFB depth field for simulation-thread GXPeekZ. Three slots: the render owner fills the
     // slot after the published one, then publishes it. Readers only load the published slot. One set per
