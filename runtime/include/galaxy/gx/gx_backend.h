@@ -705,6 +705,9 @@ private:
     [[nodiscard]] std::int64_t interp_wait_ms() const;
     std::uint64_t motion_trace_scenes_ = 0;
     bool scene_camera_captured_ = false;
+    bool scene_light_captured_ = false;
+    // The current draw's material class for the EFB stencil (kMaterial*).
+    std::uint8_t current_material_ = kMaterialWritten;
     float scene_jitter_px_[2]{};
     std::uint64_t scene_markers_seen_ = 0;
     bool producer_movie_content_{},render_movie_content_{};
@@ -890,6 +893,12 @@ private:
     // The scene's first perspective draw supplies the camera planes, projection
     // terms and viewport (renderer set_scene_camera / set_scene_projection).
     void capture_scene_camera();
+    // The scene's first lit perspective draw supplies the light that casts
+    // contact shadows: the brightest light in its colour channel 0 mask
+    // (renderer set_scene_light).
+    void capture_scene_light();
+    // Material class of the current GX state (kMaterial* in shader_keys.h).
+    [[nodiscard]] std::uint8_t classify_material() const;
     void adopt_pointer_depth_fence_if_needed();
     // Asynchronous EFB depth field for simulation-thread GXPeekZ. Three slots: the render owner fills the
     // slot after the published one, then publishes it. Readers only load the published slot. One set per

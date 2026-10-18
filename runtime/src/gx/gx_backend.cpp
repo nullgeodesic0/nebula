@@ -6256,6 +6256,71 @@ void GxBackend::apply_scene_jitter(const GxVsConstants& cpu, GxVsConstants& uplo
     capture_scene_camera();
 }
 
+std::uint8_t GxBackend::classify_material() const {
+    std::uint8_t material = kMaterialWritten;
+    const GenMode gm = state_.gen_mode();
+    for (unsigned i = 0; i < gm.num_color_chans && i < 2u; ++i) {
+        // Colour and alpha control of channel i.
+        for (const unsigned ctrl : {i, 2u + i}) {
+            const XfChannelCtrl c = state_.channel_ctrl(ctrl);
+            if (!c.lighting_enable || c.light_mask == 0u) continue;
+            if (ctrl == 0u && c.diffuse_func != 0u) material |= kMaterialLit;
+            if (c.atten_func == 1u) material |= kMaterialGlossy;  // specular light
+        }
+    }
+    // A texture coordinate generated from the normal through a matrix is an
+    // environment (reflection) map: SMG's metal, ice, glass and chrome.
+    for (unsigned i = 0; i < gm.num_texgens && i < 8u; ++i) {
+        const XfTexGen tg = state_.tex_gen(i);
+        if (tg.type == TexGenType::Regular && tg.source_row == 1u) {
+            material |= kMaterialGlossy;
+        }
+    }
+    if (gm.num_ind_stages != 0u) {
+        material |= kMaterialIndirect;
+    }
+    return material;
+}
+
+void GxBackend::capture_scene_light() {
+    if (scene_light_captured_ ||
+        state_.xf(static_cast<std::uint16_t>(xf::kProjectionBase + 6u)) != 0u ||
+        state_.gen_mode().num_color_chans == 0u) {
+        return;
+    }
+    const XfChannelCtrl color0 = state_.channel_ctrl(0u);
+    if (!color0.lighting_enable || color0.diffuse_func == 0u || color0.light_mask == 0u) {
+        return;
+    }
+    // XF light layout (16 words): 3 colour RGBA8, 4-6 cos attenuation,
+    // 7-9 distance attenuation, 10-12 position, 13-15 direction.
+    int best = -1;
+    unsigned best_luma = 0u;
+    for (unsigned light = 0; light < 8u; ++light) {
+        if ((color0.light_mask & (1u << light)) == 0u) continue;
+        const std::uint32_t rgba = state_.xf(
+            static_cast<std::uint16_t>(xf::kLightsBase + light * 16u + 3u));
+        const unsigned luma = 2u * ((rgba >> 24) & 0xFFu) + 5u * ((rgba >> 16) & 0xFFu) +
+                              ((rgba >> 8) & 0xFFu);
+        if (luma > best_luma) {
+            best_luma = luma;
+            best = static_cast<int>(light);
+        }
+    }
+    if (best < 0) {
+        return;
+    }
+    scene_light_captured_ = true;
+    float position[3];
+    for (unsigned i = 0; i < 3u; ++i) {
+        position[i] = std::bit_cast<float>(state_.xf(static_cast<std::uint16_t>(
+            xf::kLightsBase + static_cast<unsigned>(best) * 16u + 10u + i)));
+    }
+    if (std::isfinite(position[0]) && std::isfinite(position[1]) && std::isfinite(position[2])) {
+        renderer_.set_scene_light(position);
+    }
+}
+
 void GxBackend::capture_scene_camera() {
     if (scene_camera_captured_ ||
         state_.xf(static_cast<std::uint16_t>(xf::kProjectionBase + 6u)) != 0u) {
@@ -6416,7 +6481,9 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
         temporal_scene_ = renderer_.scene_temporal_begin(
             scene_jitter_px_[0], scene_jitter_px_[1]);
         motion_scene_ = temporal_scene_ && renderer_.begin_motion_scene();
+        renderer_.set_scene_view(view != nullptr ? view->data() : nullptr);
         scene_camera_captured_ = false;
+        scene_light_captured_ = false;
         history_scene_ = temporal_scene_ || interp_recording_;
         if (interp_recording_) {
             note_interp_log_completion();
@@ -6501,7 +6568,7 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
     // scene that begins before a display copy restores the render EFB.
     bool switched = false;
     if (marker == FifoMarker::SceneEnd) {
-        if (renderer_.record_scene_ssao()) {
+        if (renderer_.record_scene_effects()) {
             frame_bindings_dirty_ = true;
         }
         switched = renderer_.begin_output_efb();
@@ -10002,6 +10069,9 @@ ID3D12PipelineState* GxBackend::flush_draw_state(
     const bool vcd_dirty  = (dirty & GxState::kDirtyVcd)         != 0;
     const bool tev_c_dirty = (dirty & GxState::kDirtyTevConstants) != 0;
     const bool vs_c_dirty = (dirty & GxState::kDirtyVsConstants) != 0;
+    if (tev_dirty || xf_dirty || dirty == ~0u) {
+        current_material_ = classify_material();
+    }
 
     // sampled_texture_map_mask walks every TEV stage (a tev_order decode plus an IND_CMD read per
     // stage). Per-object LOAD_INDX matrix uploads set kDirtyXfMatrices and nothing that can move the
@@ -10321,6 +10391,9 @@ ID3D12PipelineState* GxBackend::flush_draw_state(
         if (scene_phase_ && !scene_camera_captured_) {
             capture_scene_camera();
         }
+        if (scene_phase_ && !scene_light_captured_) {
+            capture_scene_light();
+        }
         if (history_scene_) [[unlikely]] {
             write_scene_vs_constants(vs_c, *reinterpret_cast<GxVsConstants*>(vs_alloc.cpu));
         }
@@ -10595,6 +10668,7 @@ bool GxBackend::draw_calls_batch_compatible(
         lhs.sampler_table.ptr != rhs.sampler_table.ptr ||
         lhs.matrix_palette != rhs.matrix_palette ||
         lhs.topology != rhs.topology ||
+        lhs.stencil_ref != rhs.stencil_ref ||
         lhs.has_viewport != rhs.has_viewport) {
         return false;
     }
@@ -10744,6 +10818,7 @@ bool GxBackend::begin_cached_draw_run(
             : renderer_.default_sampler_table();
     cached_draw_run_state_call_.matrix_palette = draw_matrix_palette_;
     cached_draw_run_state_call_.aux_target     = current_pipeline_aux_;
+    cached_draw_run_state_call_.stencil_ref    = current_material_;
     cached_draw_run_state_call_.replay_record  = current_replay_record_;
     cached_draw_run_state_call_.topology       = topology;
     cached_draw_run_state_call_.scissor        = scissor_rect;
@@ -11718,6 +11793,7 @@ void GxBackend::on_draw(
         : renderer_.default_sampler_table();
     state_call.matrix_palette = draw_matrix_palette_;
     state_call.aux_target     = current_pipeline_aux_;
+    state_call.stencil_ref    = current_material_;
     state_call.replay_record  = current_replay_record_;
     state_call.topology       = topology;
     state_call.scissor        = scissor_rect;

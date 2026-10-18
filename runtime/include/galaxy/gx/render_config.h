@@ -123,6 +123,23 @@ struct RenderConfig {
     // Ambient occlusion strength 0-100 on the 3D scene (0 = off); key ssao,
     // env GALAXY_SSAO, world-unit radius GALAXY_SSAO_RADIUS.
     unsigned ssao                = 40;
+    // Screen-space contact shadows 0-100 from the scene's main light (0 = off);
+    // key contact_shadows, env GALAXY_CONTACT_SHADOWS, world-unit ray length
+    // GALAXY_CONTACT_SHADOW_LENGTH.
+    unsigned contact_shadows     = 50;
+    // Far-field depth of field 0-100 (0 = off); key depth_of_field, env
+    // GALAXY_DEPTH_OF_FIELD.
+    unsigned depth_of_field      = 40;
+    // Camera-rotation motion blur 0-100 (shutter, 0 = off); key motion_blur,
+    // env GALAXY_MOTION_BLUR.
+    unsigned motion_blur         = 50;
+    // Screen-space reflections 0-100 on reflective materials (0 = off); key
+    // reflections, env GALAXY_REFLECTIONS, world-unit ray length
+    // GALAXY_REFLECTION_DISTANCE.
+    unsigned reflections         = 60;
+    // Lens flare 0-100 from the bloom bright pass (0 = off, needs bloom); key
+    // lens_flare, env GALAXY_LENS_FLARE.
+    unsigned lens_flare          = 40;
 
     // Reserved for future DXR work. Clamped off until there is a real DXR
     // capability query, acceleration-structure path, ray PSO, and visible

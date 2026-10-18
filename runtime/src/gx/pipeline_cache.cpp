@@ -453,6 +453,24 @@ D3D12_GRAPHICS_PIPELINE_STATE_DESC make_gx_pso_desc_impl(
             ? D3D12_DEPTH_WRITE_MASK_ALL
             : D3D12_DEPTH_WRITE_MASK_ZERO;
     }
+    // Material stencil (GX has no stencil): a draw that writes depth also
+    // writes its material class (DrawCall::stencil_ref, kMaterial* in
+    // shader_keys.h), so the stencil describes the surface the depth holds.
+    // The scene effects read it. Draws that keep depth keep the stencil too.
+    {
+        auto& ds = pd.DepthStencilState;
+        const bool writes_depth = (zb & 1u) != 0u && (zb & (1u << 4)) != 0u;
+        ds.StencilEnable = TRUE;
+        ds.StencilReadMask = 0xFF;
+        ds.StencilWriteMask = writes_depth ? 0xFF : 0x00;
+        D3D12_DEPTH_STENCILOP_DESC op{};
+        op.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+        op.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+        op.StencilPassOp = D3D12_STENCIL_OP_REPLACE;
+        op.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        ds.FrontFace = op;
+        ds.BackFace = op;
+    }
 
     pd.SampleMask            = UINT_MAX;
     switch (static_cast<D3D12_PRIMITIVE_TOPOLOGY_TYPE>(
@@ -1392,7 +1410,7 @@ constexpr std::uint32_t kPsoKeyCacheMagic = 0x43504B47u;  // "GKPC"
 // not yet seen in this session.
 constexpr std::uint32_t kPsoKeyCacheVersion = 0x100u + kShaderCacheVersion;
 constexpr std::uint32_t kPipelineLibraryMagic = 0x4C505847u; // "GXPL"
-constexpr std::uint32_t kPipelineLibraryVersion = 6u;
+constexpr std::uint32_t kPipelineLibraryVersion = 7u;  // 7: material stencil
 constexpr std::uint64_t kMaxPipelineLibraryBytes = 64ull << 20;
 constexpr std::uint64_t kMaxShaderCacheBytes = 128ull << 20;
 constexpr std::uint32_t kMaxCacheRecords = 65536u;
