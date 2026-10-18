@@ -712,13 +712,44 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 #endif
 
 #if defined(PASS_ENHANCE)
-// Final look: the bloom pyramid added to the scene, a soft shoulder so bloom
-// cannot clip harshly, then saturation, contrast and a vignette.
-// t0 scene (window size), t1 bloom (half size). g_params.xy is the window size.
-// g_con0 = (bloom, saturation, contrast, vignette) as floats.
+// Final look: the bloom pyramid and lens flare added to the scene, a soft
+// shoulder so bloom cannot clip harshly, then saturation, contrast and a
+// vignette.
+// t0 scene (window size), t1 bloom (half size), t2 the bloom bright pass at
+// quarter size for the flare. g_params.xy is the window size.
+// g_con0 = (bloom, saturation, contrast, vignette), g_con1.x = lens flare, as floats.
 Texture2D sceneTex : register(t0);
 Texture2D bloomTex : register(t1);
+Texture2D flareTex : register(t2);
 FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
+// Pseudo lens flare (after Chapman 2013): ghosts of the brightest highlights
+// mirrored through the screen centre with a slight chromatic split, and a thin
+// halo ring, both fading toward the screen edge. Only light well above the
+// bloom threshold flares, so star bits and coins do not litter the screen.
+float3 FlareSample(float2 uv, float2 dir) {
+    const float3 c = float3(
+        flareTex.SampleLevel(LinearSampler, uv + dir * 0.006, 0).r,
+        flareTex.SampleLevel(LinearSampler, uv, 0).g,
+        flareTex.SampleLevel(LinearSampler, uv - dir * 0.006, 0).b);
+    return max(c - 0.35, 0.0);
+}
+float3 LensFlare(float2 uv) {
+    const float2 flipped = 1.0 - uv;
+    const float2 ghost_vec = (0.5 - flipped) * 0.42;
+    const float2 dir = normalize(ghost_vec + 1e-6);
+    static const float3 kTints[4] = {
+        float3(1.0, 0.75, 0.45), float3(0.55, 0.8, 1.0), float3(0.85, 0.6, 1.0), float3(0.6, 1.0, 0.75)};
+    float3 sum = float3(0.0, 0.0, 0.0);
+    [unroll] for (int g = 0; g < 4; ++g) {
+        const float2 guv = frac(flipped + ghost_vec * float(g));
+        const float w = pow(1.0 - saturate(length(0.5 - guv) / 0.7071), 6.0);
+        sum += FlareSample(guv, dir) * kTints[g] * w;
+    }
+    const float2 huv = flipped + dir * 0.45;
+    const float hw = pow(1.0 - saturate(length(0.5 - frac(huv)) / 0.7071), 6.0);
+    sum += FlareSample(huv, dir) * hw * 0.5;
+    return sum;
+}
 float4 PSMain(FullscreenOut i) : SV_Target {
     const int2 p = ViewportPixel(i.pos);
     const float2 size = g_params.xy;
@@ -726,6 +757,8 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     const float4 k = asfloat(g_con0);
     float3 c = sceneTex.Load(int3(p, 0)).rgb;
     c += bloomTex.SampleLevel(LinearSampler, uv, 0).rgb * k.x;
+    const float flare = asfloat(g_con1.x);
+    if (flare > 0.0) c += LensFlare(uv) * flare;
     // Soft shoulder above 0.8; below it the image is untouched.
     const float3 over = max(c - 0.8, 0.0);
     c = min(c, 0.8) + 0.2 * tanh(over / 0.2);

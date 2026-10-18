@@ -333,6 +333,7 @@ PostProcessSettings post_process_settings_from(const RenderConfig& cfg) noexcept
     post.saturation = static_cast<std::uint8_t>(std::min(cfg.saturation, 200u));
     post.contrast = static_cast<std::uint8_t>(std::min(cfg.contrast, 200u));
     post.vignette = static_cast<std::uint8_t>(std::min(cfg.vignette, 100u));
+    post.lens_flare = static_cast<std::uint8_t>(std::min(cfg.lens_flare, 100u));
     return post;
 }
 
@@ -542,6 +543,7 @@ unsigned pending_settings_changes() {
     changes += d.depth_of_field != live.depth_of_field;
     changes += d.motion_blur != live.motion_blur;
     changes += d.reflections != live.reflections;
+    changes += d.lens_flare != live.lens_flare;
     changes += d.anisotropic_filtering != live.anisotropic_filtering;
     changes += d.enhanced_mipmaps != live.enhanced_mipmaps;
     changes += d.per_pixel_lighting != live.per_pixel_lighting;
@@ -699,7 +701,7 @@ unsigned graphics_row(unsigned row) {
 unsigned native_settings_row_count(unsigned tab) {
     switch (tab % kNativeSettingsTabCount) {
     case 0: return 8u;
-    case 1: return fsr3_available() ? 18u : 17u;
+    case 1: return fsr3_available() ? 19u : 18u;
     case 2: return controls_row_count();
     case 3: return 6u;
     case 4: return 2u;
@@ -807,6 +809,7 @@ void apply_native_settings_draft() {
     applied.depth_of_field = next.depth_of_field;
     applied.motion_blur = next.motion_blur;
     applied.reflections = next.reflections;
+    applied.lens_flare = next.lens_flare;
     applied.anisotropic_filtering = next.anisotropic_filtering;
     applied.enhanced_mipmaps = next.enhanced_mipmaps;
     applied.per_pixel_lighting = next.per_pixel_lighting;
@@ -1099,6 +1102,10 @@ void adjust_native_setting_unlogged(int delta) {
         case 17:
             draft.reflections = static_cast<unsigned>(std::clamp(
                 static_cast<int>(std::min(draft.reflections, 100u)) + delta * 5, 0, 100));
+            break;
+        case 18:
+            draft.lens_flare = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.lens_flare, 100u)) + delta * 5, 0, 100));
             break;
         default: return;
         }
@@ -4088,7 +4095,8 @@ void RendererD3D12::sync_post_process_settings() {
     if (next.aa != current.aa || next.smaa_quality != current.smaa_quality ||
         next.upscaler != current.upscaler || next.sharpness != current.sharpness ||
         next.bloom != current.bloom || next.saturation != current.saturation ||
-        next.contrast != current.contrast || next.vignette != current.vignette) {
+        next.contrast != current.contrast || next.vignette != current.vignette ||
+        next.lens_flare != current.lens_flare) {
         post_process_.apply_settings(next, frame_index_, kFramesInFlight);
     }
 }
@@ -9630,6 +9638,9 @@ std::string native_settings_row_text(
             return text;
         case 17:
             std::snprintf(text, sizeof(text), "REFLECTIONS: %u%%", std::min(render.reflections, 100u));
+            return text;
+        case 18:
+            std::snprintf(text, sizeof(text), "LENS FLARE: %u%%", std::min(render.lens_flare, 100u));
             return text;
         default:
             return {};

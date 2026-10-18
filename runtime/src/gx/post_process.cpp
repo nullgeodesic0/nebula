@@ -1260,6 +1260,7 @@ void PostProcessor::record_enhance(ID3D12GraphicsCommandList* list, DescriptorRi
     // stand-in bloom texture, scaled by zero.
     ID3D12Resource* bloom = scene;
     DXGI_FORMAT bloom_format = kColorFormat;
+    ID3D12Resource* flare = scene;  // the bright pass at quarter size, or a zero-weighted stand-in
     if (settings_.bloom > 0u) {
         const auto pass = [&](ID3D12PipelineState* pipeline, Target& dst, float src_w, float src_h,
                               std::initializer_list<ID3D12Resource*> inputs,
@@ -1302,6 +1303,7 @@ void PostProcessor::record_enhance(ID3D12GraphicsCommandList* list, DescriptorRi
         }
         bloom = bloom_up_targets_[0].resource.Get();
         bloom_format = kBloomFormat;
+        flare = bloom_down_targets_[1].resource.Get();
     }
 
     Constants c{};
@@ -1311,12 +1313,14 @@ void PostProcessor::record_enhance(ID3D12GraphicsCommandList* list, DescriptorRi
     c.con0[1] = bits(static_cast<float>(settings_.saturation) / 100.0f);
     c.con0[2] = bits(static_cast<float>(settings_.contrast) / 100.0f);
     c.con0[3] = bits(0.7f * static_cast<float>(settings_.vignette) / 100.0f);
+    c.con1[0] = bits(settings_.bloom > 0u ? static_cast<float>(settings_.lens_flare) / 100.0f : 0.0f);
     c.origin[0] = static_cast<std::int32_t>(viewport.TopLeftX);
     c.origin[1] = static_cast<std::int32_t>(viewport.TopLeftY);
     list->SetGraphicsRootSignature(root_signature_.Get());
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);
-    draw(list, srv_ring, enhance_.Get(), {scene, bloom}, {kColorFormat, bloom_format}, viewport, c);
+    draw(list, srv_ring, enhance_.Get(), {scene, bloom, flare},
+         {kColorFormat, bloom_format, bloom_format}, viewport, c);
 }
 
 namespace {

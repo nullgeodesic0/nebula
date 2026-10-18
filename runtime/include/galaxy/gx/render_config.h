@@ -136,6 +136,9 @@ struct RenderConfig {
     // Screen-space reflections 0-100 (0 = off); key reflections, env
     // GALAXY_REFLECTIONS, world-unit ray length GALAXY_REFLECTION_DISTANCE.
     unsigned reflections         = 30;
+    // Lens flare 0-100 from the bloom bright pass (0 = off, needs bloom); key
+    // lens_flare, env GALAXY_LENS_FLARE.
+    unsigned lens_flare          = 40;
 
     // Reserved for future DXR work. Clamped off until there is a real DXR
     // capability query, acceleration-structure path, ray PSO, and visible

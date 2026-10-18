@@ -45,6 +45,9 @@ struct PostProcessSettings {
     std::uint8_t saturation = 108;
     std::uint8_t contrast = 104;
     std::uint8_t vignette = 8;
+    // Lens flare ghosts and halo from the bloom pyramid's bright pass, 0-100
+    // (0 = off); drawn only while bloom is on.
+    std::uint8_t lens_flare = 40;
     // Ambient occlusion strength 0-100 (0 = off), applied to the 3D scene EFB.
     std::uint8_t ssao = 40;
 
