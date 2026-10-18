@@ -435,6 +435,9 @@ public:
     // After a temporal scene_temporal_begin: clears the motion target for
     // the scene. False when it could not be created (no motion writers).
     [[nodiscard]] bool begin_motion_scene();
+    // At a scene begin without the temporal upscaler: true when motion blur
+    // wants this scene's motion vectors (begin_motion_scene then clears them).
+    [[nodiscard]] bool scene_motion_blur_begin();
     // GALAXY_MOTION_DEBUG: at the scene's end, replaces the EFB color with
     // the motion field (grey = still; red/green = +x/+y towards the previous
     // position, 8 pixels to full scale).
@@ -860,6 +863,8 @@ private:
     std::uint64_t temporal_frame_ = 0;
     bool temporal_history_valid_ = false;
     bool scene_temporal_ = false;
+    bool scene_motion_only_ = false;   // motion vectors for blur, without the upscaler
+    bool scene_motion_valid_ = false;  // this scene's motion target holds its vectors
     float scene_jitter_[2]{};
     float scene_camera_[3]{1.0f, 100000.0f, 1.0f};
     float scene_proj_[4]{};

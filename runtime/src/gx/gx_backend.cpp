@@ -6477,14 +6477,18 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
     scene_phase_ = marker == FifoMarker::SceneBegin;
     const bool was_temporal = temporal_scene_;
     const bool was_motion = motion_scene_;
+    const bool was_history = history_scene_;
     if (marker == FifoMarker::SceneBegin) {
         temporal_scene_ = renderer_.scene_temporal_begin(
             scene_jitter_px_[0], scene_jitter_px_[1]);
-        motion_scene_ = temporal_scene_ && renderer_.begin_motion_scene();
+        // Motion blur wants the scene's motion vectors without the temporal upscaler:
+        // the same writers and transform history, with no jitter.
+        const bool blur_scene = !temporal_scene_ && renderer_.scene_motion_blur_begin();
+        motion_scene_ = (temporal_scene_ || blur_scene) && renderer_.begin_motion_scene();
         renderer_.set_scene_view(view != nullptr ? view->data() : nullptr);
         scene_camera_captured_ = false;
         scene_light_captured_ = false;
-        history_scene_ = temporal_scene_ || interp_recording_;
+        history_scene_ = temporal_scene_ || interp_recording_ || (blur_scene && motion_scene_);
         if (interp_recording_) {
             note_interp_log_completion();
             renderer_.note_replay_scene();
@@ -6557,7 +6561,7 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
     }
     // Projections take (or drop) the scene jitter, and scene draws switch
     // palette addressing, from the next draw on.
-    if (was_temporal || temporal_scene_ || interp_recording_) {
+    if (was_temporal || temporal_scene_ || interp_recording_ || was_history != history_scene_) {
         frame_bindings_dirty_ = true;
     }
     // Motion keys switch on or off: resolve the pipeline again.

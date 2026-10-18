@@ -269,7 +269,7 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 // apply treat both channels alike and the apply multiplies their product.
 #endif
 
-#if defined(PASS_SSAO_AO) || defined(PASS_SSAO_BLUR) || defined(PASS_DOF_BLUR) || defined(PASS_SSR)
+#if defined(PASS_SSAO_AO) || defined(PASS_SSAO_BLUR) || defined(PASS_DOF_BLUR) || defined(PASS_DOF_FOCUS) || defined(PASS_SSR)
 Texture2D depthTex : register(t0);
 FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
 // Distance in front of the camera, or -1 where nothing was drawn.
@@ -341,49 +341,76 @@ float3 SsaoNormal(int2 p, float zv, float3 P, out float slope) {
 // returns 1: the game's own lighting already darkens those surfaces. `slope` is
 // the depth change to the next pixel on P's own surface, the tolerance that
 // keeps surfaces seen at a grazing angle from shadowing themselves.
-float ContactShadow(int2 p, float3 P, float3 N, float zv, float slope, float noise) {
-    const float strength = asfloat(g_con3.x);
-    if (strength <= 0.0) return 1.0;
-    const float3 L = normalize(float3(asfloat(g_con2.y), asfloat(g_con2.z), asfloat(g_con2.w)) - P);
-    const float ndl = dot(N, L);
-    if (ndl <= 0.0) return 1.0;
-    const float ray_length = asfloat(g_con3.y);
-    const float thickness = asfloat(g_con3.z) + 0.01 * zv;
+// One shadow ray from P toward the light, aimed inside a cone of tangent `cone`
+// around the light direction (the jitter that makes the shadow's edge a
+// penumbra once the blur pass averages the 4x4 pattern), marched through the
+// depth buffer in `steps` steps. `thickness` grows with the ray's own length by
+// `growth`, so a long ray still catches thin walls without a short one making
+// thick ghosts. Returns the shadow, 0 (lit) to 1 (fully shadowed); an occluder
+// near the end of the ray casts a softer, fainter shadow.
+float ShadowRay(int2 p, float3 P, float3 N, float zv, float slope, float noise, float3 L,
+                float ray_length, float thickness_base, float growth, float cone, int steps) {
     // Lift the start off the surface by about a pixel's depth error so flat
     // ground does not shadow itself.
     const float lift = 0.0015 * zv;
     const float3 origin = P + N * lift;
+    // Jitter within the cone: a ring position from the 4x4 pattern.
+    const float3 helper = abs(L.y) < 0.9 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    const float3 tangent = normalize(cross(L, helper));
+    const float3 bitangent = cross(L, tangent);
+    const float angle = noise * 6.2831853;
+    const float spread = sqrt(frac(noise * 7.0 + 0.37));
+    const float3 dir = normalize(L + (tangent * cos(angle) + bitangent * sin(angle)) * (cone * spread));
     // A ray toward the camera stops at the near plane.
-    const float3 ray = L * ray_length;
+    const float3 ray = dir * ray_length;
     const float reach = ray.z > 0.0 ? saturate((-origin.z - asfloat(g_con0.x)) / ray.z) : 1.0;
     const float3 end = origin + ray * reach;
     // Rays shorter than two pixels on screen cannot find an occluder.
     const float2 span = SsaoProject(end) - SsaoProject(origin);
-    if (dot(span, span) < 4.0) return 1.0;
+    if (dot(span, span) < 4.0) return 0.0;
 
-    const int kSteps = 16;
-    float occlusion = 0.0;
-    [loop] for (int k = 0; k < kSteps; ++k) {
+    [loop] for (int k = 0; k < steps; ++k) {
         // Steps grow toward the end of the ray, where precision matters less.
-        const float t = (float(k) + noise) / float(kSteps);
+        const float t = (float(k) + noise) / float(steps);
         const float3 S = lerp(origin, end, t * t);
-        const float2 sp = SsaoProject(S);
-        const int2 q = int2(floor(sp));
+        const int2 q = int2(floor(SsaoProject(S)));
         if (!SsaoInView(q)) break;
         if (all(q == p)) continue;
         const float zq = SsaoViewZ(q);
         if (zq < 0.0) continue;
         // Positive when the depth buffer holds a surface in front of the sample.
         const float delta = -S.z - zq;
+        const float thickness = thickness_base + 0.01 * zv + growth * ray_length * t * t;
         if (delta > 0.002 * zq + slope && delta < thickness) {
-            // Occluders near the end of the ray cast a softer, fainter shadow.
-            occlusion = 1.0 - t * t;
-            break;
+            return 1.0 - smoothstep(0.55, 1.0, t);
         }
     }
+    return 0.0;
+}
+
+// Visibility of the light from P (pixel p) as the product of two rays: a short
+// hard one for contact shadows under small occluders, and a long jittered one
+// for soft, widening shadows of larger ones (a tree on the grass, a wall across
+// the path). 1 = lit.
+float ContactShadow(int2 p, float3 P, float3 N, float zv, float slope, float noise) {
+    const float strength = asfloat(g_con3.x);
+    if (strength <= 0.0) return 1.0;
+    const float3 L = normalize(float3(asfloat(g_con2.y), asfloat(g_con2.z), asfloat(g_con2.w)) - P);
+    const float ndl = dot(N, L);
+    if (ndl <= 0.0) return 1.0;
+    const float contact = ShadowRay(p, P, N, zv, slope, noise, L, asfloat(g_con3.y),
+                                    asfloat(g_con3.z), 0.0, 0.006, 16);
+    const float long_length = asfloat(g_con3.w);
+    float far_shadow = 0.0;
+    if (long_length > 0.0) {
+        // Different jitter phase than the contact ray, so the two do not alias.
+        far_shadow = ShadowRay(p, P, N, zv, slope, frac(noise * 3.0 + 0.5), L, long_length,
+                               asfloat(g_con3.z), 0.12, 0.07, 24) * 0.85;
+    }
+    const float visible = (1.0 - contact * strength) * (1.0 - far_shadow * strength);
     // Near grazing angles the game's lighting is already dim; fade the shadow in
     // with N.L so terminators do not get a hard double edge.
-    return 1.0 - occlusion * strength * saturate(ndl * 4.0);
+    return lerp(1.0, visible, saturate(ndl * 4.0));
 }
 
 float4 PSMain(FullscreenOut i) : SV_Target {
@@ -460,8 +487,10 @@ Texture2D aoTex : register(t0);
 FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
 float4 PSMain(FullscreenOut i) : SV_Target {
     const float2 terms = aoTex.Load(int3(int2(i.pos.xy), 0)).rg;
-    const float ao = terms.r * terms.g;
-    return float4(ao, ao, ao, 1.0);
+    // Shadows take a cool tint, the way a lit scene's shade picks up the sky's
+    // colour: a grey multiply looks dead. Full shadow tints fully.
+    const float3 tint = lerp(float3(0.74, 0.84, 1.0), float3(1.0, 1.0, 1.0), terms.g);
+    return float4(terms.r * terms.g * tint, 1.0);
 }
 #endif
 
@@ -478,6 +507,16 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 // (C, D, max distance in world units, strength 0-1); g_params = scene viewport.
 // The alpha output is the blend weight the apply pass uses.
 Texture2D colorTex : register(t1);
+// How strongly the material at pixel p reflects (0-1) and its Fresnel F0.
+float Reflectivity(int2 p, out float f0) {
+    f0 = 0.04;
+    if (!SsaoInView(p)) return 0.0;
+    const uint material = SceneMaterial(p);
+    if ((material & kMaterialWritten) == 0u) return 0.25;
+    if ((material & kMaterialGlossy) != 0u) { f0 = 0.25; return 1.0; }
+    if ((material & kMaterialIndirect) != 0u) return 1.0;
+    return 0.0;
+}
 float4 PSMain(FullscreenOut i) : SV_Target {
     const int2 p = int2(i.pos.xy);
     if (!SsaoInView(p)) return float4(0.0, 0.0, 0.0, 0.0);
@@ -486,18 +525,39 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     const float3 P = SsaoViewPos(p, zv);
     float slope;
     const float3 N = SsaoNormal(p, zv, P, slope);
-    const uint material = SceneMaterial(p);
-    float reflectivity = 0.0;
-    float f0 = 0.04;
-    if ((material & kMaterialWritten) == 0u) {
-        reflectivity = 0.25;
-    } else if ((material & kMaterialGlossy) != 0u) {
-        reflectivity = 1.0;
-        f0 = 0.25;
-    } else if ((material & kMaterialIndirect) != 0u) {
-        reflectivity = 1.0;
+    // The reflectivity is averaged over a small plus-shaped neighbourhood, so it
+    // fades across the border of a reflective surface instead of cutting there.
+    float f0;
+    float reflectivity = Reflectivity(p, f0);
+    {
+        float f0_n;
+        const int2 kOffsets[4] = {int2(3, 0), int2(-3, 0), int2(0, 3), int2(0, -3)};
+        [unroll] for (int n = 0; n < 4; ++n) {
+            reflectivity += Reflectivity(p + kOffsets[n], f0_n);
+            f0 = max(f0, f0_n);
+        }
+        reflectivity *= 0.2;
     }
     if (reflectivity <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+    // Only reasonably flat surfaces reflect. Small curved details that happen to
+    // use a glossy or environment-mapped material (Mario's eyes, buttons, gems)
+    // would otherwise show a mirror image of the scene instead of their own
+    // colour. Flatness is how well the normals four pixels away agree with this
+    // one; curved metal still reflects, with a weight that falls as it curves.
+    {
+        float flatness = 1.0;
+        const int2 kProbe[4] = {int2(4, 0), int2(-4, 0), int2(0, 4), int2(0, -4)};
+        [unroll] for (int n = 0; n < 4; ++n) {
+            const int2 q = p + kProbe[n];
+            const float zq = SsaoViewZ(q);
+            if (zq < 0.0) { flatness = min(flatness, 0.0); continue; }
+            float slope_q;
+            const float3 Nq = SsaoNormal(q, zq, SsaoViewPos(q, zq), slope_q);
+            flatness = min(flatness, dot(N, Nq));
+        }
+        reflectivity *= smoothstep(0.86, 0.985, flatness);
+        if (reflectivity <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+    }
     const float3 V = normalize(P);
     const float cos_v = saturate(dot(-V, N));
     const float fresnel = f0 + (1.0 - f0) * pow(1.0 - cos_v, 5.0);
@@ -518,22 +578,55 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     const int kSteps = 24;
     float prev_t = 0.0;
     float hit_t = -1.0;
+    // A ray that passes just behind a surface by up to half again its thickness
+    // is a soft hit, with a confidence that falls off to zero: a reflection then
+    // fades as the reflected object slides away instead of vanishing at a
+    // threshold.
+    float soft_t = -1.0;
+    float soft_prev_t = 0.0;
+    float soft_conf = 0.0;
+    float last_t = 0.0;
     [loop] for (int k = 0; k < kSteps; ++k) {
         const float s = (float(k) + 0.5 + noise) / float(kSteps);
         const float t = s * s;
         const float3 S = origin + ray * t;
         const int2 q = int2(floor(SsaoProject(S)));
         if (!SsaoInView(q)) break;
+        last_t = t;
         const float zq = SsaoViewZ(q);
         const float delta = -S.z - zq;
         // Thickness grows with distance so thin geometry still catches rays.
-        if (zq > 0.0 && delta > 0.0 && delta < 0.05 * zq + max_dist * (t - prev_t)) {
-            hit_t = t;
-            break;
+        const float thickness = 0.05 * zq + max_dist * (t - prev_t);
+        if (zq > 0.0 && delta > 0.0) {
+            const float ratio = delta / thickness;
+            if (ratio < 1.0) {
+                hit_t = t;
+                break;
+            }
+            const float conf = saturate((1.5 - ratio) * 2.0);
+            if (conf > soft_conf) {
+                soft_conf = conf;
+                soft_t = t;
+                soft_prev_t = prev_t;
+            }
         }
         prev_t = t;
     }
-    if (hit_t < 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+    float hit_conf = 1.0;
+    if (hit_t < 0.0 && soft_t >= 0.0) {
+        hit_t = soft_t;
+        prev_t = soft_prev_t;
+        hit_conf = soft_conf;
+    }
+    if (hit_t < 0.0) {
+        // No hit: a faint reflection of the environment, the scene colour where
+        // the ray ends on screen (the sky for a ray that climbs away). Without it
+        // the reflection would drop from full to nothing the moment the ray misses.
+        const float2 end = clamp(SsaoProject(origin + ray * max(last_t, 0.05)),
+                                 g_params.xy + 2.0, g_params.xy + g_params.zw - 2.0);
+        const float3 env = colorTex.SampleLevel(LinearSampler, end * g_rt_metrics.xy, 0).rgb;
+        return float4(env, strength * toward * 0.3);
+    }
     float lo_t = prev_t;
     float hi_t = hit_t;
     [unroll] for (int b = 0; b < 4; ++b) {
@@ -546,20 +639,66 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     const float2 edge = min(hit - g_params.xy, g_params.xy + g_params.zw - hit) / (0.1 * g_params.zw);
     const float fade = saturate(min(edge.x, edge.y)) * (1.0 - hi_t * hi_t) * toward;
     const float3 colour = colorTex.SampleLevel(LinearSampler, hit * g_rt_metrics.xy, 0).rgb;
-    return float4(colour, strength * fade);
+    // The environment fallback is the floor under a confident hit's weight, so the
+    // blend between the two is continuous.
+    const float env_floor = 0.3 * toward;
+    const float3 env = colorTex.SampleLevel(
+        LinearSampler, clamp(SsaoProject(origin + ray * max(last_t, 0.05)),
+                             g_params.xy + 2.0, g_params.xy + g_params.zw - 2.0) * g_rt_metrics.xy, 0).rgb;
+    const float weight = max(fade * hit_conf, env_floor);
+    const float3 mixed = lerp(env, colour, saturate(fade * hit_conf / max(weight, 1e-4)));
+    return float4(mixed, strength * weight);
+}
+#endif
+
+#if defined(PASS_DOF_FOCUS)
+// The depth of field's focus distance, one value per scene in a 1x1 R32F target.
+// Candidate: the median of a 3x3 cluster of depth samples around the viewport
+// centre, where the camera keeps Mario (a thin pole or a flying coin through a
+// few samples cannot move a median). It is then eased toward the previous focus
+// (t1) in log space with a per-scene step limit, so the blur never pumps.
+// g_con0.xy = (near, far); g_con1.x = step limit per scene (ratio > 1),
+// g_con1.y = ease rate 0-1, g_con1.z = 1 resets to the candidate (first scene
+// or a camera cut); g_params = scene viewport.
+Texture2D prevFocusTex : register(t1);
+float4 PSMain(FullscreenOut i) : SV_Target {
+    const float2 c = g_params.xy + g_params.zw * 0.5;
+    const float step = g_params.w * 0.03;
+    const float far_z = asfloat(g_con0.y);
+    float z[9];
+    [unroll] for (int k = 0; k < 9; ++k) {
+        const float2 o = float2(float(k % 3) - 1.0, float(k / 3) - 1.0) * float2(step, step * 1.3);
+        const float s = SsaoViewZ(int2(c + o));
+        z[k] = s > 0.0 ? s : far_z;
+    }
+    // Median of nine: a partial selection sort to the fifth element.
+    [unroll] for (int a = 0; a < 5; ++a) {
+        [unroll] for (int b = a + 1; b < 9; ++b) {
+            if (z[b] < z[a]) { const float t = z[a]; z[a] = z[b]; z[b] = t; }
+        }
+    }
+    const float candidate = max(z[4], asfloat(g_con0.x) * 2.0);
+    const float prev = prevFocusTex.Load(int3(0, 0, 0)).r;
+    float focus = candidate;
+    if (prev > 0.0 && asfloat(g_con1.z) < 0.5) {
+        const float limit = log(max(asfloat(g_con1.x), 1.0001));
+        focus = prev * exp(clamp(log(candidate / prev) * asfloat(g_con1.y), -limit, limit));
+    }
+    return float4(focus, 0.0, 0.0, 0.0);
 }
 #endif
 
 #if defined(PASS_DOF_BLUR)
 // Far-field depth of field on the scene EFB, the soft distant backdrop of a
-// modern platformer. The focus is the nearest depth among a few samples around
-// the viewport centre, where the camera keeps Mario. The blur radius is 0 up to
+// modern platformer. The focus (t2, from the focus pass) is the smoothed depth
+// at the viewport centre, where the camera keeps Mario. The blur radius is 0 up to
 // focus * g_con1.y and grows to g_con1.x pixels at focus * g_con1.y * g_con1.z;
 // the far plane (sky) and cleared pixels are fully blurred. Nothing nearer than
 // the focus is blurred, so the ground under Mario and the HUD stay sharp.
 // g_con0.xy = (near, far); g_params = scene viewport; the alpha output is the
 // blend weight the apply pass uses.
 Texture2D colorTex : register(t1);
+Texture2D focusTex : register(t2);
 float DofCoc(float zv, float focus) {
     const float far_z = asfloat(g_con0.y);
     if (zv < 0.0) zv = far_z;
@@ -568,15 +707,7 @@ float DofCoc(float zv, float focus) {
     return saturate((zv - start) / max(1e-3, full - start)) * asfloat(g_con1.x);
 }
 float DofFocus() {
-    const float2 c = g_params.xy + g_params.zw * 0.5;
-    const float2 offsets[5] = {
-        float2(0.0, 0.0), float2(-0.05, 0.0), float2(0.05, 0.0), float2(0.0, -0.08), float2(0.0, 0.08)};
-    float focus = asfloat(g_con0.y);
-    [unroll] for (int k = 0; k < 5; ++k) {
-        const float z = SsaoViewZ(int2(c + offsets[k] * g_params.zw));
-        if (z > 0.0) focus = min(focus, z);
-    }
-    return focus;
+    return focusTex.Load(int3(0, 0, 0)).r;
 }
 float4 PSMain(FullscreenOut i) : SV_Target {
     const int2 p = int2(i.pos.xy);
@@ -617,32 +748,21 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 #endif
 
 #if defined(PASS_MOTION_BLUR)
-// Camera motion blur on the scene EFB. Only the camera's rotation since the
-// previous scene is used, not its movement: the camera follows Mario, so a
-// translation-based blur would smear him while he runs, while turning the
-// camera smears the whole view as a real shutter does. Each pixel's view ray is
-// rotated into the previous camera and projected; the screen offset, scaled
-// by the shutter, is blurred along with 12 taps. The alpha output is the blend
-// weight the apply pass uses.
-// g_con0 = GX projection (A, B, C, D); g_con1.xyz, g_con2.xyz, g_con3.xyz = the
-// rows of previous view rotation * current^T; g_con1.w = maximum length in
-// pixels, g_con2.w = shutter; g_params = scene viewport.
-Texture2D colorTex : register(t0);
+// Per-pixel motion blur on the scene EFB from the scene's motion vectors (the
+// ones the temporal upscaler uses): every pixel carries its own screen-space
+// velocity, current to previous position in render pixels, from the camera and
+// from the object (Mario's limbs, enemies, falling things). Each pixel is
+// smeared along its velocity, scaled by the shutter, with 16 interleaved taps.
+// Two guards keep it clean: a tap on a clearly nearer surface that moves much
+// less than this pixel is skipped (a still Mario must not smear into a moving
+// backdrop), and the sky and unwritten pixels (no velocity) stay sharp.
+// t0 velocity (RG16F), t1 depth (reversed: larger is nearer), t2 colour;
+// g_params = scene viewport; g_con0.x = shutter, g_con0.y = maximum length in
+// pixels. The alpha output is the blend weight the apply pass uses.
+Texture2D velocityTex : register(t0);
+Texture2D depthTex : register(t1);
+Texture2D colorTex : register(t2);
 FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
-float2 MotionPrevPixel(float2 px) {
-    const float4 vp = g_params;
-    const float4 proj = asfloat(g_con0);
-    const float nx = 2.0 * (px.x - vp.x) / vp.z - 1.0;
-    const float ny = 1.0 - 2.0 * (px.y - vp.y) / vp.w;
-    const float3 d = float3((nx + proj.y) / proj.x, (ny + proj.w) / proj.z, -1.0);
-    const float3 r = float3(dot(asfloat(g_con1.xyz), d), dot(asfloat(g_con2.xyz), d),
-                            dot(asfloat(g_con3.xyz), d));
-    const float zv = -r.z;
-    if (zv <= 0.05) return px;
-    const float pnx = proj.x * r.x / zv - proj.y;
-    const float pny = proj.z * r.y / zv - proj.w;
-    return float2(vp.x + (pnx + 1.0) * 0.5 * vp.z, vp.y + (1.0 - pny) * 0.5 * vp.w);
-}
 float4 PSMain(FullscreenOut i) : SV_Target {
     const int2 p = int2(i.pos.xy);
     const float4 vp = g_params;
@@ -650,24 +770,32 @@ float4 PSMain(FullscreenOut i) : SV_Target {
         float(p.y) >= vp.y + vp.w) {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
+    float2 v = velocityTex.Load(int3(p, 0)).rg * asfloat(g_con0.x);
+    float len = length(v);
+    if (!(len >= 0.75)) return float4(0.0, 0.0, 0.0, 0.0);
+    const float max_len = asfloat(g_con0.y);
+    if (len > max_len) { v *= max_len / len; len = max_len; }
+    const float depth_here = depthTex.Load(int3(p, 0)).r;
     const float2 centre = float2(p) + 0.5;
-    float2 v = (centre - MotionPrevPixel(centre)) * asfloat(g_con2.w);
-    const float len = length(v);
-    if (len < 0.5) return float4(0.0, 0.0, 0.0, 0.0);
-    const float max_len = asfloat(g_con1.w);
-    if (len > max_len) v *= max_len / len;
-    const float2 lo = (vp.xy + 0.5) * g_rt_metrics.xy;
-    const float2 hi = (vp.xy + vp.zw - 0.5) * g_rt_metrics.xy;
-    // Interleaved offsets hide the tap spacing on long smears.
+    const float2 lo = vp.xy + 0.5;
+    const float2 hi = vp.xy + vp.zw - 0.5;
     static const float kBayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
     const float noise = kBayer[(p.y & 3) * 4 + (p.x & 3)] / 16.0;
-    const int kTaps = 12;
-    float3 sum = float3(0.0, 0.0, 0.0);
+    const int kTaps = 16;
+    float3 sum = colorTex.Load(int3(p, 0)).rgb;
+    float weight = 1.0;
     [unroll] for (int k = 0; k < kTaps; ++k) {
         const float t = (float(k) + noise) / float(kTaps) - 0.5;
-        sum += colorTex.SampleLevel(LinearSampler, clamp((centre + v * t) * g_rt_metrics.xy, lo, hi), 0).rgb;
+        const float2 q = clamp(centre + v * t, lo, hi);
+        const int2 qi = int2(q);
+        const float depth_q = depthTex.Load(int3(qi, 0)).r;
+        const float speed_q = length(velocityTex.Load(int3(qi, 0)).rg * asfloat(g_con0.x));
+        const bool occluder = depth_q > depth_here + 0.002 && speed_q < 0.5 * len;
+        if (occluder) continue;
+        sum += colorTex.SampleLevel(LinearSampler, q * g_rt_metrics.xy, 0).rgb;
+        weight += 1.0;
     }
-    return float4(sum / float(kTaps), saturate(min(len, max_len) - 0.5));
+    return float4(sum / weight, saturate(len - 0.5));
 }
 #endif
 

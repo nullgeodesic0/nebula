@@ -42,6 +42,7 @@
 #include "post_ssao_ao_ps.h"
 #include "post_ssao_blur_ps.h"
 #include "post_ssao_apply_ps.h"
+#include "post_dof_focus_ps.h"
 #include "post_dof_blur_ps.h"
 #include "post_dof_apply_ps.h"
 #include "post_motion_blur_ps.h"
@@ -72,6 +73,11 @@ constexpr unsigned kRtvSlots = 20u;
 constexpr unsigned kSsaoAoSlot = 14u;
 constexpr unsigned kSsaoBlurSlot = 15u;
 constexpr unsigned kSceneTempSlot = 16u;
+constexpr unsigned kDofFocusSlot = 17u;  // and 18
+// One float per scene: the depth of field's smoothed focus distance.
+constexpr DXGI_FORMAT kFocusFormat = DXGI_FORMAT_R32_FLOAT;
+// The scene's motion vectors (kMotionVectorFormat in renderer_d3d12.h).
+constexpr DXGI_FORMAT kVelocityFormat = DXGI_FORMAT_R16G16_FLOAT;
 // R ambient occlusion, G contact shadow visibility.
 constexpr DXGI_FORMAT kSsaoFormat = DXGI_FORMAT_R8G8_UNORM;
 constexpr DXGI_FORMAT kDepthSrvFormat = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
@@ -397,9 +403,11 @@ bool PostProcessor::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
         ssao_blur_pipeline_.Reset();
         ssao_apply_pipeline_.Reset();
     }
-    if (!(create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_dof_blur_ps)), kColorFormat, 0, dof_blur_pipeline_) &&
+    if (!(create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_dof_focus_ps)), kFocusFormat, 0, dof_focus_pipeline_) &&
+          create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_dof_blur_ps)), kColorFormat, 0, dof_blur_pipeline_) &&
           create_pipeline_over(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_dof_apply_ps)), kColorFormat, dof_apply_pipeline_))) {
         std::cerr << "[post-process] depth of field pipelines failed; it stays off\n";
+        dof_focus_pipeline_.Reset();
         dof_blur_pipeline_.Reset();
         dof_apply_pipeline_.Reset();
     }
@@ -488,8 +496,12 @@ void PostProcessor::shutdown() noexcept {
     ssao_apply_pipeline_.Reset();
     ssao_ao_ = {};
     ssao_blur_ = {};
+    dof_focus_pipeline_.Reset();
     dof_blur_pipeline_.Reset();
     dof_apply_pipeline_.Reset();
+    dof_focus_[0] = {};
+    dof_focus_[1] = {};
+    dof_focus_valid_ = false;
     motion_blur_pipeline_.Reset();
     ssr_pipeline_.Reset();
     scene_temp_ = {};
@@ -1102,6 +1114,7 @@ bool PostProcessor::record_ssao(ID3D12GraphicsCommandList* list, DescriptorRing&
     c.con3[0] = bits(in.shadow_strength);
     c.con3[1] = bits(in.shadow_length);
     c.con3[2] = bits(in.shadow_thickness);
+    c.con3[3] = bits(in.shadow_long_length);
     const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
                             static_cast<float>(in.height), 0.0f, 1.0f};
     list->SetGraphicsRootSignature(root_signature_.Get());
@@ -1147,8 +1160,50 @@ bool PostProcessor::record_dof(ID3D12GraphicsCommandList* list, DescriptorRing& 
     c.con1[2] = bits(in.focus_full);
     const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
                             static_cast<float>(in.height), 0.0f, 1.0f};
+
+    // The focus distance eases over scenes through two 1x1 targets. They start at
+    // zero ("no previous focus"); a change of camera planes (a camera cut, a new
+    // level) restarts the easing from the new candidate.
+    if (!ensure_target(dof_focus_[0], 1u, 1u, kFocusFormat, kDofFocusSlot, frame_index,
+                       frames_in_flight) ||
+        !ensure_target(dof_focus_[1], 1u, 1u, kFocusFormat, kDofFocusSlot + 1u, frame_index,
+                       frames_in_flight)) {
+        return false;
+    }
+    list->SetGraphicsRootSignature(root_signature_.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    if (!dof_focus_valid_) {
+        const float zero[4]{};
+        for (Target& focus : dof_focus_) {
+            transition(list, focus, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            list->ClearRenderTargetView(focus.rtv, zero, 0, nullptr);
+            transition(list, focus, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
+        dof_focus_valid_ = true;
+    }
+    const auto changed = [](float now, float before) {
+        return before <= 0.0f || std::fabs(now - before) > 0.2f * before;
+    };
+    const bool cut = changed(in.camera_near, dof_last_near_) || changed(in.camera_far, dof_last_far_);
+    dof_last_near_ = in.camera_near;
+    dof_last_far_ = in.camera_far;
+    Target& previous = dof_focus_[dof_focus_index_];
+    Target& current = dof_focus_[dof_focus_index_ ^ 1u];
+    dof_focus_index_ ^= 1u;
+    Constants f = c;
+    f.con1[0] = bits(1.05f);      // at most 5% per scene toward the candidate
+    f.con1[1] = bits(0.15f);      // and 15% of the remaining distance (log space)
+    f.con1[2] = bits(cut ? 1.0f : 0.0f);
+    const D3D12_VIEWPORT one{0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+    transition(list, current, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    list->OMSetRenderTargets(1, &current.rtv, FALSE, nullptr);
+    draw(list, srv_ring, dof_focus_pipeline_.Get(), {in.depth, previous.resource.Get()},
+         {kDepthSrvFormat, kFocusFormat}, one, f);
+    transition(list, current, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
     record_scene_blend(list, srv_ring, dof_blur_pipeline_.Get(), in.color, in.color_rtv,
-                       {in.depth, in.color}, {kDepthSrvFormat, kColorFormat}, vp, c);
+                       {in.depth, in.color, current.resource.Get()},
+                       {kDepthSrvFormat, kColorFormat, kFocusFormat}, vp, c);
     return true;
 }
 
@@ -1186,7 +1241,8 @@ bool PostProcessor::record_ssr(ID3D12GraphicsCommandList* list, DescriptorRing& 
 bool PostProcessor::record_motion_blur(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
                                        const MotionBlurInputs& in, std::uint64_t frame_index,
                                        unsigned frames_in_flight) {
-    if (!motion_blur_ready() || in.color == nullptr || in.width == 0u || in.height == 0u ||
+    if (!motion_blur_ready() || in.velocity == nullptr || in.depth == nullptr ||
+        in.color == nullptr || in.width == 0u || in.height == 0u ||
         !ensure_target(scene_temp_, in.width, in.height, kColorFormat, kSceneTempSlot,
                        frame_index, frames_in_flight)) {
         return false;
@@ -1197,18 +1253,13 @@ bool PostProcessor::record_motion_blur(ID3D12GraphicsCommandList* list, Descript
     c.rt_metrics[2] = static_cast<float>(in.width);
     c.rt_metrics[3] = static_cast<float>(in.height);
     for (unsigned i = 0; i < 4u; ++i) c.params[i] = in.viewport[i];
-    for (unsigned i = 0; i < 4u; ++i) c.con0[i] = bits(in.proj[i]);
-    for (unsigned i = 0; i < 3u; ++i) {
-        c.con1[i] = bits(in.rotation[i]);
-        c.con2[i] = bits(in.rotation[3u + i]);
-        c.con3[i] = bits(in.rotation[6u + i]);
-    }
-    c.con1[3] = bits(in.max_length);
-    c.con2[3] = bits(in.shutter);
+    c.con0[0] = bits(in.shutter);
+    c.con0[1] = bits(in.max_length);
     const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
                             static_cast<float>(in.height), 0.0f, 1.0f};
     record_scene_blend(list, srv_ring, motion_blur_pipeline_.Get(), in.color, in.color_rtv,
-                       {in.color}, {kColorFormat}, vp, c);
+                       {in.velocity, in.depth, in.color},
+                       {kVelocityFormat, kDepthSrvFormat, kColorFormat}, vp, c);
     return true;
 }
 

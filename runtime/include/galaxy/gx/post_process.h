@@ -164,6 +164,7 @@ public:
         float shadow_strength = 0.0f;               // 0-1; 0 skips the march
         float shadow_length = 80.0f;                // world units
         float shadow_thickness = 30.0f;             // world units an occluder is assumed deep
+        float shadow_long_length = 360.0f;          // soft long-range shadow ray, world units (0 = off)
     };
     // True when the passes were recorded. The caller moves the depth buffer into
     // PIXEL_SHADER_RESOURCE before the call and restores it after.
@@ -201,19 +202,19 @@ public:
     bool record_dof(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
                     const DofInputs& inputs, std::uint64_t frame_index,
                     unsigned frames_in_flight);
-    [[nodiscard]] bool dof_ready() const noexcept { return ready_ && dof_blur_pipeline_ && dof_apply_pipeline_; }
+    [[nodiscard]] bool dof_ready() const noexcept { return ready_ && dof_focus_pipeline_ && dof_blur_pipeline_ && dof_apply_pipeline_; }
 
-    // Camera motion blur on the scene EFB from the rotation between the previous
-    // and current scene cameras (see the MOTION BLUR notes in post_process.hlsl),
-    // blended over the EFB colour with the depth of field apply.
+    // Per-pixel motion blur on the scene EFB from the scene's motion vectors (see
+    // the MOTION BLUR notes in post_process.hlsl), blended over the EFB colour
+    // with the depth of field apply.
     struct MotionBlurInputs {
+        ID3D12Resource* velocity = nullptr;         // RG16F render pixels, in PIXEL_SHADER_RESOURCE
+        ID3D12Resource* depth = nullptr;            // R24G8 typeless, in PIXEL_SHADER_RESOURCE
         ID3D12Resource* color = nullptr;            // the EFB colour, in RENDER_TARGET
         D3D12_CPU_DESCRIPTOR_HANDLE color_rtv{};
         unsigned width = 0;
         unsigned height = 0;
         float viewport[4]{};                        // scene viewport x, y, w, h
-        float proj[4]{};                            // GX projection A, B, C, D
-        float rotation[9]{};                        // previous view rotation * current^T, row-major
         float shutter = 0.5f;                       // fraction of the frame's motion smeared
         float max_length = 32.0f;                   // pixels
     };
@@ -308,8 +309,16 @@ private:
     bool create_pipeline_over(D3D12_SHADER_BYTECODE vs, D3D12_SHADER_BYTECODE ps,
                               DXGI_FORMAT format,
                               Microsoft::WRL::ComPtr<ID3D12PipelineState>& out);
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_focus_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_blur_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_apply_pipeline_;
+    // Depth of field focus: two 1x1 R32F targets that alternate as the previous
+    // and current focus distance, so the focus eases over scenes.
+    Target dof_focus_[2];
+    unsigned dof_focus_index_ = 0;
+    bool dof_focus_valid_ = false;
+    float dof_last_near_ = 0.0f;
+    float dof_last_far_ = 0.0f;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_blur_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> ssr_pipeline_;
     // The colour pass shared by depth of field and motion blur: `pipeline`

@@ -5810,7 +5810,10 @@ void RendererD3D12::begin_frame(bool present_swap_chain) {
     apply_pending_efb_scale();
     sync_post_process_settings();
     {
-        const RingMode mode = temporal_mode() ? RingMode::Temporal
+        // Motion blur needs the matrix history the temporal ring keeps (skinned
+        // meshes' previous palettes), so it selects that ring when nothing else does.
+        const bool blur_history = get_render_config().motion_blur != 0u && !interpolation_mode();
+        const RingMode mode = (temporal_mode() || blur_history) ? RingMode::Temporal
             : interpolation_mode() ? RingMode::Interp : RingMode::Normal;
         if (mode != ring_mode_) {
             wait_for_gpu();
@@ -7117,12 +7120,23 @@ bool RendererD3D12::present_replay_subframe(
 }
 
 bool RendererD3D12::begin_motion_scene() {
-    if (!scene_temporal_ || !ensure_motion_target()) {
+    if ((!scene_temporal_ && !scene_motion_only_) || !ensure_motion_target()) {
         return false;
     }
     const float zero[4]{};
     command_list_->ClearRenderTargetView(motion_rtv_, zero, 0u, nullptr);
     command_list_->ClearRenderTargetView(reactive_rtv_, zero, 0u, nullptr);
+    scene_motion_valid_ = true;
+    return true;
+}
+
+bool RendererD3D12::scene_motion_blur_begin() {
+    scene_motion_only_ = false;
+    if (scene_temporal_ || output_efb_active_ || replay_recording_ || !post_process_.ready() ||
+        !post_process_.motion_blur_ready() || get_render_config().motion_blur == 0u) {
+        return false;
+    }
+    scene_motion_only_ = true;
     return true;
 }
 
@@ -7131,6 +7145,8 @@ bool RendererD3D12::scene_temporal_begin(float& jitter_x, float& jitter_y) {
     jitter_y = 0.0f;
     scene_projection_valid_ = false;
     scene_light_valid_ = false;
+    scene_motion_only_ = false;
+    scene_motion_valid_ = false;
     scene_temporal_ = false;
     if (!temporal_mode() || output_efb_active_) {
         temporal_.reset();
@@ -7223,24 +7239,10 @@ bool RendererD3D12::record_scene_effects() {
     const bool occlusion = post_process_.ssao_ready() && (cfg.ssao != 0u || shadows);
     const bool dof = post_process_.dof_ready() && cfg.depth_of_field != 0u;
     const bool reflections = post_process_.ssr_ready() && cfg.reflections != 0u;
-    // Previous view rotation * current^T, which carries a current view ray into
-    // the previous camera. Skipped on a camera cut (more than 20 degrees).
-    float rotation[9]{};
-    bool motion = post_process_.motion_blur_ready() && cfg.motion_blur != 0u &&
-                  scene_view_valid_ && scene_prev_view_valid_;
-    if (motion) {
-        for (unsigned r = 0; r < 3u; ++r) {
-            for (unsigned c = 0; c < 3u; ++c) {
-                float sum = 0.0f;
-                for (unsigned k = 0; k < 3u; ++k) {
-                    sum += scene_prev_view_[r * 4u + k] * scene_view_[c * 4u + k];
-                }
-                rotation[r * 3u + c] = sum;
-            }
-        }
-        const float cos_angle = 0.5f * (rotation[0] + rotation[4] + rotation[8] - 1.0f);
-        motion = std::isfinite(cos_angle) && cos_angle > 0.94f && cos_angle < 0.999999f;
-    }
+    // Motion blur reads the scene's motion vectors (written by the draws of a
+    // scene that began with them: scene_motion_valid_).
+    const bool motion = post_process_.motion_blur_ready() && cfg.motion_blur != 0u &&
+                        scene_motion_valid_ && motion_target_;
     if (!occlusion && !reflections && !dof && !motion) {
         return false;
     }
@@ -7264,6 +7266,9 @@ bool RendererD3D12::record_scene_effects() {
         in.shadow_strength = static_cast<float>(std::min(cfg.contact_shadows, 100u)) / 100.0f;
         in.shadow_length = shadow_length;
         in.shadow_thickness = shadow_length * 0.4f;
+        // The long ray's reach; GALAXY_CONTACT_SHADOW_LONG=0 keeps only the contact ray.
+        static const float shadow_long = env_float("GALAXY_CONTACT_SHADOW_LONG", 360.0f, 0.0f);
+        in.shadow_long_length = shadow_long;
     }
 
     D3D12_RESOURCE_BARRIER bar{};
@@ -7303,18 +7308,28 @@ bool RendererD3D12::record_scene_effects() {
     }
     if (motion) {
         PostProcessor::MotionBlurInputs m{};
+        m.velocity = motion_target_.Get();
+        m.depth = efb_depth_.Get();
         m.color = efb_color_.Get();
         m.color_rtv = efb_rtv_;
         m.width = in.width;
         m.height = in.height;
         std::memcpy(m.viewport, in.viewport, sizeof(m.viewport));
-        std::memcpy(m.proj, in.proj, sizeof(m.proj));
-        std::memcpy(m.rotation, rotation, sizeof(m.rotation));
         // 100% is a full-frame (360 degree) shutter; the default 50 is the film 180.
         m.shutter = static_cast<float>(std::min(cfg.motion_blur, 100u)) / 100.0f;
         m.max_length = in.viewport[3] * 0.05f;
+        // The motion target rests in RENDER_TARGET; the pass samples it.
+        D3D12_RESOURCE_BARRIER velocity_bar{};
+        velocity_bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        velocity_bar.Transition.pResource = motion_target_.Get();
+        velocity_bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        velocity_bar.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        velocity_bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        command_list_->ResourceBarrier(1, &velocity_bar);
         recorded |= post_process_.record_motion_blur(
             command_list_.Get(), srv_ring_, m, frame_index_, kFramesInFlight);
+        std::swap(velocity_bar.Transition.StateBefore, velocity_bar.Transition.StateAfter);
+        command_list_->ResourceBarrier(1, &velocity_bar);
     }
     std::swap(bar.Transition.StateBefore, bar.Transition.StateAfter);
     command_list_->ResourceBarrier(1, &bar);
