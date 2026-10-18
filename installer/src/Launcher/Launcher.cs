@@ -224,7 +224,7 @@ namespace Nebula.Launcher
         private GraphicsSettings graphics = GraphicsSettings.Load();
         private AudioSettings audio = AudioSettings.Load();
         private GeneralSettings general = GeneralSettings.Load();
-        private readonly ComboBox textSpeed = new ComboBox(), languageBox = new ComboBox();
+        private readonly ComboBox textSpeed = new ComboBox(), languageBox = new ComboBox(), animationBlend = new ComboBox();
         private readonly ControlsSettings controls = ControlsSettings.Load();
         private bool loading;
         private readonly ComboBox inputSource = new ComboBox(), editScheme = new ComboBox(), motion = new ComboBox(),
@@ -362,6 +362,14 @@ namespace Nebula.Launcher
             generalPage.Controls.Add(new Label
             {
                 Text = "The game starts in this language. While it is running, a change applies the next time it starts.",
+                Location = new Point(12, y + 3), Size = new Size(700, 26), ForeColor = SystemColors.GrayText
+            });
+            y += 36;
+            Row(generalPage, "Animation blending", animationBlend, ref y);
+            animationBlend.Items.AddRange(GeneralSettings.AnimationBlends);
+            generalPage.Controls.Add(new Label
+            {
+                Text = "How characters move from one animation to the next. Only the drawn pose changes; the game plays the same.",
                 Location = new Point(12, y + 3), Size = new Size(700, 26), ForeColor = SystemColors.GrayText
             });
 
@@ -743,6 +751,7 @@ namespace Nebula.Launcher
             }
             textSpeed.SelectedIndex = Math.Max(0, Math.Min(general.TextSpeed - 1, GeneralSettings.TextSpeeds.Length - 1));
             languageBox.SelectedIndex = Math.Max(0, Math.Min(general.Language, GeneralSettings.Languages.Length - 1));
+            animationBlend.SelectedIndex = Math.Max(0, Math.Min(general.AnimationBlend, GeneralSettings.AnimationBlends.Length - 1));
             recording.SelectedIndex = (int)session.Recording;
             contentLabel.Text = session.Content;
             windowSize = new Size(graphics.WindowWidth, graphics.WindowHeight);
@@ -881,6 +890,7 @@ namespace Nebula.Launcher
                 audio.Save();
                 general.TextSpeed = Math.Max(0, textSpeed.SelectedIndex) + 1;
                 general.Language = Math.Max(0, languageBox.SelectedIndex);
+                general.AnimationBlend = Math.Max(0, animationBlend.SelectedIndex);
                 general.Save();
                 EndCapture();
                 if (controls.InputMode != ControlsSettings.ModeRealWiimote) controls.InputMode = Math.Max(0, inputSource.SelectedIndex);

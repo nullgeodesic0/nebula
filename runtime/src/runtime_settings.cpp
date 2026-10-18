@@ -60,6 +60,9 @@ RuntimeSettings sanitize_settings(RuntimeSettings settings) {
     if (settings.language != GameLanguage::French && settings.language != GameLanguage::Spanish) {
         settings.language = GameLanguage::English;
     }
+    if (settings.animation_blend != AnimationBlend::Smooth && settings.animation_blend != AnimationBlend::Smoother) {
+        settings.animation_blend = AnimationBlend::Original;
+    }
     return settings;
 }
 
@@ -151,6 +154,10 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
     } else if (std::strcmp(key, "language") == 0) {
         for (const GameLanguage language : {GameLanguage::English, GameLanguage::French, GameLanguage::Spanish}) {
             if (_stricmp(value, game_language_key(language)) == 0) settings.language = language;
+        }
+    } else if (std::strcmp(key, "animation_blend") == 0) {
+        for (const AnimationBlend blend : {AnimationBlend::Original, AnimationBlend::Smooth, AnimationBlend::Smoother}) {
+            if (_stricmp(value, animation_blend_key(blend)) == 0) settings.animation_blend = blend;
         }
     }
 }
@@ -287,6 +294,7 @@ void apply_env_overrides(RuntimeSettings& settings) {
         settings, "GALAXY_AUDIO_CUTSCENE_GAIN", "audio_cutscene_gain");
     apply_env(settings, "GALAXY_TEXT_SPEED", "text_speed");
     apply_env(settings, "GALAXY_LANGUAGE", "language");
+    apply_env(settings, "GALAXY_ANIMATION_BLEND", "animation_blend");
 }
 
 }  // namespace
@@ -328,6 +336,15 @@ const char* game_language_key(GameLanguage language) noexcept {
     case GameLanguage::English: break;
     }
     return "english";
+}
+
+const char* animation_blend_key(AnimationBlend blend) noexcept {
+    switch (blend) {
+    case AnimationBlend::Smooth: return "smooth";
+    case AnimationBlend::Smoother: return "smoother";
+    case AnimationBlend::Original: break;
+    }
+    return "original";
 }
 
 RuntimeInputModeState get_runtime_input_mode_state() {
@@ -416,6 +433,7 @@ bool reload_runtime_audio_settings_if_changed() noexcept {
         settings.audio = parsed.audio;
         settings.text_speed = parsed.text_speed;
         settings.language = parsed.language;
+        settings.animation_blend = parsed.animation_blend;
         set_runtime_settings(settings);
         input::set_controls_config(controls);
         record_input_mode_sync(file_mode, settings.input_mode);
@@ -452,6 +470,7 @@ bool save_runtime_settings_to_file() {
                  << "audio_cutscene_gain=" << settings.audio.cutscene << '\n'
                  << "text_speed=" << settings.text_speed << '\n'
                  << "language=" << game_language_key(settings.language) << '\n'
+                 << "animation_blend=" << animation_blend_key(settings.animation_blend) << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;

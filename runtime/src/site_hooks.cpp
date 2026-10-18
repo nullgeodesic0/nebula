@@ -1,5 +1,6 @@
 #include "galaxy/site_hooks.h"
 
+#include "galaxy/animation_blend.h"
 #include "galaxy/experimental_ultrawide_aspect.h"
 #include "galaxy/layout_aspect.h"
 #include "galaxy/layout_aspect_cinema.h"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -52,6 +54,29 @@ bool rmge01_guest_object(std::uint32_t address) noexcept {
     return ((address >= 0x80000000u && address < 0x81800000u) ||
             (address >= 0x90000000u && address < 0x94000000u)) &&
            (address & 3u) == 0u;
+}
+
+// XanimePlayer (r3 at its updateInterpoleRatio calls): +0x08 the cross-fade ratio (f32), +0x20 the
+// current XanimeFrameCtrl, whose +0x14 counts the cross-fade's remaining frames (s32). Layouts from
+// Petari's XanimePlayer.hpp. The game's own step then runs on the values stored here.
+void shape_rmge01_animation_interpole(PpcContext* context, GuestMemoryV1* memory,
+                                      const NativeServicesV1* services, std::uint32_t pc) {
+    const AnimationBlend blend = get_runtime_settings().animation_blend;
+    if (blend == AnimationBlend::Original) return;
+    const std::uint32_t player = context->gpr[3];
+    if (!rmge01_guest_object(player)) return;
+    const std::uint32_t frame_ctrl = guest_load_u32(memory, player + 0x20u, services, pc);
+    if (!rmge01_guest_object(frame_ctrl)) return;
+    const float ratio = std::bit_cast<float>(guest_load_u32(memory, player + 0x08u, services, pc));
+    const auto remaining =
+        static_cast<std::int32_t>(guest_load_u32(memory, frame_ctrl + 0x14u, services, pc));
+    const AnimationInterpoleStep step = shape_animation_interpole(blend, ratio, remaining);
+    if (step.remaining != remaining) {
+        guest_store_u32(memory, frame_ctrl + 0x14u, static_cast<std::uint32_t>(step.remaining), services, pc);
+    }
+    if (std::bit_cast<std::uint32_t>(step.ratio) != std::bit_cast<std::uint32_t>(ratio)) {
+        guest_store_u32(memory, player + 0x08u, std::bit_cast<std::uint32_t>(step.ratio), services, pc);
+    }
 }
 
 // ScenarioSelectScene builds the perspective of its own CameraContext once, at
@@ -165,6 +190,9 @@ void dispatch_site_hook(
         // The game, its HOME Menu and its message files all follow SCGetLanguage. The answer is
         // fixed at the first question of the session (game_language_for_boot).
         context->gpr[3] = static_cast<std::uint32_t>(game_language_for_boot());
+        return;
+    case SiteHookKind::AnimationInterpole:
+        shape_rmge01_animation_interpole(context, memory, services, guest_pc);
         return;
     case SiteHookKind::LodDistance:
         // LodCtrl::update keeps the game's distances: which model shows is

@@ -239,6 +239,15 @@ const char* game_language_name(GameLanguage language) {
     }
     return "ENGLISH";
 }
+
+const char* animation_blend_name(AnimationBlend blend) {
+    switch (blend) {
+    case AnimationBlend::Smooth: return "SMOOTH";
+    case AnimationBlend::Smoother: return "SMOOTHER";
+    case AnimationBlend::Original: break;
+    }
+    return "ORIGINAL";
+}
 // Rows the panel shows at once; longer pages scroll.
 constexpr unsigned kNativeSettingsVisibleRows = 9u;
 
@@ -689,7 +698,7 @@ unsigned native_settings_row_count(unsigned tab) {
     case 1: return fsr3_available() ? 9u : 8u;
     case 2: return controls_row_count();
     case 3: return 6u;
-    case 4: return 2u;
+    case 4: return 3u;
     default: return 0u;
     }
 }
@@ -1157,6 +1166,16 @@ void adjust_native_setting_unlogged(int delta) {
         const GameLanguage next = kGameLanguages[step(std::min(index, 2u), 3u)];
         if (next != settings.language) {
             settings.language = next;
+            set_runtime_settings(settings);
+            s_native_settings_dirty.store(true, std::memory_order_release);
+        }
+    }
+    if (tab == 4u && row == 2u) {
+        // Animation blending changes live (no apply): the next cross-fade takes it.
+        const auto next = static_cast<AnimationBlend>(
+            step(std::min(static_cast<unsigned>(settings.animation_blend), 2u), 3u));
+        if (next != settings.animation_blend) {
+            settings.animation_blend = next;
             set_runtime_settings(settings);
             s_native_settings_dirty.store(true, std::memory_order_release);
         }
@@ -9495,6 +9514,7 @@ std::string native_settings_row_text(
             return text;
         }
         if (row == 1u) return std::string("LANGUAGE: ") + game_language_name(runtime.language);
+        if (row == 2u) return std::string("ANIMATION BLENDING: ") + animation_blend_name(runtime.animation_blend);
         return {};
     default:
         return {};

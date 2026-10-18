@@ -238,6 +238,19 @@ namespace Nebula.Launcher
             Check(GeneralSettings.Load().Language == 1, "the runtime's language values read in any case");
             File.WriteAllText(path, "language=klingon\n");
             Check(GeneralSettings.Load().Language == 0, "an unknown language reads as English");
+            File.WriteAllText(path, "text_speed=2\n");
+            Check(GeneralSettings.Load().AnimationBlend == 0 && GeneralSettings.AnimationBlends.Length == 3,
+                  "animation blending starts as the game's, with three choices");
+            general = GeneralSettings.Load();
+            general.AnimationBlend = 2;
+            general.Save();
+            saved = File.ReadAllText(path);
+            Check(saved.Contains("animation_blend=smoother") && saved.Contains("text_speed=2") &&
+                  GeneralSettings.Load().AnimationBlend == 2, "animation blending is saved for the runtime");
+            File.WriteAllText(path, "animation_blend=SMOOTH\n");
+            Check(GeneralSettings.Load().AnimationBlend == 1, "the runtime's blending values read in any case");
+            File.WriteAllText(path, "animation_blend=wobbly\n");
+            Check(GeneralSettings.Load().AnimationBlend == 0, "an unknown blending reads as the game's");
             File.Delete(path);
         }
 
