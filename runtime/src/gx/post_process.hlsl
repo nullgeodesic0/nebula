@@ -649,7 +649,10 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     // screen (Mario mid-jump) must not lose its reflection to the edge fade.
     const float2 edge = min(hit - g_params.xy, g_params.xy + g_params.zw - hit) / (0.03 * g_params.zw);
     const float fade = saturate(min(edge.x, edge.y)) * (1.0 - hi_t * hi_t) * toward;
-    const float3 colour = colorTex.SampleLevel(LinearSampler, hit * g_rt_metrics.xy, 0).rgb;
+    // Point-sampled: a bilinear tap averages a small detail (Mario's blue irises,
+    // a few pixels wide) with the white and the skin around it, which washes it
+    // to white in the reflection.
+    const float3 colour = colorTex.Load(int3(int2(floor(hit)), 0)).rgb;
     // The environment fallback is the floor under a confident hit's weight, so the
     // blend between the two is continuous.
     const float env_floor = 0.3 * toward;
