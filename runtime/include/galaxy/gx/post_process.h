@@ -191,6 +191,25 @@ public:
                     unsigned frames_in_flight);
     [[nodiscard]] bool dof_ready() const noexcept { return ready_ && dof_blur_pipeline_ && dof_apply_pipeline_; }
 
+    // Camera motion blur on the scene EFB from the rotation between the previous
+    // and current scene cameras (see the MOTION BLUR notes in post_process.hlsl),
+    // blended over the EFB colour with the depth of field apply.
+    struct MotionBlurInputs {
+        ID3D12Resource* color = nullptr;            // the EFB colour, in RENDER_TARGET
+        D3D12_CPU_DESCRIPTOR_HANDLE color_rtv{};
+        unsigned width = 0;
+        unsigned height = 0;
+        float viewport[4]{};                        // scene viewport x, y, w, h
+        float proj[4]{};                            // GX projection A, B, C, D
+        float rotation[9]{};                        // previous view rotation * current^T, row-major
+        float shutter = 0.5f;                       // fraction of the frame's motion smeared
+        float max_length = 32.0f;                   // pixels
+    };
+    bool record_motion_blur(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                            const MotionBlurInputs& inputs, std::uint64_t frame_index,
+                            unsigned frames_in_flight);
+    [[nodiscard]] bool motion_blur_ready() const noexcept { return ready_ && motion_blur_pipeline_ && dof_apply_pipeline_; }
+
     [[nodiscard]] const PostProcessSettings& settings() const noexcept { return settings_; }
 
     // Takes new settings between frames on the render thread. A quality change rebuilds the two SMAA
@@ -278,8 +297,18 @@ private:
                               DXGI_FORMAT format,
                               Microsoft::WRL::ComPtr<ID3D12PipelineState>& out);
     Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_blur_pipeline_;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_apply_pipeline_;  // dest = lerp(dest, source, source alpha), rgb only
-    Target dof_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_apply_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_blur_pipeline_;
+    // The colour pass shared by depth of field and motion blur: `pipeline`
+    // reads `inputs` (the EFB colour among them) into scene_temp_, which is
+    // then blended over the EFB colour.
+    void record_scene_blend(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                            ID3D12PipelineState* pipeline, ID3D12Resource* color,
+                            D3D12_CPU_DESCRIPTOR_HANDLE color_rtv,
+                            std::initializer_list<ID3D12Resource*> inputs,
+                            std::initializer_list<DXGI_FORMAT> formats,
+                            const D3D12_VIEWPORT& viewport, const Constants& constants);  // dest = lerp(dest, source, source alpha), rgb only
+    Target scene_temp_;                 // depth of field and motion blur result
     Target final_;                      // window-sized scene handed to the look pass
     Target bloom_down_targets_[kBloomLevels];
     Target bloom_up_targets_[kBloomLevels - 1u];

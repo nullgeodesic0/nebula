@@ -44,6 +44,7 @@
 #include "post_ssao_apply_ps.h"
 #include "post_dof_blur_ps.h"
 #include "post_dof_apply_ps.h"
+#include "post_motion_blur_ps.h"
 
 namespace galaxy::gx {
 namespace {
@@ -69,7 +70,7 @@ constexpr DXGI_FORMAT kStencilFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 constexpr unsigned kRtvSlots = 20u;
 constexpr unsigned kSsaoAoSlot = 14u;
 constexpr unsigned kSsaoBlurSlot = 15u;
-constexpr unsigned kDofSlot = 16u;
+constexpr unsigned kSceneTempSlot = 16u;
 // R ambient occlusion, G contact shadow visibility.
 constexpr DXGI_FORMAT kSsaoFormat = DXGI_FORMAT_R8G8_UNORM;
 constexpr DXGI_FORMAT kDepthSrvFormat = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
@@ -399,6 +400,10 @@ bool PostProcessor::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
         dof_blur_pipeline_.Reset();
         dof_apply_pipeline_.Reset();
     }
+    if (!create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_motion_blur_ps)), kColorFormat, 0, motion_blur_pipeline_)) {
+        std::cerr << "[post-process] motion blur pipeline failed; it stays off\n";
+        motion_blur_pipeline_.Reset();
+    }
     fault_selftest_ = test_fault("selftest");
     fault_targets_ = test_fault("targets");
     const bool smaa_pipelines = !test_fault("smaa") &&
@@ -478,7 +483,8 @@ void PostProcessor::shutdown() noexcept {
     ssao_blur_ = {};
     dof_blur_pipeline_.Reset();
     dof_apply_pipeline_.Reset();
-    dof_ = {};
+    motion_blur_pipeline_.Reset();
+    scene_temp_ = {};
     final_ = {};
     for (auto& t : bloom_down_targets_) t = {};
     for (auto& t : bloom_up_targets_) t = {};
@@ -1113,7 +1119,7 @@ bool PostProcessor::record_dof(ID3D12GraphicsCommandList* list, DescriptorRing& 
                                unsigned frames_in_flight) {
     if (!dof_ready() || in.depth == nullptr || in.color == nullptr || in.width == 0u ||
         in.height == 0u ||
-        !ensure_target(dof_, in.width, in.height, kColorFormat, kDofSlot,
+        !ensure_target(scene_temp_, in.width, in.height, kColorFormat, kSceneTempSlot,
                        frame_index, frames_in_flight)) {
         return false;
     }
@@ -1130,28 +1136,65 @@ bool PostProcessor::record_dof(ID3D12GraphicsCommandList* list, DescriptorRing& 
     c.con1[2] = bits(in.focus_full);
     const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
                             static_cast<float>(in.height), 0.0f, 1.0f};
+    record_scene_blend(list, srv_ring, dof_blur_pipeline_.Get(), in.color, in.color_rtv,
+                       {in.depth, in.color}, {kDepthSrvFormat, kColorFormat}, vp, c);
+    return true;
+}
+
+bool PostProcessor::record_motion_blur(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                                       const MotionBlurInputs& in, std::uint64_t frame_index,
+                                       unsigned frames_in_flight) {
+    if (!motion_blur_ready() || in.color == nullptr || in.width == 0u || in.height == 0u ||
+        !ensure_target(scene_temp_, in.width, in.height, kColorFormat, kSceneTempSlot,
+                       frame_index, frames_in_flight)) {
+        return false;
+    }
+    Constants c{};
+    c.rt_metrics[0] = 1.0f / static_cast<float>(in.width);
+    c.rt_metrics[1] = 1.0f / static_cast<float>(in.height);
+    c.rt_metrics[2] = static_cast<float>(in.width);
+    c.rt_metrics[3] = static_cast<float>(in.height);
+    for (unsigned i = 0; i < 4u; ++i) c.params[i] = in.viewport[i];
+    for (unsigned i = 0; i < 4u; ++i) c.con0[i] = bits(in.proj[i]);
+    for (unsigned i = 0; i < 3u; ++i) {
+        c.con1[i] = bits(in.rotation[i]);
+        c.con2[i] = bits(in.rotation[3u + i]);
+        c.con3[i] = bits(in.rotation[6u + i]);
+    }
+    c.con1[3] = bits(in.max_length);
+    c.con2[3] = bits(in.shutter);
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
+                            static_cast<float>(in.height), 0.0f, 1.0f};
+    record_scene_blend(list, srv_ring, motion_blur_pipeline_.Get(), in.color, in.color_rtv,
+                       {in.color}, {kColorFormat}, vp, c);
+    return true;
+}
+
+void PostProcessor::record_scene_blend(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                                       ID3D12PipelineState* pipeline, ID3D12Resource* color,
+                                       D3D12_CPU_DESCRIPTOR_HANDLE color_rtv,
+                                       std::initializer_list<ID3D12Resource*> inputs,
+                                       std::initializer_list<DXGI_FORMAT> formats,
+                                       const D3D12_VIEWPORT& vp, const Constants& c) {
     list->SetGraphicsRootSignature(root_signature_.Get());
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    bar.Transition.pResource = in.color;
+    bar.Transition.pResource = color;
     bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     bar.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     list->ResourceBarrier(1, &bar);
-    transition(list, dof_, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    list->OMSetRenderTargets(1, &dof_.rtv, FALSE, nullptr);
-    draw(list, srv_ring, dof_blur_pipeline_.Get(), {in.depth, in.color},
-         {kDepthSrvFormat, kColorFormat}, vp, c);
-    transition(list, dof_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    transition(list, scene_temp_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    list->OMSetRenderTargets(1, &scene_temp_.rtv, FALSE, nullptr);
+    draw(list, srv_ring, pipeline, inputs, formats, vp, c);
+    transition(list, scene_temp_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     std::swap(bar.Transition.StateBefore, bar.Transition.StateAfter);
     list->ResourceBarrier(1, &bar);
 
-    D3D12_CPU_DESCRIPTOR_HANDLE color = in.color_rtv;
-    list->OMSetRenderTargets(1, &color, FALSE, nullptr);
-    draw(list, srv_ring, dof_apply_pipeline_.Get(), {dof_.resource.Get()}, {kColorFormat}, vp, c);
-    return true;
+    list->OMSetRenderTargets(1, &color_rtv, FALSE, nullptr);
+    draw(list, srv_ring, dof_apply_pipeline_.Get(), {scene_temp_.resource.Get()}, {kColorFormat}, vp, c);
 }
 
 bool PostProcessor::ensure_enhance_targets(unsigned width, unsigned height,

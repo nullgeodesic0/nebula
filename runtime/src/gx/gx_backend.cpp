@@ -6455,6 +6455,7 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
         temporal_scene_ = renderer_.scene_temporal_begin(
             scene_jitter_px_[0], scene_jitter_px_[1]);
         motion_scene_ = temporal_scene_ && renderer_.begin_motion_scene();
+        renderer_.set_scene_view(view != nullptr ? view->data() : nullptr);
         scene_camera_captured_ = false;
         scene_light_captured_ = false;
         history_scene_ = temporal_scene_ || interp_recording_;

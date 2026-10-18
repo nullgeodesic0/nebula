@@ -540,6 +540,7 @@ unsigned pending_settings_changes() {
     changes += d.ssao != live.ssao;
     changes += d.contact_shadows != live.contact_shadows;
     changes += d.depth_of_field != live.depth_of_field;
+    changes += d.motion_blur != live.motion_blur;
     changes += d.anisotropic_filtering != live.anisotropic_filtering;
     changes += d.enhanced_mipmaps != live.enhanced_mipmaps;
     changes += d.per_pixel_lighting != live.per_pixel_lighting;
@@ -697,7 +698,7 @@ unsigned graphics_row(unsigned row) {
 unsigned native_settings_row_count(unsigned tab) {
     switch (tab % kNativeSettingsTabCount) {
     case 0: return 8u;
-    case 1: return fsr3_available() ? 16u : 15u;
+    case 1: return fsr3_available() ? 17u : 16u;
     case 2: return controls_row_count();
     case 3: return 6u;
     case 4: return 2u;
@@ -803,6 +804,7 @@ void apply_native_settings_draft() {
     applied.ssao = next.ssao;
     applied.contact_shadows = next.contact_shadows;
     applied.depth_of_field = next.depth_of_field;
+    applied.motion_blur = next.motion_blur;
     applied.anisotropic_filtering = next.anisotropic_filtering;
     applied.enhanced_mipmaps = next.enhanced_mipmaps;
     applied.per_pixel_lighting = next.per_pixel_lighting;
@@ -1087,6 +1089,10 @@ void adjust_native_setting_unlogged(int delta) {
         case 15:
             draft.depth_of_field = static_cast<unsigned>(std::clamp(
                 static_cast<int>(std::min(draft.depth_of_field, 100u)) + delta * 5, 0, 100));
+            break;
+        case 16:
+            draft.motion_blur = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.motion_blur, 100u)) + delta * 5, 0, 100));
             break;
         default: return;
         }
@@ -7143,6 +7149,15 @@ void RendererD3D12::set_scene_light(const float position[3]) noexcept {
     scene_light_valid_ = true;
 }
 
+void RendererD3D12::set_scene_view(const float* view) noexcept {
+    std::memcpy(scene_prev_view_, scene_view_, sizeof(scene_prev_view_));
+    scene_prev_view_valid_ = scene_view_valid_;
+    scene_view_valid_ = view != nullptr;
+    if (view != nullptr) {
+        std::memcpy(scene_view_, view, sizeof(scene_view_));
+    }
+}
+
 namespace {
 float env_float(const char* name, float fallback, float minimum) {
     char v[32]{};
@@ -7163,7 +7178,25 @@ bool RendererD3D12::record_scene_effects() {
     const bool shadows = cfg.contact_shadows != 0u && scene_light_valid_;
     const bool occlusion = post_process_.ssao_ready() && (cfg.ssao != 0u || shadows);
     const bool dof = post_process_.dof_ready() && cfg.depth_of_field != 0u;
-    if (!occlusion && !dof) {
+    // Previous view rotation * current^T, which carries a current view ray into
+    // the previous camera. Skipped on a camera cut (more than 20 degrees).
+    float rotation[9]{};
+    bool motion = post_process_.motion_blur_ready() && cfg.motion_blur != 0u &&
+                  scene_view_valid_ && scene_prev_view_valid_;
+    if (motion) {
+        for (unsigned r = 0; r < 3u; ++r) {
+            for (unsigned c = 0; c < 3u; ++c) {
+                float sum = 0.0f;
+                for (unsigned k = 0; k < 3u; ++k) {
+                    sum += scene_prev_view_[r * 4u + k] * scene_view_[c * 4u + k];
+                }
+                rotation[r * 3u + c] = sum;
+            }
+        }
+        const float cos_angle = 0.5f * (rotation[0] + rotation[4] + rotation[8] - 1.0f);
+        motion = std::isfinite(cos_angle) && cos_angle > 0.94f && cos_angle < 0.999999f;
+    }
+    if (!occlusion && !dof && !motion) {
         return false;
     }
     const float scale = static_cast<float>(efb_scale_);
@@ -7214,6 +7247,21 @@ bool RendererD3D12::record_scene_effects() {
                        static_cast<float>(std::min(cfg.depth_of_field, 100u)) / 100.0f;
         recorded |= post_process_.record_dof(
             command_list_.Get(), srv_ring_, d, frame_index_, kFramesInFlight);
+    }
+    if (motion) {
+        PostProcessor::MotionBlurInputs m{};
+        m.color = efb_color_.Get();
+        m.color_rtv = efb_rtv_;
+        m.width = in.width;
+        m.height = in.height;
+        std::memcpy(m.viewport, in.viewport, sizeof(m.viewport));
+        std::memcpy(m.proj, in.proj, sizeof(m.proj));
+        std::memcpy(m.rotation, rotation, sizeof(m.rotation));
+        // 100% is a full-frame (360 degree) shutter; the default 50 is the film 180.
+        m.shutter = static_cast<float>(std::min(cfg.motion_blur, 100u)) / 100.0f;
+        m.max_length = in.viewport[3] * 0.05f;
+        recorded |= post_process_.record_motion_blur(
+            command_list_.Get(), srv_ring_, m, frame_index_, kFramesInFlight);
     }
     std::swap(bar.Transition.StateBefore, bar.Transition.StateAfter);
     command_list_->ResourceBarrier(1, &bar);
@@ -9561,6 +9609,9 @@ std::string native_settings_row_text(
             return text;
         case 15:
             std::snprintf(text, sizeof(text), "DEPTH OF FIELD: %u%%", std::min(render.depth_of_field, 100u));
+            return text;
+        case 16:
+            std::snprintf(text, sizeof(text), "MOTION BLUR: %u%%", std::min(render.motion_blur, 100u));
             return text;
         default:
             return {};

@@ -512,6 +512,61 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 }
 #endif
 
+#if defined(PASS_MOTION_BLUR)
+// Camera motion blur on the scene EFB. Only the camera's rotation since the
+// previous scene is used, not its movement: the camera follows Mario, so a
+// translation-based blur would smear him while he runs, while turning the
+// camera smears the whole view as a real shutter does. Each pixel's view ray is
+// rotated into the previous camera and projected; the screen offset, scaled
+// by the shutter, is blurred along with 12 taps. The alpha output is the blend
+// weight the apply pass uses.
+// g_con0 = GX projection (A, B, C, D); g_con1.xyz, g_con2.xyz, g_con3.xyz = the
+// rows of previous view rotation * current^T; g_con1.w = maximum length in
+// pixels, g_con2.w = shutter; g_params = scene viewport.
+Texture2D colorTex : register(t0);
+FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
+float2 MotionPrevPixel(float2 px) {
+    const float4 vp = g_params;
+    const float4 proj = asfloat(g_con0);
+    const float nx = 2.0 * (px.x - vp.x) / vp.z - 1.0;
+    const float ny = 1.0 - 2.0 * (px.y - vp.y) / vp.w;
+    const float3 d = float3((nx + proj.y) / proj.x, (ny + proj.w) / proj.z, -1.0);
+    const float3 r = float3(dot(asfloat(g_con1.xyz), d), dot(asfloat(g_con2.xyz), d),
+                            dot(asfloat(g_con3.xyz), d));
+    const float zv = -r.z;
+    if (zv <= 0.05) return px;
+    const float pnx = proj.x * r.x / zv - proj.y;
+    const float pny = proj.z * r.y / zv - proj.w;
+    return float2(vp.x + (pnx + 1.0) * 0.5 * vp.z, vp.y + (1.0 - pny) * 0.5 * vp.w);
+}
+float4 PSMain(FullscreenOut i) : SV_Target {
+    const int2 p = int2(i.pos.xy);
+    const float4 vp = g_params;
+    if (float(p.x) < vp.x || float(p.y) < vp.y || float(p.x) >= vp.x + vp.z ||
+        float(p.y) >= vp.y + vp.w) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    const float2 centre = float2(p) + 0.5;
+    float2 v = (centre - MotionPrevPixel(centre)) * asfloat(g_con2.w);
+    const float len = length(v);
+    if (len < 0.5) return float4(0.0, 0.0, 0.0, 0.0);
+    const float max_len = asfloat(g_con1.w);
+    if (len > max_len) v *= max_len / len;
+    const float2 lo = (vp.xy + 0.5) * g_rt_metrics.xy;
+    const float2 hi = (vp.xy + vp.zw - 0.5) * g_rt_metrics.xy;
+    // Interleaved offsets hide the tap spacing on long smears.
+    static const float kBayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+    const float noise = kBayer[(p.y & 3) * 4 + (p.x & 3)] / 16.0;
+    const int kTaps = 12;
+    float3 sum = float3(0.0, 0.0, 0.0);
+    [unroll] for (int k = 0; k < kTaps; ++k) {
+        const float t = (float(k) + noise) / float(kTaps) - 0.5;
+        sum += colorTex.SampleLevel(LinearSampler, clamp((centre + v * t) * g_rt_metrics.xy, lo, hi), 0).rgb;
+    }
+    return float4(sum / float(kTaps), saturate(min(len, max_len) - 0.5));
+}
+#endif
+
 #if defined(PASS_BLOOM_DOWN)
 // Bloom pyramid, downsample (13-tap, Jimenez 2014). g_rt_metrics describes the
 // source, g_params.xy is 1/destination size. The first level (g_con0.x = 1)

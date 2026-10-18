@@ -505,8 +505,13 @@ public:
     // from (the XF light position, which the game places in view space).
     // Cleared at every scene begin.
     void set_scene_light(const float position[3]) noexcept;
+    // The game camera's view matrix (3x4, row-major) for the scene that just
+    // began, or null when it is unknown; the previous scene's is kept for
+    // camera motion blur.
+    void set_scene_view(const float* view) noexcept;
     // At scene end: ambient occlusion and contact shadows from the EFB depth,
-    // multiplied onto the EFB colour, then depth of field. True when it
+    // multiplied onto the EFB colour, then depth of field and camera motion
+    // blur. True when it
     // recorded (GX bindings are then stale).
     [[nodiscard]] bool record_scene_effects();
     // GX copy-clear: color from the latched AR/GB regs, depth from z24
@@ -859,6 +864,10 @@ private:
     bool scene_projection_valid_ = false;
     float scene_light_[3]{};
     bool scene_light_valid_ = false;
+    float scene_view_[12]{};
+    float scene_prev_view_[12]{};
+    bool scene_view_valid_ = false;
+    bool scene_prev_view_valid_ = false;
     Microsoft::WRL::ComPtr<ID3D12Resource> motion_target_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> motion_rtv_heap_;
     D3D12_CPU_DESCRIPTOR_HANDLE motion_rtv_{};

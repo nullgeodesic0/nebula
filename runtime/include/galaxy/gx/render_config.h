@@ -130,6 +130,9 @@ struct RenderConfig {
     // Far-field depth of field 0-100 (0 = off); key depth_of_field, env
     // GALAXY_DEPTH_OF_FIELD.
     unsigned depth_of_field      = 40;
+    // Camera-rotation motion blur 0-100 (shutter, 0 = off); key motion_blur,
+    // env GALAXY_MOTION_BLUR.
+    unsigned motion_blur         = 50;
 
     // Reserved for future DXR work. Clamped off until there is a real DXR
     // capability query, acceleration-structure path, ray PSO, and visible
