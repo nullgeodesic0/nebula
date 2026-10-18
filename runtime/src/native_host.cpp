@@ -8818,10 +8818,20 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
         }
     }
     {
-        const auto family = prompt_scheme && s_driving_pad != kDrivingKeyboard
-            ? galaxy::prompts::family_for_scheme(*prompt_scheme) : std::nullopt;
+        // F1 > Game > Button prompts: the controller in use, or always one family.
+        using galaxy::ButtonPrompts;
+        std::optional<galaxy::input::ControlScheme> shown;
+        switch (galaxy::get_runtime_settings().button_prompts) {
+        case ButtonPrompts::Auto:
+            if (s_driving_pad != kDrivingKeyboard) shown = prompt_scheme;
+            break;
+        case ButtonPrompts::Wii: break;
+        case ButtonPrompts::Xbox: shown = galaxy::input::ControlScheme::Xbox; break;
+        case ButtonPrompts::DualSense: shown = galaxy::input::ControlScheme::DualSense; break;
+        }
+        const auto family = shown ? galaxy::prompts::family_for_scheme(*shown) : std::nullopt;
         galaxy::prompts::publish(
-            family ? galaxy::prompts::make_prompt_set(*family, controls.config.table(*prompt_scheme))
+            family ? galaxy::prompts::make_prompt_set(*family, controls.config.table(*shown))
                    : galaxy::prompts::PromptSet{});
     }
     // Vibration: target and strength, published with the game's motor bit.

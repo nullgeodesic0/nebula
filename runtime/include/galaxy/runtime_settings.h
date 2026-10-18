@@ -29,6 +29,10 @@ struct RuntimeAudioSettings {
 // SCGetLanguage returns.
 enum class GameLanguage : std::uint8_t { English = 1, French = 3, Spanish = 4 };
 
+// Which controller the game's button prompts (A, B, Z, +, ...) show: the one in use (Auto: Xbox or
+// DualSense while one is, the Wii Remote's otherwise) or always one family.
+enum class ButtonPrompts : std::uint8_t { Auto = 0, Wii = 1, Xbox = 2, DualSense = 3 };
+
 struct RuntimeSettings {
     RuntimeInputMode input_mode = RuntimeInputMode::Auto;
     RuntimeAudioSettings audio{};
@@ -36,6 +40,7 @@ struct RuntimeSettings {
     unsigned text_speed = 1u;
     // The language to start the game in. A change takes effect at the next start.
     GameLanguage language = GameLanguage::English;
+    ButtonPrompts button_prompts = ButtonPrompts::Auto;
 };
 
 // The language the game runs in this session: the setting when the game first asks (at boot), then
@@ -45,6 +50,8 @@ struct RuntimeSettings {
 [[nodiscard]] bool running_game_language(GameLanguage& language) noexcept;
 // "english", "french" or "spanish" (runtime_settings.ini).
 [[nodiscard]] const char* game_language_key(GameLanguage language) noexcept;
+// "auto", "wii", "xbox" or "dualsense" (runtime_settings.ini `button_prompts`).
+[[nodiscard]] const char* button_prompts_key(ButtonPrompts prompts) noexcept;
 
 // A coherent input-source snapshot. The generation changes only when the selected input mode changes,
 // so device FIFOs can reject reports acquired under an older source. Unrelated audio-setting writes are

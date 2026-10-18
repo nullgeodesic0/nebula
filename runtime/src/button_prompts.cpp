@@ -493,6 +493,9 @@ constexpr std::uint32_t kSheetBytes = 0x8000u;
 constexpr std::uint32_t kSheetCount = 6u;
 constexpr std::uint32_t kSheetsOffset = 0x60u;
 constexpr std::uint32_t kTglpOffset = 48u;
+// Compared up to the sheet size: the game turns the last field (the sheet
+// offset) into a pointer when it sets the font up.
+constexpr std::size_t kTglpMatch = 28;
 
 // The TGLP header of the picture font: cell 34x35, six 128x128 RGB5A3 sheets
 // of 3x3 cells, sheet data at 0x60 (structure only, nothing of the art).
@@ -501,18 +504,50 @@ constexpr std::uint8_t kTglp[32] = {'T', 'G', 'L', 'P', 0x00, 0x03, 0x00, 0x30, 
                                     0x03, 0x00, 0x03, 0x00, 0x80, 0x00, 0x80, 0x00, 0x00, 0x00, 0x60};
 
 struct FontCopy {
-    std::uint32_t base = 0;                // guest address of "RFNT"
+    std::uint32_t base = 0;                // guest address the TGLP header sits 48 bytes after
+    std::uint32_t sheets = 0;              // guest address of the first sheet
     std::vector<std::uint8_t> original;    // the six sheets as found
 };
 
+// The HUD A button (the "talk" prompt, layout IconAButton): IA4 textures found by
+// a hash of 16 bytes of their pixels and then of all of them (the game's bytes
+// are never stored). 48x48 and 40x40, 8x4-pixel tiles.
+struct IconTarget {
+    int size;
+    std::uint32_t window_offset;  // 32-aligned offset of the 16 bytes that are hashed first
+    std::uint64_t window_hash;
+    std::uint64_t full_hash;
+};
+constexpr IconTarget kIconTargets[2] = {
+    {48, 1504u, 0x0027A459775D4E12ull, 0x8B364481CA20AEABull},
+    {40, 960u, 0x00469AB469D6E02Full, 0x4531CBD39A3F26AAull},
+};
+
+std::uint64_t fnv64(const std::uint8_t* data, std::size_t size) noexcept {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (std::size_t i = 0; i < size; ++i) hash = (hash ^ data[i]) * 1099511628211ull;
+    return hash;
+}
+
+struct IconCopy {
+    std::uint32_t address = 0;
+    int target = 0;
+    std::vector<std::uint8_t> original;
+    std::uint64_t current_hash = 0;  // of the bytes as last drawn (or found)
+};
+
 struct State {
+    std::vector<IconCopy> icons;
+    std::map<std::uint32_t, std::vector<std::uint8_t>> icon_pixels;
     std::vector<FontCopy> fonts;
     std::uint32_t seen_revision = 0;
+    bool announced = false;
     bool dirty = false;  // the fonts need drawing with `applied`
     PromptSet applied;
     std::uint32_t cursor = 0;  // scan position over MEM1 then MEM2
     ULONGLONG next_scan = 0;
     ULONGLONG next_verify = 0;
+    ULONGLONG next_icon_verify = 0;
     std::map<std::uint32_t, std::vector<std::uint16_t>> cells;
     int debug = -1;
 };
@@ -528,6 +563,7 @@ void log_line(const NativeServicesV1* services, State& s, const char* message) {
         std::size_t length = 0;
         s.debug = (getenv_s(&length, value, sizeof(value), "NEBULA_PROMPTS_DEBUG") == 0 && length > 1) ? 1 : 0;
     }
+    if (s.debug == 1) std::fprintf(stderr, "[prompts] %s\n", message);
     if (s.debug == 1 && services != nullptr && services->log != nullptr) {
         services->log(services->user, LogLevelV1::Info, message);
     }
@@ -546,10 +582,21 @@ const std::vector<std::uint16_t>& cell_pixels(State& s, Family family, Label lab
     return s.cells.emplace(key, std::move(out)).first->second;
 }
 
+// Where the sheets are: the TGLP sheet field is an offset from the font start in
+// the file and a guest pointer once the game has set the font up.
+std::uint32_t sheets_address(GuestMemoryV1* memory, std::uint32_t base) {
+    const std::byte* p = resolve_guest_fast(memory, base + kTglpOffset + 28u, 4u);
+    if (p == nullptr) return 0;
+    std::uint32_t value = 0;
+    std::memcpy(&value, p, 4);
+    value = byte_swap_u32(value);
+    return value >= kMem1 ? value : base + value;
+}
+
 bool header_ok(GuestMemoryV1* memory, std::uint32_t base) {
     const std::byte* p = resolve_guest_fast(memory, base, kTglpOffset + 32u);
     if (p == nullptr) return false;
-    return std::memcmp(p, "RFNT", 4) == 0 && std::memcmp(p + kTglpOffset, kTglp, sizeof(kTglp)) == 0;
+    return std::memcmp(p + kTglpOffset, kTglp, kTglpMatch) == 0;
 }
 
 void scan_slice(GuestMemoryV1* memory, State& s, const NativeServicesV1* services) {
@@ -563,6 +610,11 @@ void scan_slice(GuestMemoryV1* memory, State& s, const NativeServicesV1* service
     std::uint32_t length = std::min(kSliceBytes, region_size - local);
     std::uint32_t read = std::min(length + 31u, region_size - local);
     s.cursor = offset + length >= total ? 0u : offset + length;
+    if (s.cursor == 0u) {
+        char cycle[96];
+        std::snprintf(cycle, sizeof(cycle), "scan cycle done, fonts=%zu", s.fonts.size());
+        log_line(services, s, cycle);
+    }
     const std::byte* p = resolve_guest_fast(memory, address, read);
     if (p == nullptr || read < 32u) return;
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(p);
@@ -572,16 +624,17 @@ void scan_slice(GuestMemoryV1* memory, State& s, const NativeServicesV1* service
         if (hit == nullptr) break;
         i = static_cast<std::uint32_t>(static_cast<const std::uint8_t*>(hit) - bytes);
         if (i >= length) break;
-        if (std::memcmp(bytes + i, kTglp, sizeof(kTglp)) == 0 && address + i >= kTglpOffset) {
+        if (std::memcmp(bytes + i, kTglp, kTglpMatch) == 0 && address + i >= kTglpOffset) {
             const std::uint32_t base = address + i - kTglpOffset;
             const bool known = std::any_of(s.fonts.begin(), s.fonts.end(),
                                            [&](const FontCopy& f) { return f.base == base; });
             if (!known && header_ok(memory, base)) {
                 const std::byte* sheets =
-                    resolve_guest_fast(memory, base + kSheetsOffset, kSheetBytes * kSheetCount);
+                    resolve_guest_fast(memory, sheets_address(memory, base), kSheetBytes * kSheetCount);
                 if (sheets != nullptr) {
                     FontCopy copy;
                     copy.base = base;
+                    copy.sheets = sheets_address(memory, base);
                     copy.original.assign(reinterpret_cast<const std::uint8_t*>(sheets),
                                          reinterpret_cast<const std::uint8_t*>(sheets) + kSheetBytes * kSheetCount);
                     s.fonts.push_back(std::move(copy));
@@ -594,11 +647,97 @@ void scan_slice(GuestMemoryV1* memory, State& s, const NativeServicesV1* service
         }
         ++i;
     }
+    // The HUD A icon: 32-aligned windows.
+    const std::uint32_t first = (address + 31u) & ~31u;
+    for (std::uint32_t a = first; a + 16u <= address + length && a + 16u - address <= read; a += 32u) {
+        const std::uint64_t window = fnv64(bytes + (a - address), 16);
+        for (int t = 0; t < 2; ++t) {
+            const IconTarget& target = kIconTargets[t];
+            if (window != target.window_hash || a < target.window_offset) continue;
+            const std::uint32_t start = a - target.window_offset;
+            const std::size_t size = static_cast<std::size_t>(target.size) * target.size;
+            const bool known = std::any_of(s.icons.begin(), s.icons.end(),
+                                           [&](const IconCopy& c) { return c.address == start; });
+            const std::byte* data = known ? nullptr : resolve_guest_fast(memory, start, static_cast<std::uint32_t>(size));
+            if (data == nullptr) continue;
+            const auto* raw = reinterpret_cast<const std::uint8_t*>(data);
+            if (fnv64(raw, size) != target.full_hash) continue;
+            IconCopy copy;
+            copy.address = start;
+            copy.target = t;
+            copy.original.assign(raw, raw + size);
+            copy.current_hash = target.full_hash;
+            s.icons.push_back(std::move(copy));
+            s.dirty = true;
+            char message[96];
+            std::snprintf(message, sizeof(message), "button prompts: A icon %dx%d at 0x%08X", target.size, target.size, start);
+            log_line(services, s, message);
+        }
+    }
+}
+
+// The glyph of `label` as an IA4 icon of size x size (bilinear, premultiplied).
+const std::vector<std::uint8_t>& icon_pixels(State& s, Family family, Label label, int size) {
+    const std::uint32_t key = static_cast<std::uint32_t>(family) << 16 | static_cast<std::uint32_t>(label) << 8 |
+                              static_cast<std::uint32_t>(size);
+    auto it = s.icon_pixels.find(key);
+    if (it != s.icon_pixels.end()) return it->second;
+    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(kCellW) * kCellH * 4u);
+    render_glyph(family, label, rgba.data());
+    const auto texel = [&](int x, int y, float out[4]) {
+        if (x < 0 || y < 0 || x >= kCellW || y >= kCellH) { out[0] = out[1] = out[2] = out[3] = 0.0f; return; }
+        const std::uint8_t* q = &rgba[(static_cast<std::size_t>(y) * kCellW + x) * 4];
+        const float a = q[3] / 255.0f;
+        out[0] = q[0] / 255.0f * a; out[1] = q[1] / 255.0f * a; out[2] = q[2] / 255.0f * a; out[3] = a;
+    };
+    const float scale = size / 30.0f;  // the 28 px of art fill the icon
+    std::vector<std::uint8_t> data(static_cast<std::size_t>(size) * size);
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const float sx = 17.0f + (x + 0.5f - size * 0.5f) / scale - 0.5f;
+            const float sy = 19.0f + (y + 0.5f - size * 0.5f) / scale - 0.5f;
+            const int x0 = static_cast<int>(std::floor(sx)), y0 = static_cast<int>(std::floor(sy));
+            const float fx = sx - x0, fy = sy - y0;
+            float acc[4] = {0, 0, 0, 0}, t[4];
+            for (int j = 0; j < 2; ++j) {
+                for (int i = 0; i < 2; ++i) {
+                    texel(x0 + i, y0 + j, t);
+                    const float w = (i ? fx : 1.0f - fx) * (j ? fy : 1.0f - fy);
+                    for (int c = 0; c < 4; ++c) acc[c] += t[c] * w;
+                }
+            }
+            const float a = acc[3];
+            const float luma = a > 0.0f ? (0.299f * acc[0] + 0.587f * acc[1] + 0.114f * acc[2]) / a : 0.0f;
+            const int a4 = std::clamp(static_cast<int>(std::lround(a * 15.0f)), 0, 15);
+            const int i4 = std::clamp(static_cast<int>(std::lround(luma * 15.0f)), 0, 15);
+            const std::size_t off = (static_cast<std::size_t>(y / 4) * (size / 8) + x / 8) * 32u +
+                                    static_cast<std::size_t>(y % 4) * 8u + x % 8;
+            data[off] = static_cast<std::uint8_t>(a4 << 4 | i4);
+        }
+    }
+    return s.icon_pixels.emplace(key, std::move(data)).first->second;
+}
+
+void draw_icon(GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t pc, State& s,
+               IconCopy& icon, const PromptSet& want) {
+    const int size = kIconTargets[icon.target].size;
+    const std::size_t bytes = static_cast<std::size_t>(size) * size;
+    std::byte* data = resolve_guest_fast(memory, icon.address, static_cast<std::uint32_t>(bytes));
+    if (data == nullptr) return;
+    const Label label = want.labels[static_cast<std::size_t>(Slot::A)];
+    const std::vector<std::uint8_t>& target =
+        want.family != Family::None && label != Label::None ? icon_pixels(s, want.family, label, size)
+                                                            : icon.original;
+    auto* current = reinterpret_cast<std::uint8_t*>(data);
+    for (std::size_t i = 0; i < bytes; ++i) {
+        if (current[i] != target[i]) guest_store_u8(memory, icon.address + static_cast<std::uint32_t>(i), target[i], services, pc);
+    }
+    icon.current_hash = fnv64(current, bytes);
 }
 
 void draw_font(GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t pc, State& s,
                const FontCopy& font, const PromptSet& want) {
-    std::byte* sheets = resolve_guest_fast(memory, font.base + kSheetsOffset, kSheetBytes * kSheetCount);
+    std::byte* sheets = resolve_guest_fast(memory, font.sheets, kSheetBytes * kSheetCount);
     if (sheets == nullptr) return;
     for (std::size_t slot = 0; slot < kSlotCount; ++slot) {
         const std::uint32_t glyph = kSlotGlyph[slot];
@@ -621,7 +760,7 @@ void draw_font(GuestMemoryV1* memory, const NativeServicesV1* services, std::uin
                 }
                 const auto* current = reinterpret_cast<const std::uint8_t*>(sheets) + off;
                 if ((current[0] << 8 | current[1]) != value) {
-                    guest_store_u16(memory, font.base + kSheetsOffset + off, value, services, pc);
+                    guest_store_u16(memory, font.sheets + off, value, services, pc);
                 }
             }
         }
@@ -673,11 +812,12 @@ void tick(GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t
             s.dirty = true;
         }
         if (s.applied.family == Family::None && !s.dirty) return;
+        if (!s.announced) { s.announced = true; log_line(services, s, "tick active"); }
         const ULONGLONG now = GetTickCount64();
         // Look for the font (and for more copies of it) while a controller is in use.
         if (s.applied.family != Family::None && now >= s.next_scan) {
             scan_slice(memory, s, services);
-            s.next_scan = now + (s.fonts.empty() ? 40u : 250u);
+            s.next_scan = now + (s.fonts.empty() && s.icons.empty() ? 40u : 100u);
         }
         if (!s.fonts.empty() && now >= s.next_verify) {
             s.next_verify = now + 3000u;
@@ -685,7 +825,18 @@ void tick(GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t
             std::erase_if(s.fonts, [&](const FontCopy& f) { return !header_ok(memory, f.base); });
             if (s.fonts.size() != before) log_line(services, s, "button prompts: a picture font went away");
         }
+        if (!s.icons.empty() && now >= s.next_icon_verify) {
+            s.next_icon_verify = now + 3000u;
+            std::erase_if(s.icons, [&](const IconCopy& c) {
+                const int size = kIconTargets[c.target].size;
+                const std::byte* data = resolve_guest_fast(memory, c.address, static_cast<std::uint32_t>(size * size));
+                if (data == nullptr) return true;
+                const std::uint64_t hash = fnv64(reinterpret_cast<const std::uint8_t*>(data), static_cast<std::size_t>(size) * size);
+                return hash != c.current_hash && hash != kIconTargets[c.target].full_hash;
+            });
+        }
         if (s.dirty) {
+            for (IconCopy& icon : s.icons) draw_icon(memory, services, pc, s, icon, s.applied);
             for (const FontCopy& font : s.fonts) draw_font(memory, services, pc, s, font, s.applied);
             s.dirty = false;
         }

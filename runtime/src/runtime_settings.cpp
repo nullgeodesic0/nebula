@@ -57,6 +57,7 @@ RuntimeSettings sanitize_settings(RuntimeSettings settings) {
     settings.audio.ambience = sanitize_gain(settings.audio.ambience);
     settings.audio.cutscene = sanitize_gain(settings.audio.cutscene);
     settings.text_speed = std::clamp(settings.text_speed, 1u, 3u);
+    if (settings.button_prompts > ButtonPrompts::DualSense) settings.button_prompts = ButtonPrompts::Auto;
     if (settings.language != GameLanguage::French && settings.language != GameLanguage::Spanish) {
         settings.language = GameLanguage::English;
     }
@@ -147,6 +148,10 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
     } else if (std::strcmp(key, "text_speed") == 0) {
         if (value[0] >= '1' && value[0] <= '3' && value[1] == '\0') {
             settings.text_speed = static_cast<unsigned>(value[0] - '0');
+        }
+    } else if (std::strcmp(key, "button_prompts") == 0) {
+        for (const ButtonPrompts prompts : {ButtonPrompts::Auto, ButtonPrompts::Wii, ButtonPrompts::Xbox, ButtonPrompts::DualSense}) {
+            if (_stricmp(value, button_prompts_key(prompts)) == 0) settings.button_prompts = prompts;
         }
     } else if (std::strcmp(key, "language") == 0) {
         for (const GameLanguage language : {GameLanguage::English, GameLanguage::French, GameLanguage::Spanish}) {
@@ -287,6 +292,7 @@ void apply_env_overrides(RuntimeSettings& settings) {
         settings, "GALAXY_AUDIO_CUTSCENE_GAIN", "audio_cutscene_gain");
     apply_env(settings, "GALAXY_TEXT_SPEED", "text_speed");
     apply_env(settings, "GALAXY_LANGUAGE", "language");
+    apply_env(settings, "GALAXY_BUTTON_PROMPTS", "button_prompts");
 }
 
 }  // namespace
@@ -328,6 +334,16 @@ const char* game_language_key(GameLanguage language) noexcept {
     case GameLanguage::English: break;
     }
     return "english";
+}
+
+const char* button_prompts_key(ButtonPrompts prompts) noexcept {
+    switch (prompts) {
+    case ButtonPrompts::Wii: return "wii";
+    case ButtonPrompts::Xbox: return "xbox";
+    case ButtonPrompts::DualSense: return "dualsense";
+    case ButtonPrompts::Auto: break;
+    }
+    return "auto";
 }
 
 RuntimeInputModeState get_runtime_input_mode_state() {
@@ -416,6 +432,7 @@ bool reload_runtime_audio_settings_if_changed() noexcept {
         settings.audio = parsed.audio;
         settings.text_speed = parsed.text_speed;
         settings.language = parsed.language;
+        settings.button_prompts = parsed.button_prompts;
         set_runtime_settings(settings);
         input::set_controls_config(controls);
         record_input_mode_sync(file_mode, settings.input_mode);
@@ -452,6 +469,7 @@ bool save_runtime_settings_to_file() {
                  << "audio_cutscene_gain=" << settings.audio.cutscene << '\n'
                  << "text_speed=" << settings.text_speed << '\n'
                  << "language=" << game_language_key(settings.language) << '\n'
+                 << "button_prompts=" << button_prompts_key(settings.button_prompts) << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;

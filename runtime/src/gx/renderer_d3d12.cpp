@@ -698,7 +698,7 @@ unsigned native_settings_row_count(unsigned tab) {
     case 1: return fsr3_available() ? 14u : 13u;
     case 2: return controls_row_count();
     case 3: return 6u;
-    case 4: return 2u;
+    case 4: return 3u;
     default: return 0u;
     }
 }
@@ -1179,6 +1179,16 @@ void adjust_native_setting_unlogged(int delta) {
         const unsigned next = step(std::clamp(settings.text_speed, 1u, 3u) - 1u, 3u) + 1u;
         if (next != settings.text_speed) {
             settings.text_speed = next;
+            set_runtime_settings(settings);
+            s_native_settings_dirty.store(true, std::memory_order_release);
+        }
+    }
+    if (tab == 4u && row == 2u) {
+        // Which controller the game's button prompts show; changes live.
+        const auto next = static_cast<galaxy::ButtonPrompts>(
+            step(static_cast<unsigned>(settings.button_prompts), 4u));
+        if (next != settings.button_prompts) {
+            settings.button_prompts = next;
             set_runtime_settings(settings);
             s_native_settings_dirty.store(true, std::memory_order_release);
         }
@@ -9607,6 +9617,10 @@ std::string native_settings_row_text(
             return text;
         }
         if (row == 1u) return std::string("LANGUAGE: ") + game_language_name(runtime.language);
+        if (row == 2u) {
+            static constexpr const char* kNames[] = {"AUTO", "WII REMOTE", "XBOX", "DUALSENSE"};
+            return std::string("BUTTON PROMPTS: ") + kNames[static_cast<unsigned>(runtime.button_prompts) % 4u];
+        }
         return {};
     default:
         return {};
