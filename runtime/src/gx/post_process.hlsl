@@ -251,6 +251,99 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 }
 #endif
 
+#if defined(PASS_BLOOM_DOWN)
+// Bloom pyramid, downsample (13-tap, Jimenez 2014). g_rt_metrics describes the
+// source, g_params.xy is 1/destination size. The first level (g_con0.x = 1)
+// keeps only the bright part of each tap, with a soft knee, so the chain
+// carries highlights and not the whole image. g_con1.x threshold, .y knee.
+Texture2D inputTex : register(t0);
+FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
+float3 BloomPrefilter(float3 c) {
+    const float threshold = asfloat(g_con1.x);
+    const float knee = max(asfloat(g_con1.y), 1e-4);
+    const float peak = max(c.r, max(c.g, c.b));
+    float soft = clamp(peak - threshold + knee, 0.0, 2.0 * knee);
+    soft = soft * soft / (4.0 * knee);
+    const float weight = max(soft, peak - threshold) / max(peak, 1e-4);
+    return c * weight;
+}
+float3 BloomTap(float2 uv, float2 offset, bool first) {
+    const float3 c = inputTex.SampleLevel(LinearSampler, uv + offset * g_rt_metrics.xy, 0).rgb;
+    return first ? BloomPrefilter(c) : c;
+}
+float4 PSMain(FullscreenOut i) : SV_Target {
+    const bool first = asfloat(g_con0.x) > 0.5;
+    const float2 uv = (float2(ViewportPixel(i.pos)) + 0.5) * g_params.xy;
+    const float3 a = BloomTap(uv, float2(-2, -2), first);
+    const float3 b = BloomTap(uv, float2(0, -2), first);
+    const float3 c = BloomTap(uv, float2(2, -2), first);
+    const float3 d = BloomTap(uv, float2(-2, 0), first);
+    const float3 e = BloomTap(uv, float2(0, 0), first);
+    const float3 f = BloomTap(uv, float2(2, 0), first);
+    const float3 g = BloomTap(uv, float2(-2, 2), first);
+    const float3 h = BloomTap(uv, float2(0, 2), first);
+    const float3 k = BloomTap(uv, float2(2, 2), first);
+    const float3 j = BloomTap(uv, float2(-1, -1), first);
+    const float3 l = BloomTap(uv, float2(1, -1), first);
+    const float3 m = BloomTap(uv, float2(-1, 1), first);
+    const float3 n = BloomTap(uv, float2(1, 1), first);
+    const float3 sum = e * 0.125 + (a + c + g + k) * 0.03125 + (b + d + f + h) * 0.0625 +
+                       (j + l + m + n) * 0.125;
+    return float4(sum, 1.0);
+}
+#endif
+
+#if defined(PASS_BLOOM_UP)
+// Bloom pyramid, upsample: the finer level plus a 3x3 tent of the coarser one.
+// t0 coarse, t1 fine; g_rt_metrics describes the coarse level, g_params.xy is
+// 1/destination size, g_con0.x scales the coarse contribution.
+Texture2D coarseTex : register(t0);
+Texture2D fineTex : register(t1);
+FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
+float4 PSMain(FullscreenOut i) : SV_Target {
+    const float2 uv = (float2(ViewportPixel(i.pos)) + 0.5) * g_params.xy;
+    const float2 t = g_rt_metrics.xy;
+    float3 tent = coarseTex.SampleLevel(LinearSampler, uv, 0).rgb * 4.0;
+    tent += coarseTex.SampleLevel(LinearSampler, uv + float2(-t.x, 0), 0).rgb * 2.0;
+    tent += coarseTex.SampleLevel(LinearSampler, uv + float2(t.x, 0), 0).rgb * 2.0;
+    tent += coarseTex.SampleLevel(LinearSampler, uv + float2(0, -t.y), 0).rgb * 2.0;
+    tent += coarseTex.SampleLevel(LinearSampler, uv + float2(0, t.y), 0).rgb * 2.0;
+    tent += coarseTex.SampleLevel(LinearSampler, uv + float2(-t.x, -t.y), 0).rgb;
+    tent += coarseTex.SampleLevel(LinearSampler, uv + float2(t.x, -t.y), 0).rgb;
+    tent += coarseTex.SampleLevel(LinearSampler, uv + float2(-t.x, t.y), 0).rgb;
+    tent += coarseTex.SampleLevel(LinearSampler, uv + float2(t.x, t.y), 0).rgb;
+    const float3 fine = fineTex.SampleLevel(LinearSampler, uv, 0).rgb;
+    return float4(fine + tent * (1.0 / 16.0) * asfloat(g_con0.x), 1.0);
+}
+#endif
+
+#if defined(PASS_ENHANCE)
+// Final look: the bloom pyramid added to the scene, a soft shoulder so bloom
+// cannot clip harshly, then saturation, contrast and a vignette.
+// t0 scene (window size), t1 bloom (half size). g_params.xy is the window size.
+// g_con0 = (bloom, saturation, contrast, vignette) as floats.
+Texture2D sceneTex : register(t0);
+Texture2D bloomTex : register(t1);
+FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
+float4 PSMain(FullscreenOut i) : SV_Target {
+    const int2 p = ViewportPixel(i.pos);
+    const float2 size = g_params.xy;
+    const float2 uv = (float2(p) + 0.5) / size;
+    const float4 k = asfloat(g_con0);
+    float3 c = sceneTex.Load(int3(p, 0)).rgb;
+    c += bloomTex.SampleLevel(LinearSampler, uv, 0).rgb * k.x;
+    // Soft shoulder above 0.8; below it the image is untouched.
+    const float3 over = max(c - 0.8, 0.0);
+    c = min(c, 0.8) + 0.2 * tanh(over / 0.2);
+    const float luma = dot(c, float3(0.2126, 0.7152, 0.0722));
+    c = lerp(float3(luma, luma, luma), c, k.y);
+    c = (c - 0.5) * k.z + 0.5;
+    const float2 d = (uv - 0.5) * float2(size.x / size.y, 1.0);
+    c *= 1.0 - k.w * smoothstep(0.35, 1.05, length(d));
+    return float4(saturate(c), 1.0);
+}
+#endif
+
 #if defined(PASS_RESAMPLE)
 // Box filter over each target pixel's source footprint: one bilinear tap per
 // axis when enlarging, up to eight evenly spaced bilinear taps per axis when

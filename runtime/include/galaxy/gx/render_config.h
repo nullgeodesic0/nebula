@@ -113,6 +113,13 @@ struct RenderConfig {
     unsigned upscaler            = 0;
     unsigned temporal_quality    = 1;
     unsigned sharpness           = 0;
+    // Look pass after scaling (percent): bloom 0-100 (0 = no bloom pyramid),
+    // saturation and contrast 0-200 (100 = unchanged), vignette 0-100. Keys
+    // bloom / saturation / contrast / vignette, env GALAXY_BLOOM etc.
+    unsigned bloom               = 30;
+    unsigned saturation          = 108;
+    unsigned contrast            = 104;
+    unsigned vignette            = 8;
 
     // Reserved for future DXR work. Clamped off until there is a real DXR
     // capability query, acceleration-structure path, ray PSO, and visible

@@ -201,6 +201,14 @@ static void apply_kv(RenderConfig& cfg, const char* key, const char* val) {
         cfg.temporal_quality = parse_choice(val, kNames, cfg.temporal_quality);
     } else if (std::strcmp(key, "sharpness") == 0) {
         cfg.sharpness = std::min(parse_uint(val, cfg.sharpness), 100u);
+    } else if (std::strcmp(key, "bloom") == 0) {
+        cfg.bloom = std::min(parse_uint(val, cfg.bloom), 100u);
+    } else if (std::strcmp(key, "saturation") == 0) {
+        cfg.saturation = std::min(parse_uint(val, cfg.saturation), 200u);
+    } else if (std::strcmp(key, "contrast") == 0) {
+        cfg.contrast = std::min(parse_uint(val, cfg.contrast), 200u);
+    } else if (std::strcmp(key, "vignette") == 0) {
+        cfg.vignette = std::min(parse_uint(val, cfg.vignette), 100u);
     }
     else if (std::strcmp(key, "ray_tracing_enabled") == 0) cfg.ray_tracing_enabled = parse_bool(val, false);
     else if (std::strcmp(key, "rt_shadow_quality") == 0) cfg.rt_shadow_quality = std::clamp(parse_uint(val, 0), 0u, 3u);
@@ -280,6 +288,10 @@ static void apply_env_overrides(RenderConfig& cfg) {
     apply_env(cfg, "GALAXY_UPSCALER", "upscaler");
     apply_env(cfg, "GALAXY_TEMPORAL_QUALITY", "temporal_quality");
     apply_env(cfg, "GALAXY_SHARPNESS", "sharpness");
+    apply_env(cfg, "GALAXY_BLOOM", "bloom");
+    apply_env(cfg, "GALAXY_SATURATION", "saturation");
+    apply_env(cfg, "GALAXY_CONTRAST", "contrast");
+    apply_env(cfg, "GALAXY_VIGNETTE", "vignette");
     apply_env(cfg, "GALAXY_RAY_TRACING_ENABLED", "ray_tracing_enabled");
     apply_env(cfg, "GALAXY_RT_SHADOW_QUALITY", "rt_shadow_quality");
     apply_env(cfg, "GALAXY_RT_AO_ENABLED", "rt_ao_enabled");
@@ -318,6 +330,10 @@ static void clamp_unimplemented_features(RenderConfig& cfg) {
     cfg.upscaler = std::min(cfg.upscaler, 2u);
     cfg.temporal_quality = std::min(cfg.temporal_quality, 4u);
     cfg.sharpness = std::min(cfg.sharpness, 100u);
+    cfg.bloom = std::min(cfg.bloom, 100u);
+    cfg.saturation = std::min(cfg.saturation, 200u);
+    cfg.contrast = std::min(cfg.contrast, 200u);
+    cfg.vignette = std::min(cfg.vignette, 100u);
     // Win32 client geometry is signed-int based even though DXGI dimensions
     // are UINT. Keep direct API callers inside the common representable range.
     constexpr unsigned kMaxWindowDimension =
@@ -617,6 +633,10 @@ bool save_render_config_to_file() {
              << "upscaler=" << cfg.upscaler << '\n'
              << "temporal_quality=" << cfg.temporal_quality << '\n'
              << "sharpness=" << cfg.sharpness << '\n'
+             << "bloom=" << cfg.bloom << '\n'
+             << "saturation=" << cfg.saturation << '\n'
+             << "contrast=" << cfg.contrast << '\n'
+             << "vignette=" << cfg.vignette << '\n'
              << "internal_follow_window="
              << (cfg.internal_follow_window ? 1u : 0u) << '\n'
              << "hud_output_resolution="

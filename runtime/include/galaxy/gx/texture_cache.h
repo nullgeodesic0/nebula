@@ -31,6 +31,7 @@
 #include "galaxy/gx/placed_texture_allocator.h"
 #include "galaxy/gx/shader_keys.h"  // fnv1a64
 #include "galaxy/gx/texture_decode_pool.h"
+#include "galaxy/gx/texture_pack.h"
 #include "galaxy/native_api.h"
 
 #include <array>
@@ -43,6 +44,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace galaxy::gx {
@@ -415,6 +417,27 @@ private:
         std::uint32_t width, std::uint32_t height, unsigned levels,
         Microsoft::WRL::ComPtr<ID3D12Resource>& texture, std::uint64_t& allocation_bytes);
     std::vector<UploadArenaFrame> upload_arenas_;
+    // Custom texture pack (Dolphin naming). Replaces a texture by the XXH64 of its
+    // level-0 GX bytes; returns false when no replacement exists or it cannot load.
+    [[nodiscard]] bool try_pack_replacement(
+        const Key& key, const TexImage& image, const TexMode& mode,
+        const std::uint8_t* src, std::uint32_t total_guest_size,
+        TextureHandle& out);
+    struct PackCached {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        unsigned levels = 0;
+        std::uint64_t bytes = 0;
+        std::list<std::string>::iterator lru;
+    };
+    std::unordered_map<std::string, PackCached> pack_cache_;
+    std::list<std::string> pack_lru_;
+    std::uint64_t pack_cache_bytes_ = 0;
+    TexturePack texture_pack_;
+    bool texture_pack_initialized_ = false;
+    std::unordered_set<std::string> texture_pack_bad_;
+    std::uint64_t texture_pack_hits_ = 0;
+    std::uint64_t texture_pack_lookups_ = 0;
     // Render-thread scratch storage for first-use texture decode/upload.
     // Keeping capacity between misses avoids heap churn during gameplay while
     // preserving exact decode bytes and GPU upload semantics.

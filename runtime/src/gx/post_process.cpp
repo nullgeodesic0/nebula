@@ -35,6 +35,9 @@
 #include "post_fsr_rcas_ps.h"
 #include "post_resample_ps.h"
 #include "post_fxaa_ps.h"
+#include "post_bloom_down_ps.h"
+#include "post_bloom_up_ps.h"
+#include "post_enhance_ps.h"
 
 namespace galaxy::gx {
 namespace {
@@ -54,7 +57,13 @@ constexpr ShaderBytes bytes(const BYTE (&code)[N]) noexcept {
 constexpr DXGI_FORMAT kColorFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kEdgesFormat = DXGI_FORMAT_R8G8_UNORM;
 constexpr DXGI_FORMAT kStencilFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
-constexpr unsigned kRtvSlots = 4u;
+// Slots 0-3: SMAA/AA/scaling targets. 4: final_. 5-9: bloom down levels.
+// 10-13: bloom up levels.
+constexpr unsigned kRtvSlots = 16u;
+constexpr DXGI_FORMAT kBloomFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+constexpr unsigned kFinalSlot = 4u;
+constexpr unsigned kBloomDownSlot = 5u;
+constexpr unsigned kBloomUpSlot = 10u;
 
 std::uint32_t bits(float value) noexcept { return std::bit_cast<std::uint32_t>(value); }
 
@@ -295,6 +304,16 @@ bool PostProcessor::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
         shutdown();
         return false;
     }
+    // The look pass is optional: when any of its pipelines fails the chain
+    // presents without it.
+    if (!(create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_bloom_down_ps)), kBloomFormat, 0, bloom_down_) &&
+          create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_bloom_up_ps)), kBloomFormat, 0, bloom_up_) &&
+          create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_enhance_ps)), kColorFormat, 0, enhance_))) {
+        std::cerr << "[post-process] look pass pipelines failed; presenting without it\n";
+        bloom_down_.Reset();
+        bloom_up_.Reset();
+        enhance_.Reset();
+    }
     fault_selftest_ = test_fault("selftest");
     fault_targets_ = test_fault("targets");
     const bool smaa_pipelines = !test_fault("smaa") &&
@@ -364,6 +383,12 @@ void PostProcessor::shutdown() noexcept {
     easu_.Reset();
     rcas_.Reset();
     resample_.Reset();
+    bloom_down_.Reset();
+    bloom_up_.Reset();
+    enhance_.Reset();
+    final_ = {};
+    for (auto& t : bloom_down_targets_) t = {};
+    for (auto& t : bloom_up_targets_) t = {};
     root_signature_.Reset();
     area_texture_.Reset();
     search_texture_.Reset();
@@ -874,13 +899,32 @@ void PostProcessor::record(ID3D12GraphicsCommandList* list,
         }
     };
 
+    // The look pass needs the finished window-sized picture as a texture, so the
+    // chain's last step renders into final_ instead of the back buffer.
+    const bool enhance =
+        settings_.enhance_active() && enhance_ && bloom_down_ && bloom_up_ &&
+        ensure_target(final_, target_width, target_height, kColorFormat, kFinalSlot,
+                      frame_index, frames_in_flight) &&
+        ensure_enhance_targets(target_width, target_height, frame_index, frames_in_flight);
+    const auto into_out = [&](D3D12_VIEWPORT& out_viewport, Constants& constants) {
+        if (!enhance) {
+            into(true, out_viewport, constants);
+            return;
+        }
+        transition(list, final_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        list->OMSetRenderTargets(1, &final_.rtv, FALSE, nullptr);
+        out_viewport = window_sized;
+        constants.origin[0] = 0;
+        constants.origin[1] = 0;
+    };
+
     if (plan.easu) {
         Constants e = c;
         easu_constants(e.con0, e.con1, e.con2, e.con3,
                        static_cast<float>(source_width), static_cast<float>(source_height),
                        static_cast<float>(target_width), static_cast<float>(target_height));
         D3D12_VIEWPORT vp{};
-        into(!plan.rcas, vp, e);
+        if (!plan.rcas) into_out(vp, e); else into(false, vp, e);
         draw(list, srv_ring, easu_.Get(), {image}, {kColorFormat}, vp, e);
         if (plan.rcas) {
             transition(list, scaled_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -893,7 +937,7 @@ void PostProcessor::record(ID3D12GraphicsCommandList* list,
         r.params[2] = static_cast<float>(target_width);
         r.params[3] = static_cast<float>(target_height);
         D3D12_VIEWPORT vp{};
-        into(plan.resample_to_target, vp, r);
+        if (plan.resample_to_target) into_out(vp, r); else into(false, vp, r);
         draw(list, srv_ring, resample_.Get(), {image}, {kColorFormat}, vp, r);
         if (!plan.resample_to_target) {
             transition(list, scaled_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -907,9 +951,101 @@ void PostProcessor::record(ID3D12GraphicsCommandList* list,
         s.params[0] = static_cast<float>(target_width);
         s.params[1] = static_cast<float>(target_height);
         D3D12_VIEWPORT vp{};
-        into(true, vp, s);
+        into_out(vp, s);
         draw(list, srv_ring, rcas_.Get(), {image}, {kColorFormat}, vp, s);
     }
+
+    if (enhance) {
+        transition(list, final_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        record_enhance(list, srv_ring, final_.resource.Get(), target_width, target_height,
+                       target_rtv, viewport);
+    }
+}
+
+bool PostProcessor::ensure_enhance_targets(unsigned width, unsigned height,
+                                           std::uint64_t frame_index,
+                                           unsigned frames_in_flight) {
+    for (unsigned k = 0; k < kBloomLevels; ++k) {
+        const unsigned w = std::max(1u, width >> (k + 1u));
+        const unsigned h = std::max(1u, height >> (k + 1u));
+        if (!ensure_target(bloom_down_targets_[k], w, h, kBloomFormat, kBloomDownSlot + k,
+                           frame_index, frames_in_flight)) {
+            return false;
+        }
+        if (k + 1u < kBloomLevels &&
+            !ensure_target(bloom_up_targets_[k], w, h, kBloomFormat, kBloomUpSlot + k,
+                           frame_index, frames_in_flight)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void PostProcessor::record_enhance(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                                   ID3D12Resource* scene, unsigned width, unsigned height,
+                                   D3D12_CPU_DESCRIPTOR_HANDLE target_rtv,
+                                   const D3D12_VIEWPORT& viewport) {
+    // The pyramid is skipped at bloom 0; the look pass then reads the scene as a
+    // stand-in bloom texture, scaled by zero.
+    ID3D12Resource* bloom = scene;
+    DXGI_FORMAT bloom_format = kColorFormat;
+    if (settings_.bloom > 0u) {
+        const auto pass = [&](ID3D12PipelineState* pipeline, Target& dst, float src_w, float src_h,
+                              std::initializer_list<ID3D12Resource*> inputs,
+                              std::initializer_list<DXGI_FORMAT> formats, float scalar) {
+            Constants c{};
+            c.rt_metrics[0] = 1.0f / src_w;
+            c.rt_metrics[1] = 1.0f / src_h;
+            c.rt_metrics[2] = src_w;
+            c.rt_metrics[3] = src_h;
+            c.params[0] = 1.0f / static_cast<float>(dst.width);
+            c.params[1] = 1.0f / static_cast<float>(dst.height);
+            c.params[2] = static_cast<float>(dst.width);
+            c.params[3] = static_cast<float>(dst.height);
+            c.con0[0] = bits(scalar);
+            c.con1[0] = bits(0.62f);  // brightness threshold
+            c.con1[1] = bits(0.25f);  // soft knee
+            const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(dst.width),
+                                    static_cast<float>(dst.height), 0.0f, 1.0f};
+            transition(list, dst, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            list->OMSetRenderTargets(1, &dst.rtv, FALSE, nullptr);
+            draw(list, srv_ring, pipeline, inputs, formats, vp, c);
+            transition(list, dst, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        };
+        list->SetGraphicsRootSignature(root_signature_.Get());
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (unsigned k = 0; k < kBloomLevels; ++k) {
+            ID3D12Resource* src = k == 0u ? scene : bloom_down_targets_[k - 1u].resource.Get();
+            const float sw = k == 0u ? static_cast<float>(width) : static_cast<float>(bloom_down_targets_[k - 1u].width);
+            const float sh = k == 0u ? static_cast<float>(height) : static_cast<float>(bloom_down_targets_[k - 1u].height);
+            pass(bloom_down_.Get(), bloom_down_targets_[k], sw, sh, {src},
+                 {k == 0u ? kColorFormat : kBloomFormat}, k == 0u ? 1.0f : 0.0f);
+        }
+        for (unsigned k = kBloomLevels - 1u; k-- > 0u;) {
+            Target& coarse = k + 2u == kBloomLevels ? bloom_down_targets_[kBloomLevels - 1u]
+                                                    : bloom_up_targets_[k + 1u];
+            pass(bloom_up_.Get(), bloom_up_targets_[k], static_cast<float>(coarse.width),
+                 static_cast<float>(coarse.height),
+                 {coarse.resource.Get(), bloom_down_targets_[k].resource.Get()},
+                 {kBloomFormat, kBloomFormat}, 1.0f);
+        }
+        bloom = bloom_up_targets_[0].resource.Get();
+        bloom_format = kBloomFormat;
+    }
+
+    Constants c{};
+    c.params[0] = static_cast<float>(width);
+    c.params[1] = static_cast<float>(height);
+    c.con0[0] = bits(settings_.bloom > 0u ? 0.55f * static_cast<float>(settings_.bloom) / 100.0f : 0.0f);
+    c.con0[1] = bits(static_cast<float>(settings_.saturation) / 100.0f);
+    c.con0[2] = bits(static_cast<float>(settings_.contrast) / 100.0f);
+    c.con0[3] = bits(0.7f * static_cast<float>(settings_.vignette) / 100.0f);
+    c.origin[0] = static_cast<std::int32_t>(viewport.TopLeftX);
+    c.origin[1] = static_cast<std::int32_t>(viewport.TopLeftY);
+    list->SetGraphicsRootSignature(root_signature_.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);
+    draw(list, srv_ring, enhance_.Get(), {scene, bloom}, {kColorFormat, bloom_format}, viewport, c);
 }
 
 namespace {

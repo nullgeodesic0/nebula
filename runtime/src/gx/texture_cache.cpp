@@ -2087,6 +2087,204 @@ std::size_t TextureCache::invalidate_guest_ranges(
     return evicted;
 }
 
+bool TextureCache::try_pack_replacement(
+    const Key& key, const TexImage& image, const TexMode& mode,
+    const std::uint8_t* src, std::uint32_t total_guest_size, TextureHandle& out) {
+    if (!texture_pack_initialized_) {
+        texture_pack_initialized_ = true;
+        texture_pack_.initialize();
+    }
+    if (!texture_pack_.enabled() || upload_list_ == nullptr) {
+        return false;
+    }
+    // Paletted textures need Dolphin's min/max-trimmed TLUT hash; the pack has none.
+    if (image.format == TexFormat::C4 || image.format == TexFormat::C8 ||
+        image.format == TexFormat::C14X2) {
+        return false;
+    }
+    const std::uint32_t level0_bytes =
+        texture_guest_byte_size(image.format, image.width, image.height, 1u);
+    if (level0_bytes == 0u || level0_bytes > total_guest_size) {
+        return false;
+    }
+    ++texture_pack_lookups_;
+    const std::uint64_t hash = texture_pack_xxh64(src, level0_bytes);
+    const bool mipmapped = (static_cast<unsigned>(mode.min_filter) & 0x3u) != 0u;
+    char name[96];
+    const std::filesystem::path* path = nullptr;
+    std::string chosen;
+    for (int attempt = 0; attempt < 2 && path == nullptr; ++attempt) {
+        const bool with_m = (attempt == 0) ? mipmapped : !mipmapped;
+        std::snprintf(name, sizeof(name), "tex1_%ux%u%s_%016llx_%u",
+                      static_cast<unsigned>(image.width),
+                      static_cast<unsigned>(image.height), with_m ? "_m" : "",
+                      static_cast<unsigned long long>(hash),
+                      static_cast<unsigned>(image.format));
+        path = texture_pack_.find(name);
+        if (path != nullptr) {
+            chosen = name;
+        }
+    }
+    static const bool log_lookups = [] {
+        char v[8]{};
+        std::size_t n = 0;
+        return getenv_s(&n, v, sizeof(v), "NEBULA_TEXTURE_PACK_LOG") == 0 && n > 1;
+    }();
+    if (log_lookups && (path != nullptr || texture_pack_lookups_ <= 400u)) {
+        std::fprintf(stderr, "[texpack] %s %s\n",
+                     path != nullptr ? "HIT " : "miss", path ? chosen.c_str() : name);
+    }
+    if (path == nullptr || texture_pack_bad_.contains(chosen)) {
+        return false;
+    }
+    ComPtr<ID3D12Resource> resource;
+    DXGI_FORMAT resource_format = DXGI_FORMAT_UNKNOWN;
+    unsigned levels = 0;
+    // Resident replacements survive GXInvalidateTexAll (the game calls it often), so a
+    // texture is read from disk and uploaded once, not on every re-bind.
+    if (const auto cached = pack_cache_.find(chosen); cached != pack_cache_.end()) {
+        pack_lru_.splice(pack_lru_.begin(), pack_lru_, cached->second.lru);
+        resource = cached->second.resource;
+        resource_format = cached->second.format;
+        levels = cached->second.levels;
+    } else {
+    PackImage pi;
+    if (!TexturePack::load(*path, pi)) {
+        texture_pack_bad_.insert(chosen);
+        std::fprintf(stderr, "[texpack] cannot load %s\n", path->string().c_str());
+        return false;
+    }
+
+    levels = static_cast<unsigned>(pi.levels.size());
+    std::vector<UINT64> offsets(levels);
+    std::vector<UINT> pitches(levels);
+    UINT64 staging_size = 0;
+    for (unsigned l = 0; l < levels; ++l) {
+        staging_size = (staging_size + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1u) &
+            ~static_cast<UINT64>(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1u);
+        offsets[l] = staging_size;
+        pitches[l] = (pi.levels[l].row_bytes + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) &
+            ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u);
+        staging_size += static_cast<UINT64>(pitches[l]) * pi.levels[l].rows;
+    }
+    const UploadAllocation staging =
+        allocate_upload_bytes(staging_size, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+    if (staging.cpu_base == nullptr) {
+        throw std::runtime_error("[TextureCache] upload arena is not mapped");
+    }
+    for (unsigned l = 0; l < levels; ++l) {
+        const auto& lv = pi.levels[l];
+        for (std::uint32_t r = 0; r < lv.rows; ++r) {
+            std::memcpy(staging.cpu_base + staging.offset + offsets[l] +
+                            static_cast<std::size_t>(r) * pitches[l],
+                        pi.data.data() + lv.offset + static_cast<std::size_t>(r) * lv.row_bytes,
+                        lv.row_bytes);
+        }
+    }
+
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width            = pi.levels[0].width;
+    rd.Height           = pi.levels[0].height;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels        = static_cast<UINT16>(levels);
+    rd.Format           = pi.format;
+    rd.SampleDesc.Count = 1;
+    rd.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    std::uint64_t allocation_bytes = 0;
+    d3d_check(texture_heap_.create(
+        rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, resource, allocation_bytes),
+        "create replacement texture");
+    resource_format = pi.format;
+
+    for (unsigned l = 0; l < levels; ++l) {
+        const auto& lv = pi.levels[l];
+        D3D12_TEXTURE_COPY_LOCATION copy_dst{};
+        copy_dst.pResource        = resource.Get();
+        copy_dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        copy_dst.SubresourceIndex = l;
+        D3D12_TEXTURE_COPY_LOCATION copy_src{};
+        copy_src.pResource                          = staging.resource;
+        copy_src.Type                               = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        copy_src.PlacedFootprint.Offset             = staging.offset + offsets[l];
+        copy_src.PlacedFootprint.Footprint.Format   = pi.format;
+        copy_src.PlacedFootprint.Footprint.Width    =
+            pi.block_compressed ? ((lv.width + 3u) & ~3u) : lv.width;
+        copy_src.PlacedFootprint.Footprint.Height   =
+            pi.block_compressed ? ((lv.height + 3u) & ~3u) : lv.height;
+        copy_src.PlacedFootprint.Footprint.Depth    = 1;
+        copy_src.PlacedFootprint.Footprint.RowPitch = pitches[l];
+        upload_list_->CopyTextureRegion(&copy_dst, 0, 0, 0, &copy_src, nullptr);
+    }
+    {
+        D3D12_RESOURCE_BARRIER bar{};
+        bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        bar.Transition.pResource   = resource.Get();
+        bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        bar.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        upload_list_->ResourceBarrier(1, &bar);
+    }
+
+    static const std::uint64_t budget = [] {
+        char v[32]{};
+        std::size_t n = 0;
+        if (getenv_s(&n, v, sizeof(v), "NEBULA_TEXTURE_PACK_VRAM_MB") == 0 && n > 1) {
+            return static_cast<std::uint64_t>(std::strtoull(v, nullptr, 10)) << 20;
+        }
+        return std::uint64_t{1536} << 20;
+    }();
+    pack_lru_.push_front(chosen);
+    pack_cache_.emplace(chosen, PackCached{resource, resource_format, levels,
+                                           allocation_bytes, pack_lru_.begin()});
+    pack_cache_bytes_ += allocation_bytes;
+    while (pack_cache_bytes_ > budget && pack_lru_.size() > 1u) {
+        const auto victim = pack_cache_.find(pack_lru_.back());
+        if (victim != pack_cache_.end()) {
+            pack_cache_bytes_ -= victim->second.bytes;
+            pack_cache_.erase(victim);
+        }
+        pack_lru_.pop_back();
+    }
+    }  // cache miss
+
+    const UINT srv_idx = allocate_srv_index();
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
+    srv_desc.Format                  = resource_format;
+    srv_desc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv_desc.Texture2D.MipLevels     = levels;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = srv_cpu_base_;
+    cpu.ptr += static_cast<SIZE_T>(srv_idx) * srv_stride_;
+    device_->CreateShaderResourceView(resource.Get(), &srv_desc, cpu);
+
+    TextureHandle handle{};
+    handle.resource        = resource.Get();
+    handle.srv_index       = srv_idx;
+    // The guest-visible size stays the original: UVs are normalized, so a larger
+    // replacement needs no coordinate changes.
+    handle.width           = static_cast<std::uint16_t>(image.width);
+    handle.height          = static_cast<std::uint16_t>(image.height);
+    handle.mip_levels      = static_cast<std::uint8_t>(levels);
+    handle.from_efb_copy   = false;
+    handle.generated_mips  = false;
+    handle.guest_byte_size = total_guest_size;
+
+    Entry entry{};
+    entry.texture          = std::move(resource);
+    // The resource is shared with pack_cache_, which does its own budgeting; a zero
+    // allocation also keeps it out of the RGBA8 recycle pool.
+    entry.allocation_bytes = 0;
+    entry.handle           = handle;
+    if (entries_.empty()) decoded_guest_envelope_.clear();
+    decoded_guest_envelope_.include(image.guest_addr, total_guest_size);
+    entries_.emplace(key, std::move(entry));
+    decoded_lru_track(key);
+    ++texture_pack_hits_;
+    out = handle;
+    return true;
+}
+
 TextureHandle TextureCache::get(
     const TexImage& image,
     const TexMode& mode,
@@ -2228,6 +2426,12 @@ TextureHandle TextureCache::get(
             std::span<const std::byte>(guest_bytes, total_guest_size));
     }
     const auto* src = reinterpret_cast<const std::uint8_t*>(guest_bytes);
+    {
+        TextureHandle replaced{};
+        if (try_pack_replacement(key, image, mode, src, total_guest_size, replaced)) {
+            return replaced;
+        }
+    }
     std::optional<ContentKey> content_key;
     if (decoded_content_cache_enabled() &&
         !debug_invalidate_every_frame && total_guest_size != 0u &&

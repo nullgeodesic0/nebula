@@ -37,6 +37,18 @@ struct PostProcessSettings {
     std::uint8_t smaa_quality = 2;  // 0 low, 1 medium, 2 high, 3 ultra
     Upscaler upscaler = Upscaler::kFsr1;
     std::uint8_t sharpness = 20;
+    // Look pass (the "enhance" stage, after scaling and sharpening). Percent
+    // values: bloom 0-100 (0 skips the bloom pyramid), saturation and contrast
+    // 100 = unchanged, vignette 0-100. The stage is skipped entirely when every
+    // value is neutral.
+    std::uint8_t bloom = 30;
+    std::uint8_t saturation = 108;
+    std::uint8_t contrast = 104;
+    std::uint8_t vignette = 8;
+
+    [[nodiscard]] bool enhance_active() const noexcept {
+        return bloom != 0u || saturation != 100u || contrast != 100u || vignette != 0u;
+    }
 };
 
 // Which passes one frame runs, decided from sizes and settings alone so the
@@ -190,6 +202,21 @@ private:
               const D3D12_VIEWPORT& viewport,
               const Constants& constants);
     void release_retired(std::uint64_t frame_index) noexcept;
+    // Bloom pyramid targets for a window of this size; false when one cannot be made.
+    bool ensure_enhance_targets(unsigned width, unsigned height,
+                                std::uint64_t frame_index, unsigned frames_in_flight);
+    // Bloom pyramid from `scene`, then the look pass into `target_rtv`/`viewport`.
+    void record_enhance(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                        ID3D12Resource* scene, unsigned width, unsigned height,
+                        D3D12_CPU_DESCRIPTOR_HANDLE target_rtv, const D3D12_VIEWPORT& viewport);
+
+    static constexpr unsigned kBloomLevels = 5u;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> bloom_down_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> bloom_up_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> enhance_;
+    Target final_;                      // window-sized scene handed to the look pass
+    Target bloom_down_targets_[kBloomLevels];
+    Target bloom_up_targets_[kBloomLevels - 1u];
 
     ID3D12Device* device_ = nullptr;
     PostProcessSettings settings_{};

@@ -329,6 +329,10 @@ PostProcessSettings post_process_settings_from(const RenderConfig& cfg) noexcept
     post.smaa_quality = static_cast<std::uint8_t>(std::min(cfg.smaa_quality, 3u));
     post.upscaler = static_cast<PostProcessSettings::Upscaler>(std::min(cfg.upscaler, 1u));
     post.sharpness = static_cast<std::uint8_t>(std::min(cfg.sharpness, 100u));
+    post.bloom = static_cast<std::uint8_t>(std::min(cfg.bloom, 100u));
+    post.saturation = static_cast<std::uint8_t>(std::min(cfg.saturation, 200u));
+    post.contrast = static_cast<std::uint8_t>(std::min(cfg.contrast, 200u));
+    post.vignette = static_cast<std::uint8_t>(std::min(cfg.vignette, 100u));
     return post;
 }
 
@@ -4028,7 +4032,9 @@ void RendererD3D12::sync_post_process_settings() {
     const PostProcessSettings next = post_process_settings_from(get_render_config());
     const PostProcessSettings& current = post_process_.settings();
     if (next.aa != current.aa || next.smaa_quality != current.smaa_quality ||
-        next.upscaler != current.upscaler || next.sharpness != current.sharpness) {
+        next.upscaler != current.upscaler || next.sharpness != current.sharpness ||
+        next.bloom != current.bloom || next.saturation != current.saturation ||
+        next.contrast != current.contrast || next.vignette != current.vignette) {
         post_process_.apply_settings(next, frame_index_, kFramesInFlight);
     }
 }
