@@ -38,6 +38,9 @@
 #include "post_bloom_down_ps.h"
 #include "post_bloom_up_ps.h"
 #include "post_enhance_ps.h"
+#include "post_ssao_ao_ps.h"
+#include "post_ssao_blur_ps.h"
+#include "post_ssao_apply_ps.h"
 
 namespace galaxy::gx {
 namespace {
@@ -60,6 +63,10 @@ constexpr DXGI_FORMAT kStencilFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 // Slots 0-3: SMAA/AA/scaling targets. 4: final_. 5-9: bloom down levels.
 // 10-13: bloom up levels.
 constexpr unsigned kRtvSlots = 16u;
+constexpr unsigned kSsaoAoSlot = 14u;
+constexpr unsigned kSsaoBlurSlot = 15u;
+constexpr DXGI_FORMAT kSsaoFormat = DXGI_FORMAT_R8_UNORM;
+constexpr DXGI_FORMAT kDepthSrvFormat = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
 constexpr DXGI_FORMAT kBloomFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr unsigned kFinalSlot = 4u;
 constexpr unsigned kBloomDownSlot = 5u;
@@ -171,6 +178,34 @@ bool PostProcessor::create_pipeline(D3D12_SHADER_BYTECODE vs, D3D12_SHADER_BYTEC
         ds.FrontFace = op;
         ds.BackFace = op;
     }
+    return SUCCEEDED(device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
+}
+
+// dest = dest * source for colour, alpha untouched: the ambient occlusion apply.
+bool PostProcessor::create_pipeline_multiply(D3D12_SHADER_BYTECODE vs, D3D12_SHADER_BYTECODE ps,
+                                             DXGI_FORMAT format,
+                                             ComPtr<ID3D12PipelineState>& out) {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = root_signature_.Get();
+    pd.VS = vs;
+    pd.PS = ps;
+    auto& rt = pd.BlendState.RenderTarget[0];
+    rt.BlendEnable = TRUE;
+    rt.SrcBlend = D3D12_BLEND_ZERO;
+    rt.DestBlend = D3D12_BLEND_SRC_COLOR;
+    rt.BlendOp = D3D12_BLEND_OP_ADD;
+    rt.SrcBlendAlpha = D3D12_BLEND_ZERO;
+    rt.DestBlendAlpha = D3D12_BLEND_ONE;
+    rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.SampleMask = UINT_MAX;
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = format;
+    pd.SampleDesc.Count = 1;
     return SUCCEEDED(device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
 }
 
@@ -314,6 +349,14 @@ bool PostProcessor::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
         bloom_up_.Reset();
         enhance_.Reset();
     }
+    if (!(create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_ssao_ao_ps)), kSsaoFormat, 0, ssao_ao_pipeline_) &&
+          create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_ssao_blur_ps)), kSsaoFormat, 0, ssao_blur_pipeline_) &&
+          create_pipeline_multiply(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_ssao_apply_ps)), kColorFormat, ssao_apply_pipeline_))) {
+        std::cerr << "[post-process] ambient occlusion pipelines failed; it stays off\n";
+        ssao_ao_pipeline_.Reset();
+        ssao_blur_pipeline_.Reset();
+        ssao_apply_pipeline_.Reset();
+    }
     fault_selftest_ = test_fault("selftest");
     fault_targets_ = test_fault("targets");
     const bool smaa_pipelines = !test_fault("smaa") &&
@@ -386,6 +429,11 @@ void PostProcessor::shutdown() noexcept {
     bloom_down_.Reset();
     bloom_up_.Reset();
     enhance_.Reset();
+    ssao_ao_pipeline_.Reset();
+    ssao_blur_pipeline_.Reset();
+    ssao_apply_pipeline_.Reset();
+    ssao_ao_ = {};
+    ssao_blur_ = {};
     final_ = {};
     for (auto& t : bloom_down_targets_) t = {};
     for (auto& t : bloom_up_targets_) t = {};
@@ -960,6 +1008,53 @@ void PostProcessor::record(ID3D12GraphicsCommandList* list,
         record_enhance(list, srv_ring, final_.resource.Get(), target_width, target_height,
                        target_rtv, viewport);
     }
+}
+
+bool PostProcessor::record_ssao(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                                const SsaoInputs& in, std::uint64_t frame_index,
+                                unsigned frames_in_flight) {
+    if (!ssao_ready() || in.depth == nullptr || in.width == 0u || in.height == 0u ||
+        !ensure_target(ssao_ao_, in.width, in.height, kSsaoFormat, kSsaoAoSlot,
+                       frame_index, frames_in_flight) ||
+        !ensure_target(ssao_blur_, in.width, in.height, kSsaoFormat, kSsaoBlurSlot,
+                       frame_index, frames_in_flight)) {
+        return false;
+    }
+    Constants c{};
+    c.rt_metrics[0] = 1.0f / static_cast<float>(in.width);
+    c.rt_metrics[1] = 1.0f / static_cast<float>(in.height);
+    c.rt_metrics[2] = static_cast<float>(in.width);
+    c.rt_metrics[3] = static_cast<float>(in.height);
+    for (unsigned i = 0; i < 4u; ++i) c.params[i] = in.viewport[i];
+    c.con0[0] = bits(in.camera_near);
+    c.con0[1] = bits(in.camera_far);
+    c.con0[2] = bits(in.proj[0]);
+    c.con0[3] = bits(in.proj[1]);
+    c.con1[0] = bits(in.proj[2]);
+    c.con1[1] = bits(in.proj[3]);
+    c.con1[2] = bits(in.radius);
+    c.con1[3] = bits(in.strength);
+    c.con2[0] = bits(in.bias);
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
+                            static_cast<float>(in.height), 0.0f, 1.0f};
+    list->SetGraphicsRootSignature(root_signature_.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    transition(list, ssao_ao_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    list->OMSetRenderTargets(1, &ssao_ao_.rtv, FALSE, nullptr);
+    draw(list, srv_ring, ssao_ao_pipeline_.Get(), {in.depth}, {kDepthSrvFormat}, vp, c);
+    transition(list, ssao_ao_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    transition(list, ssao_blur_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    list->OMSetRenderTargets(1, &ssao_blur_.rtv, FALSE, nullptr);
+    draw(list, srv_ring, ssao_blur_pipeline_.Get(), {in.depth, ssao_ao_.resource.Get()},
+         {kDepthSrvFormat, kSsaoFormat}, vp, c);
+    transition(list, ssao_blur_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE color = in.color_rtv;
+    list->OMSetRenderTargets(1, &color, FALSE, nullptr);
+    draw(list, srv_ring, ssao_apply_pipeline_.Get(), {ssao_blur_.resource.Get()}, {kSsaoFormat}, vp, c);
+    return true;
 }
 
 bool PostProcessor::ensure_enhance_targets(unsigned width, unsigned height,

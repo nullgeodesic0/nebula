@@ -6253,19 +6253,40 @@ void GxBackend::apply_scene_jitter(const GxVsConstants& cpu, GxVsConstants& uplo
         upload.projection[0][column] = cpu.projection[0][column] + jx * cpu.projection[3][column];
         upload.projection[1][column] = cpu.projection[1][column] + jy * cpu.projection[3][column];
     }
-    if (!scene_camera_captured_) {
-        scene_camera_captured_ = true;
-        // GX perspective: clip z = E z + F, w = -z; NDC z -1 at near, 0 at far.
-        const float c = xf_float(xf::kProjectionBase + 2u);
-        const float e = xf_float(xf::kProjectionBase + 4u);
-        const float f = xf_float(xf::kProjectionBase + 5u);
-        const float near_plane = f / (e - 1.0f);
-        const float far_plane = f / e;
-        const float fov_y = c != 0.0f ? 2.0f * std::atan(1.0f / std::fabs(c)) : 1.0f;
-        if (std::isfinite(near_plane) && std::isfinite(far_plane) &&
-            near_plane > 0.0f && far_plane > near_plane) {
-            renderer_.set_scene_camera(near_plane, far_plane, fov_y);
-        }
+    capture_scene_camera();
+}
+
+void GxBackend::capture_scene_camera() {
+    if (scene_camera_captured_ ||
+        state_.xf(static_cast<std::uint16_t>(xf::kProjectionBase + 6u)) != 0u) {
+        return;
+    }
+    scene_camera_captured_ = true;
+    const auto xf_float = [this](unsigned offset) {
+        return std::bit_cast<float>(state_.xf(static_cast<std::uint16_t>(offset)));
+    };
+    // GX perspective: clip z = E z + F, w = -z; NDC z -1 at near, 0 at far.
+    const float a = xf_float(xf::kProjectionBase + 0u);
+    const float b = xf_float(xf::kProjectionBase + 1u);
+    const float c = xf_float(xf::kProjectionBase + 2u);
+    const float d = xf_float(xf::kProjectionBase + 3u);
+    const float e = xf_float(xf::kProjectionBase + 4u);
+    const float f = xf_float(xf::kProjectionBase + 5u);
+    const float near_plane = f / (e - 1.0f);
+    const float far_plane = f / e;
+    const float fov_y = c != 0.0f ? 2.0f * std::atan(1.0f / std::fabs(c)) : 1.0f;
+    if (std::isfinite(near_plane) && std::isfinite(far_plane) &&
+        near_plane > 0.0f && far_plane > near_plane) {
+        renderer_.set_scene_camera(near_plane, far_plane, fov_y);
+        // XF viewport: wd, ht, zRange, xOrig, yOrig, farZ; centre = orig - 342.
+        const float wd = std::fabs(xf_float(xf::kViewportBase));
+        const float ht = std::fabs(xf_float(xf::kViewportBase + 1u));
+        const float vp[4] = {
+            xf_float(xf::kViewportBase + 3u) - 342.0f - wd,
+            xf_float(xf::kViewportBase + 4u) - 342.0f - ht,
+            2.0f * wd, 2.0f * ht};
+        const float abcd[4] = {a, b, c, d};
+        renderer_.set_scene_projection(abcd, vp);
     }
 }
 
@@ -6480,6 +6501,9 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
     // scene that begins before a display copy restores the render EFB.
     bool switched = false;
     if (marker == FifoMarker::SceneEnd) {
+        if (renderer_.record_scene_ssao()) {
+            frame_bindings_dirty_ = true;
+        }
         switched = renderer_.begin_output_efb();
     } else if (renderer_.output_efb_active()) {
         renderer_.end_output_efb();
@@ -10294,6 +10318,9 @@ ID3D12PipelineState* GxBackend::flush_draw_state(
         UploadRing::Allocation vs_alloc =
             renderer_.constant_ring().allocate(sizeof(GxVsConstants), 256u);
         std::memcpy(vs_alloc.cpu, &vs_c, sizeof(vs_c));
+        if (scene_phase_ && !scene_camera_captured_) {
+            capture_scene_camera();
+        }
         if (history_scene_) [[unlikely]] {
             write_scene_vs_constants(vs_c, *reinterpret_cast<GxVsConstants*>(vs_alloc.cpu));
         }

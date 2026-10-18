@@ -496,6 +496,14 @@ public:
     }
     // The scene camera's clip planes and vertical field of view (radians).
     void set_scene_camera(float near_plane, float far_plane, float fov_y) noexcept;
+    // GX projection terms A..D (clip x = A x + B z, clip y = C y + D z) and the XF
+    // viewport (x, y, w, h in unscaled EFB pixels) of the scene's first perspective
+    // draw; with set_scene_camera this makes the scene's depth usable for ambient
+    // occlusion. Cleared at every scene begin.
+    void set_scene_projection(const float abcd[4], const float viewport[4]) noexcept;
+    // At scene end: ambient occlusion from the EFB depth, multiplied onto the EFB
+    // colour. True when it recorded (GX bindings are then stale).
+    [[nodiscard]] bool record_scene_ssao();
     // GX copy-clear: color from the latched AR/GB regs, depth from z24
     // (converted z24 / 0xFFFFFF into the D24 target).  The clear is scoped to
     // the given rect in unscaled EFB pixels (w==0 -> full target), matching
@@ -841,6 +849,9 @@ private:
     bool scene_temporal_ = false;
     float scene_jitter_[2]{};
     float scene_camera_[3]{1.0f, 100000.0f, 1.0f};
+    float scene_proj_[4]{};
+    float scene_viewport_[4]{};
+    bool scene_projection_valid_ = false;
     Microsoft::WRL::ComPtr<ID3D12Resource> motion_target_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> motion_rtv_heap_;
     D3D12_CPU_DESCRIPTOR_HANDLE motion_rtv_{};
