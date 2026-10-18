@@ -20,8 +20,9 @@ enum class ControlScheme : std::uint8_t {
     Xbox = 1,
     SwitchPro = 2,
     SwitchPro2 = 3,
+    DualSense = 4,
 };
-inline constexpr std::size_t kControlSchemeCount = 4;
+inline constexpr std::size_t kControlSchemeCount = 5;
 
 enum class WiiTarget : std::uint8_t {
     A,
@@ -210,7 +211,13 @@ struct ControlsConfig {
     return s != ControlScheme::Keyboard;
 }
 [[nodiscard]] constexpr bool scheme_has_motion(ControlScheme s) noexcept {
-    return s == ControlScheme::SwitchPro || s == ControlScheme::SwitchPro2;
+    return s == ControlScheme::SwitchPro || s == ControlScheme::SwitchPro2 ||
+           s == ControlScheme::DualSense;
+}
+// Pads whose face buttons sit in the Xbox positions (bottom button = Wii A,
+// right = Wii B), as opposed to Nintendo's swapped pair.
+[[nodiscard]] constexpr bool scheme_has_xbox_layout(ControlScheme s) noexcept {
+    return s == ControlScheme::Xbox || s == ControlScheme::DualSense;
 }
 
 [[nodiscard]] BindingTable default_binding_table(ControlScheme scheme);

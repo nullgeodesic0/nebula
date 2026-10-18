@@ -9463,6 +9463,7 @@ std::string native_settings_row_text(
             const galaxy::host::ConnectedControllers connected = galaxy::host::connected_controllers();
             if (s_controls_scheme == ControlScheme::Xbox && connected.xbox) line += "  CONNECTED";
             if (s_controls_scheme == ControlScheme::SwitchPro && connected.switch_pro != 0u) line += "  CONNECTED";
+            if (s_controls_scheme == ControlScheme::DualSense && connected.dualsense != 0u) line += "  CONNECTED";
             if (s_controls_scheme == ControlScheme::SwitchPro2) {
                 if (connected.pro2_needs_winusb) line += "  NEEDS WINUSB";
                 else if (connected.switch_pro2 != 0u) line += "  CONNECTED";

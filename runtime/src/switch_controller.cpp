@@ -215,7 +215,9 @@ PadSample pad_sample_from(const DecodedState& state, ControlScheme scheme, const
     sample.scheme = scheme;
     sample.buttons = state.buttons;
     std::array<float, 4> sticks{};
-    if (state.simple) {
+    if (state.normalized) {
+        sticks = state.stick_norm;
+    } else if (state.simple) {
         for (std::size_t i = 0; i < 4; ++i) {
             const float value = static_cast<float>(state.stick_raw[i] - 0x8000) / 20000.0f;
             sticks[i] = std::clamp((i % 2u) == 1u ? -value : value, -1.0f, 1.0f);
@@ -230,8 +232,8 @@ PadSample pad_sample_from(const DecodedState& state, ControlScheme scheme, const
     sample.axes[1] = apply_deadzone(sticks[1], stick_deadzone);
     sample.axes[2] = apply_deadzone(sticks[2], pointer_deadzone);
     sample.axes[3] = apply_deadzone(sticks[3], pointer_deadzone);
-    sample.axes[4] = state.left_trigger ? 1.0f : 0.0f;
-    sample.axes[5] = state.right_trigger ? 1.0f : 0.0f;
+    sample.axes[4] = state.normalized ? state.trigger_norm[0] : state.left_trigger ? 1.0f : 0.0f;
+    sample.axes[5] = state.normalized ? state.trigger_norm[1] : state.right_trigger ? 1.0f : 0.0f;
     return sample;
 }
 

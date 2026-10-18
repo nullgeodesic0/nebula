@@ -1,5 +1,6 @@
 #include "galaxy/site_hooks.h"
 
+#include "galaxy/button_prompts.h"
 #include "galaxy/experimental_ultrawide_aspect.h"
 #include "galaxy/layout_aspect.h"
 #include "galaxy/layout_aspect_cinema.h"
@@ -93,6 +94,9 @@ void dispatch_site_hook(
     std::uint32_t argument,
     PpcContext* context,
     GuestMemoryV1* memory) {
+    // Controller button prompts follow the controller in use; hooks run often
+    // and on the simulation thread, which is where guest memory may be written.
+    prompts::tick(memory, services, guest_pc);
     switch (static_cast<SiteHookKind>(kind)) {
     case SiteHookKind::CinemaAndHud:
         apply_rmge01_cinema_vertical(context, memory, services);

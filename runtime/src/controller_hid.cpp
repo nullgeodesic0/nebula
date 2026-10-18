@@ -39,6 +39,7 @@ namespace galaxy::host {
 namespace {
 
 namespace sw = input::switch_hid;
+namespace ds = input::dualsense;
 using input::ControlScheme;
 
 std::uint64_t steady_us() noexcept {
@@ -145,6 +146,10 @@ struct Device {
     sw::ImuCal imu{};
     sw::Switch2ImuState switch2_imu{};
     sw::SwitchMotion motion{};
+    ds::Calibration ds_cal{};
+    std::uint32_t ds_last_timestamp = 0;
+    bool ds_have_timestamp = false;
+    std::uint8_t ds_sequence = 0;  // Bluetooth output sequence
     std::uint64_t last_report_us = 0;
     std::uint64_t imu_reports = 0;
     std::unique_ptr<WinUsbPipes> winusb;
@@ -176,6 +181,7 @@ struct Hub {
     std::atomic<bool> started{false};
     std::atomic<unsigned> pro_count{0};
     std::atomic<unsigned> pro2_count{0};
+    std::atomic<unsigned> dualsense_count{0};
     std::atomic<bool> pro2_needs_winusb{false};
     // Vibration: the game state from the emulation thread, and what runs on
     // the devices (read without locks by stop_all_rumble).
@@ -192,6 +198,8 @@ struct Hub {
     std::array<std::atomic<HANDLE>, kMaxSwitchPads> switch_rumble_handles{};
     std::array<std::atomic<std::uint16_t>, kMaxSwitchPads> switch_rumble_lengths{};
     std::array<std::atomic<bool>, kMaxSwitchPads> switch_rumble_pro2{};
+    // 0 not a DualSense, 1 USB, 2 Bluetooth (its motor-off report differs).
+    std::array<std::atomic<std::uint8_t>, kMaxSwitchPads> switch_rumble_dualsense{};
 };
 
 // Never destroyed: the worker may still be blocked when the process exits.
@@ -211,6 +219,7 @@ DWORD CALLBACK on_device_change(HCMNOTIFICATION, PVOID context, CM_NOTIFY_ACTION
 
 struct HidCandidate {
     std::wstring path;
+    USHORT vendor = 0;
     USHORT product = 0;
 };
 
@@ -231,18 +240,20 @@ std::vector<HidCandidate> enumerate_switch_hid() {
         detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
         if (!SetupDiGetDeviceInterfaceDetailW(set, &iface, detail, needed, nullptr, nullptr)) continue;
         const std::wstring path = detail->DevicePath;
-        if (!contains_ci(path, L"057e")) continue;  // cheap filter before opening
+        // Cheap filter before opening: Nintendo (057e) or Sony (054c) vendor id in the path.
+        if (!contains_ci(path, L"057e") && !contains_ci(path, L"054c")) continue;
         UniqueHandle probe(CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                        OPEN_EXISTING, 0, nullptr));
         if (probe.get() == INVALID_HANDLE_VALUE) continue;
         HIDD_ATTRIBUTES attributes{};
         attributes.Size = sizeof(attributes);
-        if (!HidD_GetAttributes(probe.get(), &attributes) || attributes.VendorID != sw::kNintendoVendorId) continue;
-        if (attributes.ProductID != sw::kProControllerProductId &&
-            attributes.ProductID != sw::kPro2ControllerProductId) {
-            continue;
-        }
-        found.push_back({path, attributes.ProductID});
+        if (!HidD_GetAttributes(probe.get(), &attributes)) continue;
+        const bool nintendo = attributes.VendorID == sw::kNintendoVendorId &&
+                              (attributes.ProductID == sw::kProControllerProductId ||
+                               attributes.ProductID == sw::kPro2ControllerProductId);
+        const bool sony = attributes.VendorID == ds::kSonyVendorId && ds::is_dualsense_product(attributes.ProductID);
+        if (!nintendo && !sony) continue;
+        found.push_back({path, attributes.VendorID, attributes.ProductID});
     }
     SetupDiDestroyDeviceInfoList(set);
     return found;
@@ -489,15 +500,45 @@ bool write_report(HANDLE handle, HANDLE event, const std::uint8_t* data, DWORD s
     return GetOverlappedResult(handle, &ov, &done, FALSE) != FALSE;
 }
 
-// The motor-off report for a Switch controller.
-bool write_rumble_off(HANDLE handle, HANDLE event, std::uint16_t output_length, bool pro2) noexcept {
+// The motor-off report for a Switch controller or, with `dualsense` 1 (USB) /
+// 2 (Bluetooth), a DualSense.
+bool write_rumble_off(HANDLE handle, HANDLE event, std::uint16_t output_length, bool pro2,
+                      std::uint8_t dualsense = 0) noexcept {
     std::array<std::uint8_t, 128> report{};
+    if (dualsense != 0u) {
+        ds::OutputState off{};
+        off.motor_left = 0;
+        off.motor_right = 0;
+        const std::size_t built = ds::build_output_report(dualsense == 2u, 0, off, report);
+        return built != 0 && write_report(handle, event, report.data(), static_cast<DWORD>(built), 30);
+    }
     const std::size_t length = std::min<std::size_t>(output_length, report.size());
     const std::size_t built = pro2
         ? input::rumble::build_switch2_rumble_report(0, 0, 0, std::span(report.data(), length))
         : input::rumble::build_switch_pro_rumble_report(0, input::rumble::switch_pro_motor_rumble(0, 0),
                                                         std::span(report.data(), length));
     return built != 0 && write_report(handle, event, report.data(), static_cast<DWORD>(length), 30);
+}
+
+// DualSense: read the calibration feature report (over Bluetooth this also
+// switches the controller to the full 0x31 input report), then set the lightbar
+// and player LED once. Rumble is driven later by service_dualsense_rumble.
+void init_dualsense(Device& device, USHORT feature_length) {
+    std::vector<std::uint8_t> feature(std::max<std::size_t>(feature_length, ds::kFeatureCalibrationBytes), 0);
+    feature[0] = ds::kFeatureCalibration;
+    const bool got = HidD_GetFeature(device.handle.get(), feature.data(), static_cast<ULONG>(feature.size())) != FALSE;
+    if (got) device.ds_cal = ds::parse_calibration(feature);
+    device.write_event.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    ds::OutputState lights{};
+    lights.set_motors = false;
+    lights.set_lights = true;
+    std::array<std::uint8_t, 128> report{};
+    const std::size_t built = ds::build_output_report(device.bluetooth, device.ds_sequence++, lights, report);
+    const bool lit = built != 0 && !rumble_output_disabled() &&
+                     write_report(device.handle.get(), device.write_event.get(), report.data(),
+                                  static_cast<DWORD>(built), 100);
+    std::cerr << "[controller] dualsense (" << (device.bluetooth ? "bluetooth" : "usb") << ") calibration "
+              << (got ? "read" : "unavailable (nominal scale)") << ", leds " << (lit ? "set" : "unchanged") << '\n';
 }
 
 // Set unless the value is empty, 0, false, off or no.
@@ -674,12 +715,15 @@ private:
                                            [&](const auto& d) { return d->path == candidate.path; });
             if (!known) open_device(candidate);
         }
-        unsigned pro = 0, pro2 = 0;
+        unsigned pro = 0, pro2 = 0, dualsense = 0;
         for (const auto& device : devices_) {
-            (device->scheme == ControlScheme::SwitchPro2 ? pro2 : pro)++;
+            if (device->scheme == ControlScheme::DualSense) ++dualsense;
+            else if (device->scheme == ControlScheme::SwitchPro2) ++pro2;
+            else ++pro;
         }
         hub().pro_count.store(pro, std::memory_order_release);
         hub().pro2_count.store(pro2, std::memory_order_release);
+        hub().dualsense_count.store(dualsense, std::memory_order_release);
     }
 
     std::size_t free_slot() const {
@@ -694,8 +738,12 @@ private:
     void open_device(const HidCandidate& candidate) {
         auto device = std::make_unique<Device>();
         device->path = candidate.path;
-        device->scheme = candidate.product == sw::kPro2ControllerProductId ? ControlScheme::SwitchPro2
-                                                                            : ControlScheme::SwitchPro;
+        if (candidate.vendor == ds::kSonyVendorId) {
+            device->scheme = ControlScheme::DualSense;
+        } else {
+            device->scheme = candidate.product == sw::kPro2ControllerProductId ? ControlScheme::SwitchPro2
+                                                                                : ControlScheme::SwitchPro;
+        }
         device->slot = free_slot();
         if (device->slot >= kMaxSwitchPads) return;
         device->handle.reset(CreateFileW(candidate.path.c_str(), GENERIC_READ | GENERIC_WRITE,
@@ -711,8 +759,15 @@ private:
         device->buffer.resize(std::max<USHORT>(caps.InputReportByteLength, 64));
         device->output_length = std::max<USHORT>(caps.OutputReportByteLength, 2);
         device->bluetooth = contains_ci(candidate.path, L"{00001124-0000-1000-8000-00805f9b34fb}");
+        if (device->scheme == ControlScheme::DualSense) {
+            // The Bluetooth DualSense exposes the 78-byte report 0x31; USB uses 64-byte 0x01.
+            device->bluetooth = device->bluetooth || caps.InputReportByteLength >= ds::kInputReportBluetoothBytes;
+            device->buffer.resize(std::max<std::size_t>(device->buffer.size(), ds::kInputReportBluetoothBytes));
+        }
         device->read_event.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-        if (device->scheme == ControlScheme::SwitchPro) {
+        if (device->scheme == ControlScheme::DualSense) {
+            init_dualsense(*device, caps.FeatureReportByteLength);
+        } else if (device->scheme == ControlScheme::SwitchPro) {
             init_switch_pro(*device);
         } else if (device->bluetooth) {
             std::cerr << "[controller] pro controller 2 over bluetooth is not a HID device on Windows; "
@@ -748,7 +803,8 @@ private:
         if (device.rumble_on) {
             if (!device.write_event) device.write_event.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
             (void)write_rumble_off(device.handle.get(), device.write_event.get(), device.output_length,
-                                   device.scheme == ControlScheme::SwitchPro2);
+                                   device.scheme == ControlScheme::SwitchPro2,
+                                   device.scheme == ControlScheme::DualSense ? (device.bluetooth ? 2u : 1u) : 0u);
             device.rumble_on = false;
         }
         if (device.read_pending && !device.resume) {
@@ -813,9 +869,29 @@ private:
     void handle_report(Device& device, DWORD size) {
         const std::span<const std::uint8_t> report(device.buffer.data(), size);
         sw::DecodedState decoded{};
-        const bool ok = device.scheme == ControlScheme::SwitchPro2
-                            ? sw::decode_switch2_report(report, device.switch2_imu, decoded)
-                            : sw::decode_pro_report(report, device.imu, decoded);
+        bool ok = false;
+        float ds_dt = 0.0f;  // DualSense: seconds from the sensor timestamp (0.333 us units)
+        switch (device.scheme) {
+        case ControlScheme::DualSense: {
+            ok = ds::decode_report(report, device.ds_cal, decoded);
+            if (ok) {
+                const std::uint32_t stamp = ds::report_sensor_timestamp(report);
+                if (device.ds_have_timestamp) {
+                    const std::uint32_t ticks = stamp - device.ds_last_timestamp;  // wraps
+                    ds_dt = std::clamp(static_cast<float>(ticks) * (1.0f / 3'000'000.0f), 0.0f, 0.05f);
+                }
+                device.ds_last_timestamp = stamp;
+                device.ds_have_timestamp = true;
+            }
+            break;
+        }
+        case ControlScheme::SwitchPro2:
+            ok = sw::decode_switch2_report(report, device.switch2_imu, decoded);
+            break;
+        default:
+            ok = sw::decode_pro_report(report, device.imu, decoded);
+            break;
+        }
         if (!ok) return;
         refresh_config();
         const input::SchemeTuning& tuning = config_.tune(device.scheme);
@@ -834,7 +910,8 @@ private:
         motion.picture_aspect = static_cast<float>(galaxy::kWiiContentAspect);
         for (std::size_t i = 0; i < decoded.imu_count; ++i) {
             // Switch Pro: three samples 5 ms apart; Pro 2: one per report.
-            const float dt = device.scheme == ControlScheme::SwitchPro ? 0.005f : dt_report;
+            const float dt = device.scheme == ControlScheme::SwitchPro ? 0.005f
+                             : (device.scheme == ControlScheme::DualSense && ds_dt > 0.0f) ? ds_dt : dt_report;
             const std::uint64_t t = now - static_cast<std::uint64_t>((decoded.imu_count - 1u - i) * 5000u);
             const sw::SwitchMotion::Output out = device.motion.feed(decoded.imu[i], dt, t, motion);
             shake_started |= out.shake_started;
@@ -932,9 +1009,54 @@ private:
         rumble_timer_ms_ = timer_ms;
     }
 
+    // One DualSense; true while its motors run or a change waits for the write gap. The motors hold
+    // their speed, so a running motor is only refreshed now and then in case a report was lost.
+    bool service_dualsense_rumble(Device& device, std::uint8_t level, std::uint8_t strength, std::uint64_t now) {
+        constexpr std::uint64_t kGapUs = 10'000;
+        constexpr std::uint64_t kRefreshUs = 200'000;
+        if (device.failed) level = 0u;
+        const bool want = level != 0u;
+        if (!want && !device.rumble_on) return false;
+        const bool changed = want != device.rumble_on ||
+                             (want && (level != device.rumble_level || strength != device.rumble_strength));
+        const std::uint64_t since = now - device.rumble_sent_us;
+        if (!changed && since < kRefreshUs) return want;
+        if (device.rumble_sent_us != 0u && since < kGapUs) return true;
+        if (!device.write_event) device.write_event.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        ds::OutputState output{};
+        if (want) {
+            const input::rumble::XInputMotors speeds = input::rumble::xinput_motor_speeds(level, strength);
+            output.motor_left = static_cast<std::uint8_t>(speeds.left >> 8u);
+            output.motor_right = static_cast<std::uint8_t>(speeds.right >> 8u);
+        }
+        std::array<std::uint8_t, 128> report{};
+        const std::size_t built = ds::build_output_report(device.bluetooth, device.ds_sequence++, output, report);
+        if (built == 0u) {
+            device.rumble_on = false;
+            return false;
+        }
+        Hub& h = hub();
+        if (want && device.slot < kMaxSwitchPads) {
+            h.switch_rumble_lengths[device.slot].store(static_cast<std::uint16_t>(built), std::memory_order_release);
+            h.switch_rumble_pro2[device.slot].store(false, std::memory_order_release);
+            h.switch_rumble_dualsense[device.slot].store(device.bluetooth ? 2u : 1u, std::memory_order_release);
+            h.switch_rumble_handles[device.slot].store(device.handle.get(), std::memory_order_release);
+        }
+        (void)write_report(device.handle.get(), device.write_event.get(), report.data(), static_cast<DWORD>(built), 30);
+        device.rumble_sent_us = now;
+        device.rumble_on = want;
+        device.rumble_level = level;
+        device.rumble_strength = strength;
+        if (!want && device.slot < kMaxSwitchPads) {
+            h.switch_rumble_handles[device.slot].store(nullptr, std::memory_order_release);
+        }
+        return want;
+    }
+
     // One Switch controller; true while its motor runs or a change waits for
     // the write gap (the worker keeps its timer).
     bool service_switch_rumble(Device& device, std::uint8_t level, std::uint8_t strength, std::uint64_t now) {
+        if (device.scheme == ControlScheme::DualSense) return service_dualsense_rumble(device, level, strength, now);
         const bool pro2 = device.scheme == ControlScheme::SwitchPro2;
         if (device.failed || (pro2 && device.bluetooth)) level = 0u;
         const bool want = level != 0u;
@@ -960,6 +1082,7 @@ private:
         if (want && device.slot < kMaxSwitchPads) {
             h.switch_rumble_lengths[device.slot].store(static_cast<std::uint16_t>(length), std::memory_order_release);
             h.switch_rumble_pro2[device.slot].store(pro2, std::memory_order_release);
+            h.switch_rumble_dualsense[device.slot].store(0u, std::memory_order_release);
             h.switch_rumble_handles[device.slot].store(device.handle.get(), std::memory_order_release);
         }
         (void)write_report(device.handle.get(), device.write_event.get(), report.data(), static_cast<DWORD>(length), 30);
@@ -1138,7 +1261,8 @@ void stop_all_rumble() noexcept {
         if (handle != nullptr) {
             if (event == nullptr) event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
             (void)write_rumble_off(handle, event, h.switch_rumble_lengths[slot].load(std::memory_order_acquire),
-                                   h.switch_rumble_pro2[slot].load(std::memory_order_acquire));
+                                   h.switch_rumble_pro2[slot].load(std::memory_order_acquire),
+                                   h.switch_rumble_dualsense[slot].load(std::memory_order_acquire));
         }
         ReleaseSRWLockShared(&h.rumble_device_lock);
     }
@@ -1150,6 +1274,7 @@ ControllerHidStatus controller_hid_status() noexcept {
     ControllerHidStatus status{};
     status.switch_pro = h.pro_count.load(std::memory_order_acquire);
     status.switch_pro2 = h.pro2_count.load(std::memory_order_acquire);
+    status.dualsense = h.dualsense_count.load(std::memory_order_acquire);
     status.pro2_needs_winusb = h.pro2_needs_winusb.load(std::memory_order_acquire);
     return status;
 }

@@ -40,9 +40,9 @@ constexpr std::array<const char*, kWiiTargetCount> kTargetLabels{
 };
 
 constexpr std::array<const char*, kControlSchemeCount> kSchemeIds{
-    "keyboard", "xbox", "switch_pro", "switch_pro2"};
+    "keyboard", "xbox", "switch_pro", "switch_pro2", "dualsense"};
 constexpr std::array<const char*, kControlSchemeCount> kSchemeLabels{
-    "KEYBOARD", "XBOX", "SWITCH PRO", "PRO CONTROLLER 2"};
+    "KEYBOARD", "XBOX", "SWITCH PRO", "PRO CONTROLLER 2", "DUALSENSE"};
 
 struct NamedKey {
     std::uint8_t vk;
@@ -78,6 +78,10 @@ constexpr std::array<const char*, pad::kButtonBitCount> kSwitchButtonNames{
     "DpadUp", "DpadDown", "DpadLeft", "DpadRight", "Plus", "Minus", "LS", "RS",
     "L", "R", "Home", "Capture", "B", "A", "Y", "X", "GL", "GR", "C"};
 
+constexpr std::array<const char*, pad::kButtonBitCount> kDualSenseButtonNames{
+    "DpadUp", "DpadDown", "DpadLeft", "DpadRight", "Options", "Create", "L3", "R3",
+    "L1", "R1", "PS", "Touchpad", "Cross", "Circle", "Square", "Triangle", "GL", "GR", "C"};
+
 constexpr std::array<const char*, 4> kStickAxisNames{"LX", "LY", "RX", "RY"};
 
 bool iequals(std::string_view a, std::string_view b) noexcept {
@@ -99,12 +103,14 @@ std::string_view trim(std::string_view text) noexcept {
 }
 
 const std::array<const char*, pad::kButtonBitCount>& button_names(ControlScheme scheme) noexcept {
+    if (scheme == ControlScheme::DualSense) return kDualSenseButtonNames;
     return scheme == ControlScheme::Xbox ? kXboxButtonNames : kSwitchButtonNames;
 }
 
 const char* trigger_name(ControlScheme scheme, PadAxis axis) noexcept {
     const bool left = axis == PadAxis::LeftTrigger;
     if (scheme == ControlScheme::Xbox) return left ? "LT" : "RT";
+    if (scheme == ControlScheme::DualSense) return left ? "L2" : "R2";
     return left ? "ZL" : "ZR";
 }
 
@@ -275,12 +281,14 @@ BindingTable legacy_binding_table(ControlScheme scheme) {
     set(table, T::PointerRecenter, {button(pad::kRightStickBit)});
     set(table, T::Shake, {button(pad::kWestBit), button(pad::kNorthBit),
                           button(pad::kRightShoulderBit)});
-    if (scheme == ControlScheme::Xbox) {
+    if (scheme_has_xbox_layout(scheme)) {
         set(table, T::A, {button(pad::kSouthBit)});
         set(table, T::B, {button(pad::kEastBit), axis_pos(PadAxis::RightTrigger)});
     } else {
         set(table, T::A, {button(pad::kEastBit)});
         set(table, T::B, {button(pad::kSouthBit), axis_pos(PadAxis::RightTrigger)});
+    }
+    if (scheme != ControlScheme::Xbox) {
         set(table, T::Home, {button(pad::kHomeBit)});
     }
     return table;
@@ -294,8 +302,9 @@ BindingTable version2_binding_table(ControlScheme scheme) {
     }
     using T = WiiTarget;
     const bool xbox = scheme == ControlScheme::Xbox;
-    set(table, T::A, {button(xbox ? pad::kSouthBit : pad::kEastBit)});
-    set(table, T::JumpBack, {button(xbox ? pad::kEastBit : pad::kSouthBit)});
+    const bool xbox_faces = scheme_has_xbox_layout(scheme);
+    set(table, T::A, {button(xbox_faces ? pad::kSouthBit : pad::kEastBit)});
+    set(table, T::JumpBack, {button(xbox_faces ? pad::kEastBit : pad::kSouthBit)});
     set(table, T::B, {axis_pos(PadAxis::RightTrigger)});
     set(table, T::Z, {axis_pos(PadAxis::LeftTrigger)});
     set(table, T::C, {button(pad::kLeftShoulderBit), button(pad::kLeftStickBit)});
@@ -365,6 +374,7 @@ SchemeTuning legacy_scheme_tuning(ControlScheme scheme) {
         break;
     case ControlScheme::SwitchPro:
     case ControlScheme::SwitchPro2:
+    case ControlScheme::DualSense:
         tuning.stick_deadzone = 0.12f;
         tuning.pointer_deadzone = 0.12f;
         tuning.pointer_speed = 2.4f;
@@ -575,7 +585,10 @@ bool binding_source_allowed(ControlScheme scheme, WiiTarget target, InputSource 
              source.code >= pad::kGripLeftBit)) {
             return false;
         }
-        if (scheme == ControlScheme::SwitchPro && source.code >= pad::kGripLeftBit) return false;
+        if ((scheme == ControlScheme::SwitchPro || scheme == ControlScheme::DualSense) &&
+            source.code >= pad::kGripLeftBit) {
+            return false;
+        }
         return true;
     case SourceKind::AxisPositive:
         return scheme != ControlScheme::Keyboard && source.code < kPadAxisCount;

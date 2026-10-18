@@ -1,8 +1,9 @@
 # Controls
 
 The game sees one Wii Remote with a Nunchuk on channel 0. Keyboard, mouse,
-Xbox (XInput) controllers, Switch Pro Controllers and Switch 2 Pro
-Controllers work at the same time; every Wii input can be rebound.
+Xbox (XInput) controllers, Switch Pro Controllers, Switch 2 Pro
+Controllers and DualSense controllers work at the same time; every Wii input
+can be rebound.
 
 ## Default maps
 
@@ -37,6 +38,12 @@ every other mode, and a mode it cannot read, is play. The choice is made when
 B goes down and kept until it is released. L/LB always send Wii B. Switch
 buttons are by label (Nintendo A is Wii A); Xbox buttons by position.
 Capture, GL, GR and C (Pro Controller 2) are unbound by default.
+
+DualSense: face buttons are by position like Xbox (Cross = jump/Wii A,
+Circle = jump in play and back in menus), L1 = Star Bits, L2 = crouch, spin on
+Square, Triangle, R2 or a shake, R1 recenters the pointer, the gyro points
+(the right stick turns the camera), the PS button is HOME, Options is Plus
+and Create is Minus. The touchpad click is bindable but unbound.
 
 Pointer recenter: press R (Switch), the right stick click (Xbox) or `R`
 (keyboard) to put the pointer in the middle of the picture; it also brings a
@@ -142,7 +149,8 @@ pointer_down pointer_left pointer_right pointer_recenter jump_back`. Input
 names: key names (`Space`, `LShift`, `W`, `Num1`, `F5`, `Equals`, `VK2E`),
 `MouseLeft` `MouseRight` `MouseMiddle` `Mouse4` `Mouse5`; Xbox `A B X Y LB RB
 LT RT LS RS Menu View DpadUp...`; Switch `A B X Y L R ZL ZR LS RS Plus Minus
-Home Capture GL GR C DpadUp...`; sticks `LX+ LX- LY+ LY- RX+ RX- RY+ RY-`.
+Home Capture GL GR C DpadUp...`; DualSense (scheme `dualsense`) `Cross Circle
+Square Triangle L1 R1 L2 R2 L3 R3 Options Create PS Touchpad DpadUp...`; sticks `LX+ LX- LY+ LY- RX+ RX- RY+ RY-`.
 
 Files with an older `controls_version` are migrated on load: bindings and tuning values that
 still hold an earlier version's defaults take the current defaults, a `rumble=0` from version 4
@@ -179,6 +187,17 @@ turns vibration off, and values the player changed stay.
   example installed for "Interface 1" with Zadig); without it the CONTROLS
   page shows NEEDS WINUSB. Over Bluetooth it is a Bluetooth LE device that
   Windows does not expose as HID; not supported.
+- DualSense (and DualSense Edge): USB or Bluetooth (HID). Nebula reads the
+  gyro and accelerometer calibration from the controller, uses the analog
+  triggers, sets the lightbar to dim blue and player LED to the centre one,
+  and drives the two rumble motors from the game's Wii Remote motor. The
+  motion tuning keys of the Switch controllers apply (`motion`,
+  `gyro_pointer`, `gyro_sensitivity`, `shake_sensitivity`). Adaptive triggers,
+  the speaker, the microphone and the touchpad surface are not used; the
+  Edge's back buttons and Fn keys are not bindable. Sony's report layouts
+  follow the Linux hid-playstation driver and SDL's `SDL_hidapi_ps5.c`.
+  Steam Input or DS4Windows in XInput-emulation mode shows up as an Xbox
+  controller instead; turn it off for Nebula to get the gyro.
 - Steam: with Steam's controller support on, Steam keeps its desktop layout
   on Nebula's window (Nebula is not a Steam game). Auto mode ignores the
   keys and mouse motion that layout generates while a controller is

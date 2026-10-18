@@ -86,6 +86,11 @@ struct DecodedState {
     bool simple = false;             // 0x3F report: 16-bit sticks, Y grows down
     bool left_trigger = false;
     bool right_trigger = false;
+    // DualSense: sticks already normalised to -1..1 (up positive) and analog
+    // triggers 0..1; pad_sample_from then skips the Switch calibration.
+    bool normalized = false;
+    std::array<float, 4> stick_norm{};
+    std::array<float, 2> trigger_norm{};
     std::size_t imu_count = 0;
     std::array<ImuSample, 3> imu{};
 };

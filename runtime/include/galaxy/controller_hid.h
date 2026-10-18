@@ -6,6 +6,7 @@
 // so it costs nothing while idle and wakes at the controller's report rate.
 // The input consumer only copies the latest decoded state.
 
+#include "galaxy/dualsense.h"
 #include "galaxy/input_bindings.h"
 #include "galaxy/switch_controller.h"
 
@@ -81,12 +82,13 @@ std::size_t read_switch_pads(std::span<SwitchPadState> out, bool consume_gyro) n
 struct ControllerHidStatus {
     unsigned switch_pro = 0;
     unsigned switch_pro2 = 0;
+    unsigned dualsense = 0;
     // A Pro Controller 2 is attached by USB but its vendor interface has no
     // WinUSB driver, so it cannot be told to start sending input.
     bool pro2_needs_winusb = false;
 };
 [[nodiscard]] ControllerHidStatus controller_hid_status() noexcept;
-// Synchronous enumeration (settings UI only): any Switch Pro / Pro 2 present.
+// Synchronous enumeration (settings UI only): any Switch Pro / Pro 2 / DualSense present.
 [[nodiscard]] bool switch_controller_present_now() noexcept;
 
 }  // namespace galaxy::host

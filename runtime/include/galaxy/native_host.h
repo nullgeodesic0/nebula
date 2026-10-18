@@ -270,6 +270,7 @@ struct ConnectedControllers {
     bool xbox = false;
     unsigned switch_pro = 0;
     unsigned switch_pro2 = 0;
+    unsigned dualsense = 0;
     bool pro2_needs_winusb = false;
 };
 // Controllers seen by the most recent input reports (and the HID worker).

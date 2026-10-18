@@ -2,6 +2,7 @@
 // mapping, Switch report decoding, the motion integrator, pointer ownership,
 // the stick pointer, the jump/back context rule and settings migration.
 
+#include "galaxy/dualsense.h"
 #include "galaxy/input_bindings.h"
 #include "galaxy/native_input.h"
 #include "galaxy/native_settings_pad.h"
@@ -461,6 +462,186 @@ std::array<float, 3> rotate(const std::array<float, 3>& v, const std::array<floa
     const std::array<float, 3> x{k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0]};
     return {v[0] * c + x[0] * s + k[0] * d * (1 - c), v[1] * c + x[1] * s + k[1] * d * (1 - c),
             v[2] * c + x[2] * s + k[2] * d * (1 - c)};
+}
+
+// A DualSense USB input report (id 0x01, 64 bytes) or, with `bluetooth`, the
+// Bluetooth report 0x31 (78 bytes) whose state block starts one byte later.
+std::vector<std::uint8_t> dualsense_report(bool bluetooth) {
+    std::vector<std::uint8_t> r(bluetooth ? 78u : 64u, 0u);
+    r[0] = bluetooth ? 0x31 : 0x01;
+    const std::size_t s = bluetooth ? 2u : 1u;
+    r[s + 0] = 255;  // left stick fully right
+    r[s + 1] = 0;    // left stick fully up (Y grows down)
+    r[s + 2] = 128;
+    r[s + 3] = 128;
+    r[s + 4] = 255;  // L2
+    r[s + 5] = 0;    // R2
+    r[s + 7] = 0x02 | 0x20 | 0x80;         // hat right, Cross, Triangle
+    r[s + 8] = 0x01 | 0x20 | 0x04;         // L1, Options, L2 digital
+    r[s + 9] = 0x01 | 0x02;                // PS, touchpad
+    const auto put16 = [&](std::size_t at, int value) {
+        r[at] = static_cast<std::uint8_t>(value & 0xff);
+        r[at + 1] = static_cast<std::uint8_t>((value >> 8) & 0xff);
+    };
+    put16(s + 15 + 2, 1000);   // gyro yaw
+    put16(s + 21 + 2, 8192);   // accel y = 1 g
+    put16(s + 27, 0x1234);     // timestamp low half
+    return r;
+}
+
+void test_dualsense() {
+    namespace ds = galaxy::input::dualsense;
+    const ds::Calibration nominal{};
+    for (const bool bluetooth : {false, true}) {
+        const std::vector<std::uint8_t> report = dualsense_report(bluetooth);
+        switch_hid::DecodedState state{};
+        expect(ds::decode_report(report, nominal, state), "dualsense report decodes");
+        expect(state.normalized && approx(state.stick_norm[0], 1.0f) && approx(state.stick_norm[1], 1.0f) &&
+                   approx(state.stick_norm[2], 0.0f, 0.01f) && approx(state.stick_norm[3], 0.0f, 0.01f),
+               "dualsense sticks are -1..1 with up positive");
+        expect(approx(state.trigger_norm[0], 1.0f) && approx(state.trigger_norm[1], 0.0f),
+               "dualsense analog triggers");
+        expect(state.left_trigger && !state.right_trigger, "dualsense L2 digital flag");
+        const auto has = [&state](unsigned bit) { return (state.buttons & pad::bit(bit)) != 0u; };
+        expect(has(pad::kDpadRightBit) && !has(pad::kDpadUpBit) && !has(pad::kDpadLeftBit) &&
+                   !has(pad::kDpadDownBit),
+               "dualsense hat right");
+        expect(has(pad::kSouthBit) && has(pad::kNorthBit) && !has(pad::kEastBit) && !has(pad::kWestBit),
+               "dualsense Cross is south, Triangle north");
+        expect(has(pad::kLeftShoulderBit) && has(pad::kStartBit) && has(pad::kHomeBit) &&
+                   has(pad::kCaptureBit) && !has(pad::kRightShoulderBit) && !has(pad::kBackBit),
+               "dualsense L1, Options, PS, touchpad");
+        expect(state.imu_count == 1, "dualsense carries one IMU sample");
+        expect(approx(state.imu[0].accel[1], 1.0f, 0.001f), "dualsense accel y 1 g");
+        expect(approx(state.imu[0].gyro[1], 1000.0f * 2000.0f / 32768.0f * 3.14159265f / 180.0f, 0.001f),
+               "dualsense nominal gyro scale");
+        expect(ds::report_sensor_timestamp(report) == 0x1234u, "dualsense sensor timestamp");
+
+        const PadSample sample = switch_hid::pad_sample_from(state, ControlScheme::DualSense, {}, {}, 0.1f, 0.1f);
+        expect(sample.scheme == ControlScheme::DualSense && approx(sample.axes[4], 1.0f) &&
+                   approx(sample.axes[0], 1.0f) && approx(sample.axes[1], 1.0f),
+               "dualsense pad sample keeps analog triggers and sticks");
+    }
+    // Diagonals and a released hat.
+    {
+        std::vector<std::uint8_t> report = dualsense_report(false);
+        report[8] = 0x07;  // up-left
+        switch_hid::DecodedState state{};
+        expect(ds::decode_report(report, nominal, state) &&
+                   (state.buttons & pad::bit(pad::kDpadUpBit)) != 0u &&
+                   (state.buttons & pad::bit(pad::kDpadLeftBit)) != 0u &&
+                   (state.buttons & pad::bit(pad::kDpadRightBit)) == 0u,
+               "dualsense hat up-left");
+        report[8] = 0x08;  // released
+        expect(ds::decode_report(report, nominal, state) &&
+                   (state.buttons & 0xfu) == 0u,
+               "dualsense hat released");
+    }
+    // Rejected reports.
+    {
+        switch_hid::DecodedState state{};
+        std::vector<std::uint8_t> simple(10, 0u);
+        simple[0] = 0x01;  // Bluetooth simple report before the full mode
+        expect(!ds::decode_report(simple, nominal, state), "dualsense bluetooth simple report is not decoded");
+        std::vector<std::uint8_t> wrong(64, 0u);
+        wrong[0] = 0x21;
+        expect(!ds::decode_report(wrong, nominal, state), "dualsense other report ids are rejected");
+        expect(!ds::decode_report({}, nominal, state), "dualsense empty report is rejected");
+    }
+    // Calibration feature report: gyro bias, +-range and speed, accel range.
+    {
+        std::vector<std::uint8_t> feature(41, 0u);
+        feature[0] = ds::kFeatureCalibration;
+        const auto put16 = [&](std::size_t at, int value) {
+            feature[at] = static_cast<std::uint8_t>(value & 0xff);
+            feature[at + 1] = static_cast<std::uint8_t>((value >> 8) & 0xff);
+        };
+        put16(1, 10);  // gyro x bias
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            put16(7 + axis * 4, 10000);   // plus
+            put16(9 + axis * 4, -10000);  // minus
+            put16(23 + axis * 4, 8300);   // accel plus
+            put16(25 + axis * 4, -8100);  // accel minus
+        }
+        put16(19, 1000);  // speed plus
+        put16(21, 1000);  // speed minus
+        const ds::Calibration cal = ds::parse_calibration(feature);
+        expect(approx(cal.gyro_bias[0], 10.0f), "dualsense gyro bias");
+        expect(approx(cal.gyro_scale[0], 2000.0f / 20000.0f * 3.14159265f / 180.0f, 1e-6f),
+               "dualsense gyro scale from the calibration range");
+        expect(approx(cal.accel_bias[0], 100.0f) && approx(cal.accel_scale[0], 2.0f / 16400.0f, 1e-7f),
+               "dualsense accel bias and scale");
+        // A zero range keeps the nominal scale.
+        std::fill(feature.begin() + 7, feature.begin() + 19, std::uint8_t{0});
+        expect(approx(ds::parse_calibration(feature).gyro_scale[1], nominal.gyro_scale[1], 1e-9f),
+               "dualsense degenerate calibration keeps the nominal scale");
+        expect(approx(ds::parse_calibration({}).accel_scale[2], nominal.accel_scale[2], 1e-9f),
+               "dualsense empty calibration keeps the nominal scale");
+    }
+    // Output reports.
+    {
+        ds::OutputState output{};
+        output.motor_left = 200;
+        output.motor_right = 50;
+        std::array<std::uint8_t, 128> buffer{};
+        const std::size_t usb = ds::build_output_report(false, 0, output, buffer);
+        expect(usb == ds::kOutputReportUsbBytes && buffer[0] == 0x02 && (buffer[1] & 0x03) == 0x03 &&
+                   buffer[3] == 50 && buffer[4] == 200 && buffer[2] == 0,
+               "dualsense usb rumble report");
+        std::array<std::uint8_t, 8> small{};
+        expect(ds::build_output_report(false, 0, output, small) == 0, "dualsense output needs room");
+
+        const std::size_t bt = ds::build_output_report(true, 5, output, buffer);
+        expect(bt == ds::kOutputReportBluetoothBytes && buffer[0] == 0x31 && buffer[1] == 0x50 &&
+                   buffer[2] == 0x10 && buffer[3] == 0x03 && buffer[5] == 50 && buffer[6] == 200,
+               "dualsense bluetooth rumble report");
+        // Independent CRC-32 of {0xA2, report[0..73]}.
+        std::uint32_t crc = 0xffffffffu;
+        const auto step = [&crc](std::uint8_t byte) {
+            crc ^= byte;
+            for (int bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ ((crc & 1u) ? 0xedb88320u : 0u);
+        };
+        step(0xa2);
+        for (std::size_t i = 0; i < 74; ++i) step(buffer[i]);
+        crc = ~crc;
+        const std::uint32_t stored = buffer[74] | (buffer[75] << 8) | (buffer[76] << 16) |
+                                     (static_cast<std::uint32_t>(buffer[77]) << 24);
+        expect(stored == crc, "dualsense bluetooth report checksum");
+
+        ds::OutputState lights{};
+        lights.set_motors = false;
+        lights.set_lights = true;
+        (void)ds::build_output_report(false, 0, lights, buffer);
+        expect((buffer[1] & 0x03) == 0 && (buffer[2] & 0x14) == 0x14 && buffer[40] == 0x02 &&
+                   buffer[43] == 0x02 && buffer[45] == 0x04 && buffer[48] == 0x40,
+               "dualsense lightbar and player LED report");
+    }
+    // Bindings: positional Xbox faces, PlayStation names, PS button is HOME.
+    {
+        const BindingTable table = default_binding_table(ControlScheme::DualSense);
+        expect(table[WiiTarget::A][0] == InputSource{SourceKind::Button, pad::kSouthBit},
+               "dualsense A is Cross");
+        expect(table[WiiTarget::Home][0] == InputSource{SourceKind::Button, pad::kHomeBit},
+               "dualsense HOME is the PS button");
+        expect(format_input_source(ControlScheme::DualSense, {SourceKind::Button, pad::kSouthBit}) == "Cross" &&
+                   format_input_source(ControlScheme::DualSense, {SourceKind::AxisPositive, 5}) == "R2",
+               "dualsense names");
+        expect(scheme_has_motion(ControlScheme::DualSense) && scheme_is_gamepad(ControlScheme::DualSense),
+               "dualsense has motion");
+        expect(!binding_source_allowed(ControlScheme::DualSense, WiiTarget::C,
+                                       {SourceKind::Button, pad::kGripLeftBit}) &&
+                   binding_source_allowed(ControlScheme::DualSense, WiiTarget::Home,
+                                          {SourceKind::Button, pad::kHomeBit}),
+               "dualsense sources");
+        const ControlsConfig defaults = default_controls_config();
+        expect(defaults.tune(ControlScheme::DualSense).gyro_pointer &&
+                   defaults.tune(ControlScheme::DualSense).motion_shake == MotionShake::Remote,
+               "dualsense motion defaults");
+        // The overlay chord word does not swap face buttons (unlike Nintendo pads).
+        expect(settings_pad_buttons(ControlScheme::DualSense, pad::bit(pad::kSouthBit)) ==
+                   settings_pad_buttons(ControlScheme::Xbox, pad::bit(pad::kSouthBit)),
+               "dualsense overlay faces are positional");
+    }
 }
 
 void test_motion() {
@@ -1370,6 +1551,7 @@ int main(int argc, char** argv) {
     test_chord_and_capture();
     test_switch_pro_decoding();
     test_switch2_decoding();
+    test_dualsense();
     test_motion();
     test_pointer_ownership();
     test_stick_pointer();

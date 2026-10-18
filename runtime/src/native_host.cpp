@@ -3,6 +3,7 @@
 #include "galaxy/ai_dma_timing.h"
 #include "galaxy/native_audio_anomaly.h"
 #include "galaxy/native_audio_queue.h"
+#include "galaxy/button_prompts.h"
 #include "galaxy/controller_hid.h"
 #include "galaxy/input_bindings.h"
 #include "galaxy/native_input.h"
@@ -5989,7 +5990,7 @@ static std::atomic<bool> g_xinput_seen_connected{false};
 void arm_controller_binding_capture(input::ControlScheme scheme) noexcept {
     g_binding_capture_result.store(0u, std::memory_order_release);
     g_binding_capture_armed.store(1u + static_cast<std::uint32_t>(scheme), std::memory_order_release);
-    if (scheme == input::ControlScheme::SwitchPro || scheme == input::ControlScheme::SwitchPro2) {
+    if (input::scheme_has_motion(scheme)) {
         ensure_controller_hid_started();
     }
 }
@@ -6023,6 +6024,7 @@ ConnectedControllers connected_controllers() noexcept {
     status.xbox = g_xinput_seen_connected.load(std::memory_order_acquire);
     status.switch_pro = hid.switch_pro;
     status.switch_pro2 = hid.switch_pro2;
+    status.dualsense = hid.dualsense;
     status.pro2_needs_winusb = hid.pro2_needs_winusb;
     return status;
 }
@@ -8749,6 +8751,8 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     };
     galaxy::input::tilt::Vec3 tilt_up_value{0.0f, 1.0f, 0.0f};
     const galaxy::input::tilt::Vec3* tilt_up = nullptr;
+    // Scheme of the controller whose button prompts the game shows (button_prompts.h).
+    std::optional<galaxy::input::ControlScheme> prompt_scheme;
     if (use_pads) {
         const LivePad* driving = nullptr;
         const LivePad* first_connected = nullptr;
@@ -8761,6 +8765,7 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
             if (pad_key(pad) == s_driving_pad) driving = &pad;
         }
         if (driving == nullptr && s_driving_pad != kDrivingKeyboard) driving = first_connected;
+        if (driving != nullptr) prompt_scheme = driving->sample.scheme;
         if (driving != nullptr && driving->gravity_valid) {
             tilt_up_value = driving->gravity;
             tilt_up = &tilt_up_value;
@@ -8812,6 +8817,13 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
             s_driving_pad = kDrivingKeyboard;
         }
     }
+    {
+        const auto family = prompt_scheme && s_driving_pad != kDrivingKeyboard
+            ? galaxy::prompts::family_for_scheme(*prompt_scheme) : std::nullopt;
+        galaxy::prompts::publish(
+            family ? galaxy::prompts::make_prompt_set(*family, controls.config.table(*prompt_scheme))
+                   : galaxy::prompts::PromptSet{});
+    }
     // Vibration: target and strength, published with the game's motor bit.
     g_rumble_host = {};
     g_rumble_host.focused = window_focused;
@@ -8820,8 +8832,7 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
         const auto slot = static_cast<std::uint8_t>(s_driving_pad & 0xFFu);
         if (scheme == galaxy::input::ControlScheme::Xbox && slot < XUSER_MAX_COUNT) {
             g_rumble_host.target = {RumbleTarget::Kind::XInput, slot};
-        } else if ((scheme == galaxy::input::ControlScheme::SwitchPro ||
-                    scheme == galaxy::input::ControlScheme::SwitchPro2) && slot < kMaxSwitchPads) {
+        } else if (galaxy::input::scheme_has_motion(scheme) && slot < kMaxSwitchPads) {
             g_rumble_host.target = {RumbleTarget::Kind::Switch, slot};
         }
         if (static_cast<std::size_t>(scheme) < galaxy::input::kControlSchemeCount) {
