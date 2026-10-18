@@ -133,9 +133,10 @@ struct RenderConfig {
     // Camera-rotation motion blur 0-100 (shutter, 0 = off); key motion_blur,
     // env GALAXY_MOTION_BLUR.
     unsigned motion_blur         = 50;
-    // Screen-space reflections 0-100 (0 = off); key reflections, env
-    // GALAXY_REFLECTIONS, world-unit ray length GALAXY_REFLECTION_DISTANCE.
-    unsigned reflections         = 30;
+    // Screen-space reflections 0-100 on reflective materials (0 = off); key
+    // reflections, env GALAXY_REFLECTIONS, world-unit ray length
+    // GALAXY_REFLECTION_DISTANCE.
+    unsigned reflections         = 60;
     // Lens flare 0-100 from the bloom bright pass (0 = off, needs bloom); key
     // lens_flare, env GALAXY_LENS_FLARE.
     unsigned lens_flare          = 40;

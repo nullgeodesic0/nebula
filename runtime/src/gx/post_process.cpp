@@ -75,6 +75,8 @@ constexpr unsigned kSceneTempSlot = 16u;
 // R ambient occlusion, G contact shadow visibility.
 constexpr DXGI_FORMAT kSsaoFormat = DXGI_FORMAT_R8G8_UNORM;
 constexpr DXGI_FORMAT kDepthSrvFormat = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+// The EFB stencil, which holds each pixel's material class (kMaterial*).
+constexpr DXGI_FORMAT kStencilSrvFormat = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
 constexpr DXGI_FORMAT kBloomFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr unsigned kFinalSlot = 4u;
 constexpr unsigned kBloomDownSlot = 5u;
@@ -661,6 +663,8 @@ void PostProcessor::draw(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ri
         sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sd.Texture2D.MipLevels = 1;
+        // The stencil of a depth-stencil resource is its second plane.
+        sd.Texture2D.PlaneSlice = sd.Format == kStencilSrvFormat ? 1u : 0u;
         device_->CreateShaderResourceView(input, &sd, slot);
         slot.ptr += increment;
         ++written;
@@ -1105,7 +1109,8 @@ bool PostProcessor::record_ssao(ID3D12GraphicsCommandList* list, DescriptorRing&
 
     transition(list, ssao_ao_, D3D12_RESOURCE_STATE_RENDER_TARGET);
     list->OMSetRenderTargets(1, &ssao_ao_.rtv, FALSE, nullptr);
-    draw(list, srv_ring, ssao_ao_pipeline_.Get(), {in.depth}, {kDepthSrvFormat}, vp, c);
+    draw(list, srv_ring, ssao_ao_pipeline_.Get(), {in.depth, in.depth, in.depth},
+         {kDepthSrvFormat, kDepthSrvFormat, kStencilSrvFormat}, vp, c);
     transition(list, ssao_ao_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     transition(list, ssao_blur_, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1173,7 +1178,8 @@ bool PostProcessor::record_ssr(ID3D12GraphicsCommandList* list, DescriptorRing& 
     const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
                             static_cast<float>(in.height), 0.0f, 1.0f};
     record_scene_blend(list, srv_ring, ssr_pipeline_.Get(), color, in.color_rtv,
-                       {in.depth, color}, {kDepthSrvFormat, kColorFormat}, vp, c);
+                       {in.depth, color, in.depth},
+                       {kDepthSrvFormat, kColorFormat, kStencilSrvFormat}, vp, c);
     return true;
 }
 

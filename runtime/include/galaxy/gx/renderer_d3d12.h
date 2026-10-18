@@ -367,6 +367,9 @@ struct DrawCall {
     // Render target 1 in temporal scenes: 1 the motion target (opaque
     // motion writers), 2 the reactive mask (blended draws), 0 none.
     std::uint8_t aux_target = 0;
+    // Material class written to the EFB stencil where the draw writes depth
+    // (kMaterial* in shader_keys.h).
+    std::uint8_t stencil_ref = 0;
     // Interpolated redraw: the scene transform record whose VS constants a
     // sub-frame replaces, -1 for draws outside the 3D scene.
     std::int32_t replay_record = -1;
@@ -1058,6 +1061,7 @@ private:
     // The vertex view is part of the set: its GPU VA comes from the per-frame
     // vertex ring, so a stale entry can never survive that rewind.
     ID3D12PipelineState* bound_pipeline_ = nullptr;
+    std::uint16_t bound_stencil_ref_ = 0xFFFFu;  // 0xFFFF: unknown
     D3D12_GPU_VIRTUAL_ADDRESS bound_vs_constants_ = 0;
     D3D12_GPU_VIRTUAL_ADDRESS bound_ps_constants_ = 0;
     D3D12_GPU_DESCRIPTOR_HANDLE bound_texture_table_{};

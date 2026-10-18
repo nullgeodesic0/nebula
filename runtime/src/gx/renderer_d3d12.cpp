@@ -5745,6 +5745,7 @@ bool RendererD3D12::quit_requested() const noexcept {
 
 void RendererD3D12::invalidate_gx_bindings() {
     bound_pipeline_ = nullptr;
+    bound_stencil_ref_ = 0xFFFFu;
     bound_vs_constants_ = 0;
     bound_ps_constants_ = 0;
     bound_texture_table_ = {};
@@ -7748,8 +7749,10 @@ void RendererD3D12::clear_efb(
         // REVERSED-Z buffer: GX z24 (near=0, far=2^24) inverts into the D3D depth value.
         // GX_MAX_Z24 (0xFFFFFF = "clear to farthest") becomes about 0.0 here, which the flipped
         // GEQUAL-style funcs pass.
+        // The material stencil clears with the depth it describes.
         command_list_->ClearDepthStencilView(
-            dsv, D3D12_CLEAR_FLAG_DEPTH, clear.reversed_depth, 0, num_rects, rects);
+            dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clear.reversed_depth, 0,
+            num_rects, rects);
     }
 }
 
@@ -7765,6 +7768,10 @@ void RendererD3D12::draw(const DrawCall& call) {
     if (call.pipeline != bound_pipeline_) {
         command_list_->SetPipelineState(call.pipeline);
         bound_pipeline_ = call.pipeline;
+    }
+    if (call.stencil_ref != bound_stencil_ref_) {
+        command_list_->OMSetStencilRef(call.stencil_ref);
+        bound_stencil_ref_ = call.stencil_ref;
     }
     if (call.vs_constants &&
         call.vs_constants != bound_vs_constants_) {

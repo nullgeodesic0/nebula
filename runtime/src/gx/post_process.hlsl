@@ -296,6 +296,15 @@ bool SsaoInView(int2 p) {
 #endif
 
 #if defined(PASS_SSAO_AO) || defined(PASS_SSR)
+// The EFB stencil: each depth-writing GX draw writes its material class there
+// (kMaterial* in shader_keys.h). 0x80 marks a pixel a GX draw wrote; without it
+// (depth restored by a copy or carry) the material is unknown.
+Texture2D<uint2> stencilTex : register(t2);
+static const uint kMaterialWritten = 0x80u;
+static const uint kMaterialLit = 0x01u;
+static const uint kMaterialGlossy = 0x02u;
+static const uint kMaterialIndirect = 0x04u;
+uint SceneMaterial(int2 p) { return stencilTex.Load(int3(p, 0)).g; }
 // Target pixel of a view-space point (inverse of SsaoViewPos).
 float2 SsaoProject(float3 v) {
     const float zv = -v.z;
@@ -391,7 +400,11 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     // A 4x4 ordered pattern that the blur pass averages away exactly.
     static const float kBayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
     const float noise = kBayer[(p.y & 3) * 4 + (p.x & 3)] / 16.0 + 0.03125;
-    const float shadow = ContactShadow(p, P, N, zv, slope, noise);
+    // Only surfaces the game lights take contact shadows: glows, the sky and
+    // other unlit materials are their own light.
+    const uint material = SceneMaterial(p);
+    const bool lit = (material & kMaterialWritten) == 0u || (material & kMaterialLit) != 0u;
+    const float shadow = lit ? ContactShadow(p, P, N, zv, slope, noise) : 1.0;
 
     const float radius = asfloat(g_con1.z);
     const float strength = asfloat(g_con1.w);
@@ -453,10 +466,11 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 #endif
 
 #if defined(PASS_SSR)
-// Screen-space reflections on the scene EFB. The EFB carries no material data,
-// so every surface reflects by Schlick's Fresnel term for a water-like F0 of
-// 0.04: almost nothing face-on, a clear mirror at grazing angles, the way
-// floors, water and ice catch the sky and planets in a modern platformer. The
+// Screen-space reflections on the scene EFB, on the materials that reflect:
+// environment-mapped or specular draws (metal, ice, glass, chrome; F0 0.25)
+// and indirect-textured ones (water; F0 0.04), from the material stencil.
+// Matte surfaces do not reflect; a pixel of unknown material reflects faintly.
+// Schlick's Fresnel term makes the reflection clearest at grazing angles. The
 // reflected view ray is marched through the depth (24 growing steps, then a
 // 4-step binary refine) and fades out near the screen edges, at the end of the
 // ray and where it turns back toward the camera.
@@ -472,10 +486,22 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     const float3 P = SsaoViewPos(p, zv);
     float slope;
     const float3 N = SsaoNormal(p, zv, P, slope);
+    const uint material = SceneMaterial(p);
+    float reflectivity = 0.0;
+    float f0 = 0.04;
+    if ((material & kMaterialWritten) == 0u) {
+        reflectivity = 0.25;
+    } else if ((material & kMaterialGlossy) != 0u) {
+        reflectivity = 1.0;
+        f0 = 0.25;
+    } else if ((material & kMaterialIndirect) != 0u) {
+        reflectivity = 1.0;
+    }
+    if (reflectivity <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
     const float3 V = normalize(P);
     const float cos_v = saturate(dot(-V, N));
-    const float fresnel = 0.04 + 0.96 * pow(1.0 - cos_v, 5.0);
-    const float strength = asfloat(g_con1.w) * fresnel;
+    const float fresnel = f0 + (1.0 - f0) * pow(1.0 - cos_v, 5.0);
+    const float strength = asfloat(g_con1.w) * reflectivity * fresnel;
     if (strength < 0.01) return float4(0.0, 0.0, 0.0, 0.0);
     const float3 R = reflect(V, N);
     // Rays back toward the camera leave the depth buffer's view.
