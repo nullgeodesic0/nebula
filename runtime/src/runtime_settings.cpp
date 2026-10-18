@@ -164,6 +164,15 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
         for (const MotionStyle style : {MotionStyle::Original, MotionStyle::Smooth, MotionStyle::Modern}) {
             if (_stricmp(value, motion_style_key(style)) == 0) settings.motion_style = style;
         }
+    } else if (std::strcmp(key, "custom_animations") == 0) {
+        if (_stricmp(value, "on") == 0 || std::strcmp(value, "1") == 0) settings.custom_animations = true;
+        if (_stricmp(value, "off") == 0 || std::strcmp(value, "0") == 0) settings.custom_animations = false;
+    } else if (std::strcmp(key, "custom_voice") == 0) {
+        if (_stricmp(value, "on") == 0 || std::strcmp(value, "1") == 0) settings.custom_voice = true;
+        if (_stricmp(value, "off") == 0 || std::strcmp(value, "0") == 0) settings.custom_voice = false;
+    } else if (std::strcmp(key, "custom_model") == 0) {
+        if (_stricmp(value, "on") == 0 || std::strcmp(value, "1") == 0) settings.custom_model = true;
+        if (_stricmp(value, "off") == 0 || std::strcmp(value, "0") == 0) settings.custom_model = false;
     }
 }
 
@@ -301,6 +310,9 @@ void apply_env_overrides(RuntimeSettings& settings) {
     apply_env(settings, "GALAXY_LANGUAGE", "language");
     apply_env(settings, "GALAXY_BUTTON_PROMPTS", "button_prompts");
     apply_env(settings, "GALAXY_MOTION_STYLE", "motion_style");
+    apply_env(settings, "GALAXY_CUSTOM_ANIMATIONS", "custom_animations");
+    apply_env(settings, "GALAXY_CUSTOM_MODEL", "custom_model");
+    apply_env(settings, "GALAXY_CUSTOM_VOICE", "custom_voice");
 }
 
 }  // namespace
@@ -333,6 +345,57 @@ bool running_game_language(GameLanguage& language) noexcept {
     if (running == 0u) return false;
     language = static_cast<GameLanguage>(running);
     return true;
+}
+
+namespace {
+// 0 until the disc opens, then 1 (off) or 2 (on).
+std::atomic<std::uint8_t> s_running_custom_animations{0u};
+std::atomic<std::uint8_t> s_running_custom_model{0u};
+
+// The disc opens before the settings load, so the file is read here.
+bool mod_for_boot(std::atomic<std::uint8_t>& running_state, bool RuntimeSettings::*field) noexcept {
+    std::uint8_t running = running_state.load(std::memory_order_acquire);
+    if (running == 0u) {
+        bool enabled = RuntimeSettings{}.*field;
+        try {
+            RuntimeSettings settings{};
+            input::ControlsConfig controls = input::default_controls_config();
+            parse_settings_file(settings, controls);
+            apply_env_overrides(settings);
+            enabled = settings.*field;
+        } catch (...) {
+            // The full load reports a bad settings file; the default stands here.
+        }
+        std::uint8_t expected = 0u;
+        const std::uint8_t chosen = enabled ? 2u : 1u;
+        running = running_state.compare_exchange_strong(expected, chosen, std::memory_order_acq_rel)
+            ? chosen : expected;
+    }
+    return running == 2u;
+}
+
+bool running_mod(const std::atomic<std::uint8_t>& running_state, bool& enabled) noexcept {
+    const std::uint8_t running = running_state.load(std::memory_order_acquire);
+    if (running == 0u) return false;
+    enabled = running == 2u;
+    return true;
+}
+}  // namespace
+
+bool custom_animations_for_boot() noexcept {
+    return mod_for_boot(s_running_custom_animations, &RuntimeSettings::custom_animations);
+}
+
+bool running_custom_animations(bool& enabled) noexcept {
+    return running_mod(s_running_custom_animations, enabled);
+}
+
+bool custom_model_for_boot() noexcept {
+    return mod_for_boot(s_running_custom_model, &RuntimeSettings::custom_model);
+}
+
+bool running_custom_model(bool& enabled) noexcept {
+    return running_mod(s_running_custom_model, enabled);
 }
 
 const char* game_language_key(GameLanguage language) noexcept {
@@ -451,6 +514,9 @@ bool reload_runtime_audio_settings_if_changed() noexcept {
         settings.language = parsed.language;
         settings.button_prompts = parsed.button_prompts;
         settings.motion_style = parsed.motion_style;
+        settings.custom_animations = parsed.custom_animations;
+        settings.custom_model = parsed.custom_model;
+        settings.custom_voice = parsed.custom_voice;
         set_runtime_settings(settings);
         input::set_controls_config(controls);
         record_input_mode_sync(file_mode, settings.input_mode);
@@ -489,6 +555,9 @@ bool save_runtime_settings_to_file() {
                  << "language=" << game_language_key(settings.language) << '\n'
                  << "button_prompts=" << button_prompts_key(settings.button_prompts) << '\n'
                  << "motion_style=" << motion_style_key(settings.motion_style) << '\n'
+                 << "custom_animations=" << (settings.custom_animations ? "on" : "off") << '\n'
+                 << "custom_model=" << (settings.custom_model ? "on" : "off") << '\n'
+                 << "custom_voice=" << (settings.custom_voice ? "on" : "off") << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;

@@ -284,6 +284,61 @@ void JAudioHostMixer::mix_subframe(const JAudioGuestMemory& memory) {
         }
     }
 
+    // A replacement whose channel ended before it: the rest goes through a copy of that channel's last state,
+    // so its volume, pan, filters and effect sends carry on.
+    if (carrier_index_ >= 0 && !carrier_rendered_) {
+        if (voice_override_.playing != nullptr && voice_override_.playing() && voice_override_.render != nullptr) {
+            std::byte* record = carrier_record_.data();
+            std::int16_t* out = channel_out_.data() + kOutOffset;
+            std::fill_n(out, kSamples, std::int16_t{0});  // no game line to measure the level against
+            voice_override_.render(out, kSamples);
+            // The line's pan and volume at its loudest, applied here directly: the game's own mixing of a
+            // stopped channel would fade it out.
+            std::int32_t left_q15 = 0;
+            std::int32_t right_q15 = 0;
+            if (be16(record, 0x058u) != 0u) {
+                const std::uint16_t pan_word = be16(record, 0x050u);
+                const std::uint32_t pan = std::min<std::uint32_t>(pan_word >> 8u, 0x7Fu);
+                const std::int32_t volume = std::max(sbe16(record, 0x054u), sbe16(record, 0x056u));
+                left_q15 = q15(dram_[0x200u + (pan ^ 0x7Fu)], volume);
+                right_q15 = q15(dram_[0x200u + pan], volume);
+            } else {
+                for (std::uint32_t bus = 0; bus < 6u; ++bus) {
+                    const std::uint32_t base = 0x010u + bus * 8u;
+                    const std::uint16_t connect = be16(record, base);
+                    const std::int32_t volume = std::max(sbe16(record, base + 2u), sbe16(record, base + 4u));
+                    if (connect == kBusLeft) left_q15 = std::max(left_q15, volume);
+                    if (connect == kBusRight) right_q15 = std::max(right_q15, volume);
+                    if (connect == kBusCenter) {
+                        left_q15 = std::max(left_q15, volume * 0x5A82 / 0x8000);
+                        right_q15 = std::max(right_q15, volume * 0x5A82 / 0x8000);
+                    }
+                }
+            }
+            const std::int64_t gain = bus_gains_set_
+                ? bus_gain_q16_[static_cast<std::size_t>(galaxy::audio::NativeAudioBus::Voice)]
+                : galaxy::audio::kNativeAudioUnityGainQ16;
+            for (std::uint32_t k = 0; k < kSamples; ++k) {
+                const std::int64_t s = (static_cast<std::int64_t>(out[k]) * gain) >> 16;
+                d[kBusLeft + k] = static_cast<std::int16_t>(
+                    std::clamp<std::int64_t>(d[kBusLeft + k] + ((s * left_q15) >> 15), -32768, 32767));
+                d[kBusRight + k] = static_cast<std::int16_t>(
+                    std::clamp<std::int64_t>(d[kBusRight + k] + ((s * right_q15) >> 15), -32768, 32767));
+            }
+        } else {
+            carrier_index_ = -1;
+        }
+    }
+    carrier_rendered_ = false;
+
+    // Anything of a replacement left unplaced (no channel state to finish it with).
+    if (voice_override_.mix_remainder != nullptr) {
+        voice_override_.mix_remainder(d + kBusLeft, d + kBusRight, kSamples,
+                            bus_gains_set_
+                                ? bus_gain_q16_[static_cast<std::size_t>(galaxy::audio::NativeAudioBus::Voice)]
+                                : galaxy::audio::kNativeAudioUnityGainQ16);
+    }
+
     // Output (0x042D..0x045C): center at -3 dB into both sides, mixer level,
     // inverted-right bus.
     add_scaled_dram(kBusLeft, kBusCenter, kSamples, 0x5A82);
@@ -314,13 +369,58 @@ void JAudioHostMixer::render_channel(std::byte* record, std::uint32_t index,
     } else {
         render_source(record, out, memory);
     }
-    apply_fir(record, out);
-    apply_iir(record, out);
     if (bus_gains_set_) {
         const bool starting = be16(record, 0x008u) != 0u;
         if (starting || category_retries_[index] != 0u) {
             classify_channel(index, record, starting, memory);
         }
+        if (starting) {
+            replaced_[index] = 0u;
+            replacement_decided_[index] = false;
+        }
+        if (!replacement_decided_[index] && voice_override_.claim != nullptr &&
+            categories_[index].decision.classification == galaxy::audio::NativeAudioBusClassification::OwnerSoundId) {
+            replacement_decided_[index] = true;
+            // Channels starting one sound in the same subframe share a start stamp.
+            replaced_[index] = voice_override_.claim(categories_[index].owner.sound_id,
+                                                     (stats_.subframes << 32u) | categories_[index].owner.sound_id);
+        }
+        // A replaced line: the host's samples take the decoded ones' place, so the channel's filters, volume,
+        // pan and effect sends place the replacement in the scene as they would the original.
+        if (replaced_[index] == 1u && voice_override_.render != nullptr) {
+            if (carrier_index_ != static_cast<std::int32_t>(index) || starting) {
+                starting_carrier_ = true;  // a new line: its loudest state is looked for afresh
+                carrier_level_ = 0u;
+                carrier_quiet_subframes_ = 0u;
+            }
+            // The game's line is often shorter than the replacement: once it has gone silent, or its channel
+            // has faded well below its loudest, the replacement leaves the channel and finishes through the
+            // channel's loudest state (mix_subframe), so the rest is not faded with it.
+            bool game_silent = true;
+            for (std::uint32_t k = 0; k < kSamples && game_silent; ++k) {
+                game_silent = out[k] == 0;
+            }
+            std::uint32_t level = be16(record, 0x056u);
+            for (std::uint32_t bus = 0; bus < 6u; ++bus) {
+                level += be16(record, 0x010u + bus * 8u + 2u);
+            }
+            const bool faded = !starting_carrier_ && level * 4u < carrier_level_;
+            carrier_quiet_subframes_ = (game_silent || faded) ? carrier_quiet_subframes_ + 1u : 0u;
+            if (carrier_quiet_subframes_ >= 2u) {
+                replaced_[index] = 2u;  // detached: the channel stays silent from here
+                std::fill_n(out, kSamples, std::int16_t{0});
+            } else {
+                voice_override_.render(out, kSamples);
+                carrier_index_ = static_cast<std::int32_t>(index);
+                carrier_rendered_ = true;
+            }
+        } else if (replaced_[index] != 0u) {
+            std::fill_n(out, kSamples, std::int16_t{0});
+        }
+    }
+    apply_fir(record, out);
+    apply_iir(record, out);
+    if (bus_gains_set_) {
         const galaxy::audio::NativeAudioBus bus = categories_[index].decision.bus;
         galaxy::audio::NativeAudioBusRamp& ramp = bus_state_.ramps[index];
         galaxy::audio::native_audio_bus_set_ramp_target(
@@ -337,6 +437,19 @@ void JAudioHostMixer::render_channel(std::byte* record, std::uint32_t index,
         mix_auto(record, out);
     } else {
         mix_buses(record, out);
+    }
+    if (carrier_rendered_ && carrier_index_ == static_cast<std::int32_t>(index)) {
+        // Keep the state from the channel's loudest point: when the game stops its line, the channel fades its
+        // own volume out first, and a copy of that would carry the rest of the replacement at near silence.
+        std::uint32_t level = be16(record, 0x056u);
+        for (std::uint32_t bus = 0; bus < 6u; ++bus) {
+            level += be16(record, 0x010u + bus * 8u + 2u);
+        }
+        if (starting_carrier_ || level * 5u >= carrier_level_ * 4u) {
+            std::copy_n(record, carrier_record_.size(), carrier_record_.data());
+            carrier_level_ = std::max(level, starting_carrier_ ? 0u : carrier_level_);
+            starting_carrier_ = false;
+        }
     }
     if (!paused) {
         put16(record, 0x008u, 0u);

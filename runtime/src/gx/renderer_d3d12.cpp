@@ -713,7 +713,7 @@ unsigned native_settings_row_count(unsigned tab) {
     case 1: return fsr3_available() ? 19u : 18u;
     case 2: return controls_row_count();
     case 3: return 6u;
-    case 4: return 4u;
+    case 4: return 7u;
     default: return 0u;
     }
 }
@@ -1254,6 +1254,24 @@ void adjust_native_setting_unlogged(int delta) {
             set_runtime_settings(settings);
             s_native_settings_dirty.store(true, std::memory_order_release);
         }
+    }
+    if (tab == 4u && row == 4u) {
+        // Saved at once; the disc opens with it at the next start (footer note).
+        settings.custom_animations = !settings.custom_animations;
+        set_runtime_settings(settings);
+        s_native_settings_dirty.store(true, std::memory_order_release);
+    }
+    if (tab == 4u && row == 5u) {
+        // Saved at once; the disc opens with it at the next start (footer note).
+        settings.custom_model = !settings.custom_model;
+        set_runtime_settings(settings);
+        s_native_settings_dirty.store(true, std::memory_order_release);
+    }
+    if (tab == 4u && row == 6u) {
+        // Voice lines change live.
+        settings.custom_voice = !settings.custom_voice;
+        set_runtime_settings(settings);
+        s_native_settings_dirty.store(true, std::memory_order_release);
     }
 }
 
@@ -9781,6 +9799,9 @@ std::string native_settings_row_text(
             return std::string("BUTTON PROMPTS: ") + kNames[static_cast<unsigned>(runtime.button_prompts) % 4u];
         }
         if (row == 3u) return std::string("MOTION: ") + motion_style_name(runtime.motion_style);
+        if (row == 4u) return std::string("CUSTOM ANIMATIONS: ") + (runtime.custom_animations ? "ON" : "OFF");
+        if (row == 5u) return std::string("CUSTOM MODEL: ") + (runtime.custom_model ? "ON" : "OFF");
+        if (row == 6u) return std::string("CUSTOM VOICE: ") + (runtime.custom_voice ? "ON" : "OFF");
         return {};
     default:
         return {};
@@ -9958,6 +9979,15 @@ void draw_native_settings_overlay(RendererD3D12& renderer) {
         status_color = accent;
     } else if (GameLanguage running{}; tab == 4u && running_game_language(running) && running != row_runtime.language) {
         status = "THE NEW LANGUAGE APPLIES WHEN NEBULA RESTARTS";
+        status_color = accent;
+    } else if (bool running_animations = false; tab == 4u &&
+               running_custom_animations(running_animations) &&
+               running_animations != row_runtime.custom_animations) {
+        status = "CUSTOM ANIMATIONS CHANGE WHEN NEBULA RESTARTS";
+        status_color = accent;
+    } else if (bool running_model = false; tab == 4u && running_custom_model(running_model) &&
+               running_model != row_runtime.custom_model) {
+        status = "CUSTOM MODEL CHANGES WHEN NEBULA RESTARTS";
         status_color = accent;
     }
     if (!status.empty()) {

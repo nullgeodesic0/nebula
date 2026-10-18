@@ -618,6 +618,27 @@ int main() {
     passed &= expect(galaxy::get_runtime_settings().motion_style == MotionStyle::Original,
                      "a motion style outside the three is replaced by the game's");
 
+    write_text(settings_path, "language=french\n");
+    galaxy::load_runtime_settings_from_file();
+    passed &= expect(galaxy::get_runtime_settings().custom_animations, "custom animations default to on");
+    write_text(settings_path, "custom_animations=off\n");
+    galaxy::load_runtime_settings_from_file();
+    passed &= expect(!galaxy::get_runtime_settings().custom_animations, "custom animations can be turned off");
+    bool animations_running = true;
+    passed &= expect(!galaxy::running_custom_animations(animations_running),
+                     "custom animations are not fixed before the disc opens");
+    passed &= expect(!galaxy::custom_animations_for_boot(), "the disc opens with the file's choice");
+    write_text(settings_path, "custom_animations=on\n");
+    galaxy::load_runtime_settings_from_file();
+    passed &= expect(galaxy::get_runtime_settings().custom_animations &&
+                         !galaxy::custom_animations_for_boot() &&
+                         galaxy::running_custom_animations(animations_running) && !animations_running,
+                     "a change while playing is saved but the session keeps its animations");
+    passed &= expect(
+        galaxy::save_runtime_settings_to_file() &&
+            read_text(settings_path).find("custom_animations=on") != std::string::npos,
+        "custom animations are saved with the other settings");
+
     // The game's first question fixes the language for the session.
     GameLanguage running{};
     passed &= expect(!galaxy::running_game_language(running), "no language is fixed before the game asks");

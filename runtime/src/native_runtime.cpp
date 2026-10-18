@@ -40,6 +40,7 @@
 #include "galaxy/opening_route_marker_guard.h"
 #include "galaxy/runtime_instance.h"
 #include "galaxy/runtime_settings.h"
+#include "galaxy/voice_replacement.h"
 #include "galaxy/simulation_cache_affinity.h"
 #include "galaxy/vi_boundary.h"
 
@@ -2334,6 +2335,11 @@ struct RuntimeState {
     // GALAXY_JAUDIO_HOST_MIXER: DspBoot and DSPSendCommands2 run on the host, and no DSP task boots.
     bool jaudio_host_mixer{};
     galaxy::host::JAudioHostMixer jaudio_mixer;
+    // Custom model (mods/model/neutral_joints.txt): per joint number, the J3DTransformInfo (big-endian) that
+    // J3DAnmTransformKey::getTransform gives a joint past the end of an animation's joint table. The game's
+    // animations cover its 30 joints only; reading past their tables threw the model's extra joints anywhere.
+    std::vector<std::array<std::byte, 0x20>> anim_neutral_joints;
+    std::vector<std::uint8_t> anim_neutral_joint_set;
     // Cutscene volume applied to the movie player's attenuation table.
     std::array<std::uint16_t, 128> movie_volume_original{};
     float movie_volume_gain{1.0f};
@@ -15987,6 +15993,10 @@ bool needs_call_guest_intercept(
     if (guest_address == 0x804961E0u || guest_address == 0x804962C0u) {
         return state.jaudio_host_mixer;  // DspBoot / DSPSendCommands2
     }
+    if (guest_address == 0x80440CDCu || guest_address == 0x80432A0Cu || guest_address == 0x80432D6Cu) {
+        // J3DAnmTransformKey / Full / FullWithLerp::getTransform (custom model)
+        return !state.anim_neutral_joints.empty();
+    }
     switch (guest_address >> 16) {
         case 0x0000u:
         case 0x8017u:
@@ -23758,6 +23768,88 @@ void update_jaudio_categories(RuntimeState& state, galaxy::host::GuestAddressSpa
     }
 }
 
+// J3DAnmTransform{Key,Full,FullWithLerp}::getTransform(this r3, u16 joint r4, J3DTransformInfo* r5)
+// (0x80440CDC, 0x80432A0C, 0x80432D6C). A joint at or past the animation's joint count (u16 at this+0x1E,
+// from the file header) gets the custom model's neutral transform instead of whatever lies past the
+// animation's tables. Returns false to run the translated body.
+bool anim_neutral_joint(RuntimeState& state, const galaxy::PpcContext* context, std::uint32_t guest_address) {
+    auto& space = *state.address_space;
+    const std::uint32_t self = context->gpr[3];
+    const std::uint32_t joint = context->gpr[4] & 0xFFFFu;
+    const std::byte* header = space.pointer_or_null(self + 0x1Eu, 2u);
+    if (header == nullptr) {
+        return false;
+    }
+    const std::uint32_t count = (std::to_integer<std::uint32_t>(header[0]) << 8u) | std::to_integer<std::uint32_t>(header[1]);
+    static const bool trace = read_env_flag("GALAXY_TRACE_ANIM_GUARD", false);
+    static int traced = 0;
+    static std::uint32_t kinds_seen = 0;
+    const std::uint32_t kind_bit = guest_address == 0x80440CDCu ? 1u : guest_address == 0x80432A0Cu ? 2u : 4u;
+    if (trace && joint >= count && (kinds_seen & kind_bit) == 0u) {
+        kinds_seen |= kind_bit;
+        std::cerr << "[anim-guard] first past-the-end joint via " << hexadecimal(guest_address) << '\n';
+    }
+    if (trace && traced < 40 && (joint == 30u || joint == 99u)) {
+        ++traced;
+        const std::byte* h = space.pointer_or_null(self + 0x18u, 8u);
+        std::cerr << "[anim-guard] " << hexadecimal(guest_address) << " anim=" << hexadecimal(self) << " joint=" << joint << " count@1E=" << count;
+        for (int k = 0; h != nullptr && k < 8; k += 2) {
+            std::cerr << " +" << std::hex << (0x18 + k) << std::dec << "="
+                      << ((std::to_integer<unsigned>(h[k]) << 8u) | std::to_integer<unsigned>(h[k + 1]));
+        }
+        std::cerr << '\n';
+    }
+    if (joint < count || joint >= state.anim_neutral_joints.size() || !state.anim_neutral_joint_set[joint]) {
+        return false;
+    }
+    std::byte* info = space.pointer_or_null(context->gpr[5], 0x20u);
+    if (info == nullptr) {
+        return false;
+    }
+    std::memcpy(info, state.anim_neutral_joints[joint].data(), 0x20u);
+    return true;
+}
+
+void load_anim_neutral_joints(RuntimeState& state, const std::filesystem::path& content_root) {
+    bool model = false;
+    if (!galaxy::running_custom_model(model) || !model) {
+        return;
+    }
+    std::ifstream file(content_root / L"mods" / L"model" / L"neutral_joints.txt");
+    std::string line;
+    const auto put32 = [](std::byte* at, std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) at[i] = static_cast<std::byte>(v >> (24 - 8 * i));
+    };
+    while (std::getline(file, line)) {
+        std::istringstream fields(line);
+        std::size_t joint = 0;
+        float v[9]{};
+        if (line.empty() || line[0] == '#' || !(fields >> joint) || joint >= 1024u) continue;
+        bool ok = true;
+        for (float& x : v) ok = ok && static_cast<bool>(fields >> x);
+        if (!ok) continue;
+        if (state.anim_neutral_joints.size() <= joint) {
+            state.anim_neutral_joints.resize(joint + 1u);
+            state.anim_neutral_joint_set.resize(joint + 1u);
+        }
+        std::byte* info = state.anim_neutral_joints[joint].data();
+        std::memset(info, 0, 0x20u);
+        for (int k = 0; k < 3; ++k) put32(info + 4 * k, std::bit_cast<std::uint32_t>(v[k]));
+        for (int k = 0; k < 3; ++k) {
+            const long r = std::lround(v[3 + k] * 32768.0 / 180.0);
+            const std::uint16_t s = static_cast<std::uint16_t>(static_cast<std::int16_t>(((r + 32768) % 65536 + 65536) % 65536 - 32768));
+            info[0xC + 2 * k] = static_cast<std::byte>(s >> 8u);
+            info[0xD + 2 * k] = static_cast<std::byte>(s & 0xFFu);
+        }
+        for (int k = 0; k < 3; ++k) put32(info + 0x14 + 4 * k, std::bit_cast<std::uint32_t>(v[6 + k]));
+        state.anim_neutral_joint_set[joint] = 1u;
+    }
+    if (!state.anim_neutral_joints.empty()) {
+        std::cerr << "[model] neutral transforms for joints past the game animations' tables: "
+                  << std::count(state.anim_neutral_joint_set.begin(), state.anim_neutral_joint_set.end(), 1u) << '\n';
+    }
+}
+
 // DspBoot (0x804961E0) and DSPSendCommands2 (0x804962C0) as host calls.
 // No DSP task boots: DspRunningStatus is set as DspHandShake would set it,
 // command callbacks (DsetupTable and DsetVARAM wait on them) run at once,
@@ -24075,6 +24167,10 @@ void call_guest_impl_body(
     if ((guest_address == 0x804961E0u || guest_address == 0x804962C0u) &&
         state.jaudio_host_mixer && state.address_space != nullptr) {
         run_jaudio_host_command(state, context, memory, guest_address);
+        return;
+    }
+    if ((guest_address == 0x80440CDCu || guest_address == 0x80432A0Cu || guest_address == 0x80432D6Cu) &&
+        anim_neutral_joint(state, context, guest_address)) {
         return;
     }
     if (guest_address == 0x8038D2E4u &&
@@ -33419,6 +33515,12 @@ int wmain(int argc, wchar_t** argv) {
     galaxy::host::load_boot_image(address_space, boot_image);
     galaxy::host::initialize_boot_memory(
         address_space, boot_image, paths.content_root);
+    // Mario's replacement voice lines (voice_replacement.h), mixed by the host mixer.
+    galaxy::voice::load(paths.content_root);
+    load_anim_neutral_joints(state, paths.content_root);
+    state.jaudio_mixer.set_voice_override(
+        {[](std::uint32_t id, std::uint64_t start) { return static_cast<std::uint8_t>(galaxy::voice::claim(id, start)); },
+         &galaxy::voice::render, &galaxy::voice::mix_remainder, &galaxy::voice::playing});
     // System-time offset: not written by initialize_boot_memory.
     address_space.write_u32(0x800030D8u, 0x00000000u);
     address_space.write_u32(0x800030DCu, 0x00000000u);
