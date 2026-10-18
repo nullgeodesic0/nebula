@@ -133,6 +133,9 @@ struct RenderConfig {
     // Camera-rotation motion blur 0-100 (shutter, 0 = off); key motion_blur,
     // env GALAXY_MOTION_BLUR.
     unsigned motion_blur         = 50;
+    // Screen-space reflections 0-100 (0 = off); key reflections, env
+    // GALAXY_REFLECTIONS, world-unit ray length GALAXY_REFLECTION_DISTANCE.
+    unsigned reflections         = 30;
 
     // Reserved for future DXR work. Clamped off until there is a real DXR
     // capability query, acceleration-structure path, ray PSO, and visible

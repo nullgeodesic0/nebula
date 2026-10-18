@@ -169,6 +169,15 @@ public:
                      unsigned frames_in_flight);
     [[nodiscard]] bool ssao_ready() const noexcept { return ready_ && ssao_ao_pipeline_ && ssao_blur_pipeline_ && ssao_apply_pipeline_; }
 
+    // Screen-space reflections on the scene EFB (see the SSR notes in
+    // post_process.hlsl), Fresnel-weighted and blended over the EFB colour.
+    // Reads the same inputs as ambient occlusion: radius is the ray's maximum
+    // length in world units and strength the reflection strength 0-1.
+    bool record_ssr(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                    ID3D12Resource* color, const SsaoInputs& inputs,
+                    std::uint64_t frame_index, unsigned frames_in_flight);
+    [[nodiscard]] bool ssr_ready() const noexcept { return ready_ && ssr_pipeline_ && dof_apply_pipeline_; }
+
     // Far-field depth of field on the scene EFB (see the DOF notes in
     // post_process.hlsl): a gather blur whose radius grows with distance past
     // the focus, blended over the EFB colour (alpha untouched).
@@ -299,6 +308,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_blur_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_apply_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_blur_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> ssr_pipeline_;
     // The colour pass shared by depth of field and motion blur: `pipeline`
     // reads `inputs` (the EFB colour among them) into scene_temp_, which is
     // then blended over the EFB colour.
@@ -308,7 +318,7 @@ private:
                             std::initializer_list<ID3D12Resource*> inputs,
                             std::initializer_list<DXGI_FORMAT> formats,
                             const D3D12_VIEWPORT& viewport, const Constants& constants);  // dest = lerp(dest, source, source alpha), rgb only
-    Target scene_temp_;                 // depth of field and motion blur result
+    Target scene_temp_;                 // reflection, depth of field and motion blur result
     Target final_;                      // window-sized scene handed to the look pass
     Target bloom_down_targets_[kBloomLevels];
     Target bloom_up_targets_[kBloomLevels - 1u];

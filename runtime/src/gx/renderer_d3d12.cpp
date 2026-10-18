@@ -541,6 +541,7 @@ unsigned pending_settings_changes() {
     changes += d.contact_shadows != live.contact_shadows;
     changes += d.depth_of_field != live.depth_of_field;
     changes += d.motion_blur != live.motion_blur;
+    changes += d.reflections != live.reflections;
     changes += d.anisotropic_filtering != live.anisotropic_filtering;
     changes += d.enhanced_mipmaps != live.enhanced_mipmaps;
     changes += d.per_pixel_lighting != live.per_pixel_lighting;
@@ -698,7 +699,7 @@ unsigned graphics_row(unsigned row) {
 unsigned native_settings_row_count(unsigned tab) {
     switch (tab % kNativeSettingsTabCount) {
     case 0: return 8u;
-    case 1: return fsr3_available() ? 17u : 16u;
+    case 1: return fsr3_available() ? 18u : 17u;
     case 2: return controls_row_count();
     case 3: return 6u;
     case 4: return 2u;
@@ -805,6 +806,7 @@ void apply_native_settings_draft() {
     applied.contact_shadows = next.contact_shadows;
     applied.depth_of_field = next.depth_of_field;
     applied.motion_blur = next.motion_blur;
+    applied.reflections = next.reflections;
     applied.anisotropic_filtering = next.anisotropic_filtering;
     applied.enhanced_mipmaps = next.enhanced_mipmaps;
     applied.per_pixel_lighting = next.per_pixel_lighting;
@@ -1093,6 +1095,10 @@ void adjust_native_setting_unlogged(int delta) {
         case 16:
             draft.motion_blur = static_cast<unsigned>(std::clamp(
                 static_cast<int>(std::min(draft.motion_blur, 100u)) + delta * 5, 0, 100));
+            break;
+        case 17:
+            draft.reflections = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.reflections, 100u)) + delta * 5, 0, 100));
             break;
         default: return;
         }
@@ -7178,6 +7184,7 @@ bool RendererD3D12::record_scene_effects() {
     const bool shadows = cfg.contact_shadows != 0u && scene_light_valid_;
     const bool occlusion = post_process_.ssao_ready() && (cfg.ssao != 0u || shadows);
     const bool dof = post_process_.dof_ready() && cfg.depth_of_field != 0u;
+    const bool reflections = post_process_.ssr_ready() && cfg.reflections != 0u;
     // Previous view rotation * current^T, which carries a current view ray into
     // the previous camera. Skipped on a camera cut (more than 20 degrees).
     float rotation[9]{};
@@ -7196,7 +7203,7 @@ bool RendererD3D12::record_scene_effects() {
         const float cos_angle = 0.5f * (rotation[0] + rotation[4] + rotation[8] - 1.0f);
         motion = std::isfinite(cos_angle) && cos_angle > 0.94f && cos_angle < 0.999999f;
     }
-    if (!occlusion && !dof && !motion) {
+    if (!occlusion && !reflections && !dof && !motion) {
         return false;
     }
     const float scale = static_cast<float>(efb_scale_);
@@ -7232,6 +7239,14 @@ bool RendererD3D12::record_scene_effects() {
     command_list_->SetDescriptorHeaps(2, heaps);
     bool recorded = occlusion && post_process_.record_ssao(
         command_list_.Get(), srv_ring_, in, frame_index_, kFramesInFlight);
+    if (reflections) {
+        static const float distance = env_float("GALAXY_REFLECTION_DISTANCE", 2000.0f, 10.0f);
+        PostProcessor::SsaoInputs s = in;
+        s.radius = distance;
+        s.strength = static_cast<float>(std::min(cfg.reflections, 100u)) / 100.0f;
+        recorded |= post_process_.record_ssr(
+            command_list_.Get(), srv_ring_, efb_color_.Get(), s, frame_index_, kFramesInFlight);
+    }
     if (dof) {
         PostProcessor::DofInputs d{};
         d.depth = efb_depth_.Get();
@@ -9612,6 +9627,9 @@ std::string native_settings_row_text(
             return text;
         case 16:
             std::snprintf(text, sizeof(text), "MOTION BLUR: %u%%", std::min(render.motion_blur, 100u));
+            return text;
+        case 17:
+            std::snprintf(text, sizeof(text), "REFLECTIONS: %u%%", std::min(render.reflections, 100u));
             return text;
         default:
             return {};

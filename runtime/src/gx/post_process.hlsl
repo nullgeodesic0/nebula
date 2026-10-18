@@ -269,7 +269,7 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 // apply treat both channels alike and the apply multiplies their product.
 #endif
 
-#if defined(PASS_SSAO_AO) || defined(PASS_SSAO_BLUR) || defined(PASS_DOF_BLUR)
+#if defined(PASS_SSAO_AO) || defined(PASS_SSAO_BLUR) || defined(PASS_DOF_BLUR) || defined(PASS_SSR)
 Texture2D depthTex : register(t0);
 FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
 // Distance in front of the camera, or -1 where nothing was drawn.
@@ -295,7 +295,7 @@ bool SsaoInView(int2 p) {
 }
 #endif
 
-#if defined(PASS_SSAO_AO)
+#if defined(PASS_SSAO_AO) || defined(PASS_SSR)
 // Target pixel of a view-space point (inverse of SsaoViewPos).
 float2 SsaoProject(float3 v) {
     const float zv = -v.z;
@@ -304,6 +304,29 @@ float2 SsaoProject(float3 v) {
     return float2(g_params.x + (nx + 1.0) * 0.5 * g_params.z,
                   g_params.y + (1.0 - ny) * 0.5 * g_params.w);
 }
+// Camera-facing view-space normal at P (pixel p, distance zv), from the nearer
+// neighbour on each axis (keeps silhouettes clean). `slope` receives the depth
+// change to the next pixel on P's own surface.
+float3 SsaoNormal(int2 p, float zv, float3 P, out float slope) {
+    const float zl = SsaoViewZ(p + int2(-1, 0));
+    const float zr = SsaoViewZ(p + int2(1, 0));
+    const float zu = SsaoViewZ(p + int2(0, -1));
+    const float zd = SsaoViewZ(p + int2(0, 1));
+    float3 dx = float3(0.0, 0.0, 0.0);
+    float3 dy = float3(0.0, 0.0, 0.0);
+    if (zr > 0.0 && (zl < 0.0 || abs(zr - zv) < abs(zl - zv))) dx = SsaoViewPos(p + int2(1, 0), zr) - P;
+    else if (zl > 0.0) dx = P - SsaoViewPos(p + int2(-1, 0), zl);
+    if (zd > 0.0 && (zu < 0.0 || abs(zd - zv) < abs(zu - zv))) dy = SsaoViewPos(p + int2(0, 1), zd) - P;
+    else if (zu > 0.0) dy = P - SsaoViewPos(p + int2(0, -1), zu);
+    slope = max(abs(dx.z), abs(dy.z));
+    float3 N = cross(dx, dy);
+    if (dot(N, N) < 1e-12) return -normalize(P);
+    N = normalize(N);
+    return dot(N, P) > 0.0 ? -N : N;  // face the camera
+}
+#endif
+
+#if defined(PASS_SSAO_AO)
 
 // Visibility of the light from P (pixel p), 1 = lit. Facing away from the light
 // returns 1: the game's own lighting already darkens those surfaces. `slope` is
@@ -362,29 +385,12 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     if (zv < 0.0 || zv > 0.98 * asfloat(g_con0.y)) return float4(1.0, 1.0, 1.0, 1.0);
     const float3 P = SsaoViewPos(p, zv);
 
-    // Normal from the nearer neighbour on each axis (keeps silhouettes clean).
-    const float zl = SsaoViewZ(p + int2(-1, 0));
-    const float zr = SsaoViewZ(p + int2(1, 0));
-    const float zu = SsaoViewZ(p + int2(0, -1));
-    const float zd = SsaoViewZ(p + int2(0, 1));
-    float3 dx = float3(0.0, 0.0, 0.0);
-    float3 dy = float3(0.0, 0.0, 0.0);
-    if (zr > 0.0 && (zl < 0.0 || abs(zr - zv) < abs(zl - zv))) dx = SsaoViewPos(p + int2(1, 0), zr) - P;
-    else if (zl > 0.0) dx = P - SsaoViewPos(p + int2(-1, 0), zl);
-    if (zd > 0.0 && (zu < 0.0 || abs(zd - zv) < abs(zu - zv))) dy = SsaoViewPos(p + int2(0, 1), zd) - P;
-    else if (zu > 0.0) dy = P - SsaoViewPos(p + int2(0, -1), zu);
-    float3 N = cross(dx, dy);
-    if (dot(N, N) < 1e-12) {
-        N = -normalize(P);
-    } else {
-        N = normalize(N);
-        if (dot(N, P) > 0.0) N = -N;  // face the camera
-    }
+    float slope;
+    const float3 N = SsaoNormal(p, zv, P, slope);
 
     // A 4x4 ordered pattern that the blur pass averages away exactly.
     static const float kBayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
     const float noise = kBayer[(p.y & 3) * 4 + (p.x & 3)] / 16.0 + 0.03125;
-    const float slope = max(abs(dx.z), abs(dy.z));
     const float shadow = ContactShadow(p, P, N, zv, slope, noise);
 
     const float radius = asfloat(g_con1.z);
@@ -443,6 +449,78 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     const float2 terms = aoTex.Load(int3(int2(i.pos.xy), 0)).rg;
     const float ao = terms.r * terms.g;
     return float4(ao, ao, ao, 1.0);
+}
+#endif
+
+#if defined(PASS_SSR)
+// Screen-space reflections on the scene EFB. The EFB carries no material data,
+// so every surface reflects by Schlick's Fresnel term for a water-like F0 of
+// 0.04: almost nothing face-on, a clear mirror at grazing angles, the way
+// floors, water and ice catch the sky and planets in a modern platformer. The
+// reflected view ray is marched through the depth (24 growing steps, then a
+// 4-step binary refine) and fades out near the screen edges, at the end of the
+// ray and where it turns back toward the camera.
+// Constants as the ambient occlusion pass: g_con0 = (near, far, A, B), g_con1 =
+// (C, D, max distance in world units, strength 0-1); g_params = scene viewport.
+// The alpha output is the blend weight the apply pass uses.
+Texture2D colorTex : register(t1);
+float4 PSMain(FullscreenOut i) : SV_Target {
+    const int2 p = int2(i.pos.xy);
+    if (!SsaoInView(p)) return float4(0.0, 0.0, 0.0, 0.0);
+    const float zv = SsaoViewZ(p);
+    if (zv < 0.0 || zv > 0.98 * asfloat(g_con0.y)) return float4(0.0, 0.0, 0.0, 0.0);
+    const float3 P = SsaoViewPos(p, zv);
+    float slope;
+    const float3 N = SsaoNormal(p, zv, P, slope);
+    const float3 V = normalize(P);
+    const float cos_v = saturate(dot(-V, N));
+    const float fresnel = 0.04 + 0.96 * pow(1.0 - cos_v, 5.0);
+    const float strength = asfloat(g_con1.w) * fresnel;
+    if (strength < 0.01) return float4(0.0, 0.0, 0.0, 0.0);
+    const float3 R = reflect(V, N);
+    // Rays back toward the camera leave the depth buffer's view.
+    const float toward = saturate(-R.z * 4.0 + 1.0);
+    if (toward <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+
+    const float max_dist = asfloat(g_con1.z);
+    const float3 origin = P + N * (0.002 * zv + slope);
+    // A ray toward the camera stops before the near plane.
+    const float reach = R.z > 0.0 ? saturate((-origin.z - asfloat(g_con0.x)) / (R.z * max_dist)) : 1.0;
+    const float3 ray = R * max_dist * reach;
+    static const float kBayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+    const float noise = kBayer[(p.y & 3) * 4 + (p.x & 3)] / 16.0;
+    const int kSteps = 24;
+    float prev_t = 0.0;
+    float hit_t = -1.0;
+    [loop] for (int k = 0; k < kSteps; ++k) {
+        const float s = (float(k) + 0.5 + noise) / float(kSteps);
+        const float t = s * s;
+        const float3 S = origin + ray * t;
+        const int2 q = int2(floor(SsaoProject(S)));
+        if (!SsaoInView(q)) break;
+        const float zq = SsaoViewZ(q);
+        const float delta = -S.z - zq;
+        // Thickness grows with distance so thin geometry still catches rays.
+        if (zq > 0.0 && delta > 0.0 && delta < 0.05 * zq + max_dist * (t - prev_t)) {
+            hit_t = t;
+            break;
+        }
+        prev_t = t;
+    }
+    if (hit_t < 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+    float lo_t = prev_t;
+    float hi_t = hit_t;
+    [unroll] for (int b = 0; b < 4; ++b) {
+        const float mid = 0.5 * (lo_t + hi_t);
+        const float3 S = origin + ray * mid;
+        const float zq = SsaoViewZ(int2(floor(SsaoProject(S))));
+        if (zq > 0.0 && -S.z > zq) hi_t = mid; else lo_t = mid;
+    }
+    const float2 hit = SsaoProject(origin + ray * hi_t);
+    const float2 edge = min(hit - g_params.xy, g_params.xy + g_params.zw - hit) / (0.1 * g_params.zw);
+    const float fade = saturate(min(edge.x, edge.y)) * (1.0 - hi_t * hi_t) * toward;
+    const float3 colour = colorTex.SampleLevel(LinearSampler, hit * g_rt_metrics.xy, 0).rgb;
+    return float4(colour, strength * fade);
 }
 #endif
 

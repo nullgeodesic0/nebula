@@ -217,6 +217,8 @@ static void apply_kv(RenderConfig& cfg, const char* key, const char* val) {
         cfg.depth_of_field = std::min(parse_uint(val, cfg.depth_of_field), 100u);
     } else if (std::strcmp(key, "motion_blur") == 0) {
         cfg.motion_blur = std::min(parse_uint(val, cfg.motion_blur), 100u);
+    } else if (std::strcmp(key, "reflections") == 0) {
+        cfg.reflections = std::min(parse_uint(val, cfg.reflections), 100u);
     }
     else if (std::strcmp(key, "ray_tracing_enabled") == 0) cfg.ray_tracing_enabled = parse_bool(val, false);
     else if (std::strcmp(key, "rt_shadow_quality") == 0) cfg.rt_shadow_quality = std::clamp(parse_uint(val, 0), 0u, 3u);
@@ -304,6 +306,7 @@ static void apply_env_overrides(RenderConfig& cfg) {
     apply_env(cfg, "GALAXY_CONTACT_SHADOWS", "contact_shadows");
     apply_env(cfg, "GALAXY_DEPTH_OF_FIELD", "depth_of_field");
     apply_env(cfg, "GALAXY_MOTION_BLUR", "motion_blur");
+    apply_env(cfg, "GALAXY_REFLECTIONS", "reflections");
     apply_env(cfg, "GALAXY_RAY_TRACING_ENABLED", "ray_tracing_enabled");
     apply_env(cfg, "GALAXY_RT_SHADOW_QUALITY", "rt_shadow_quality");
     apply_env(cfg, "GALAXY_RT_AO_ENABLED", "rt_ao_enabled");
@@ -350,6 +353,7 @@ static void clamp_unimplemented_features(RenderConfig& cfg) {
     cfg.contact_shadows = std::min(cfg.contact_shadows, 100u);
     cfg.depth_of_field = std::min(cfg.depth_of_field, 100u);
     cfg.motion_blur = std::min(cfg.motion_blur, 100u);
+    cfg.reflections = std::min(cfg.reflections, 100u);
     // Win32 client geometry is signed-int based even though DXGI dimensions
     // are UINT. Keep direct API callers inside the common representable range.
     constexpr unsigned kMaxWindowDimension =
@@ -657,6 +661,7 @@ bool save_render_config_to_file() {
              << "contact_shadows=" << cfg.contact_shadows << '\n'
              << "depth_of_field=" << cfg.depth_of_field << '\n'
              << "motion_blur=" << cfg.motion_blur << '\n'
+             << "reflections=" << cfg.reflections << '\n'
              << "internal_follow_window="
              << (cfg.internal_follow_window ? 1u : 0u) << '\n'
              << "hud_output_resolution="

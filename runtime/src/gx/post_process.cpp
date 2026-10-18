@@ -45,6 +45,7 @@
 #include "post_dof_blur_ps.h"
 #include "post_dof_apply_ps.h"
 #include "post_motion_blur_ps.h"
+#include "post_ssr_ps.h"
 
 namespace galaxy::gx {
 namespace {
@@ -404,6 +405,10 @@ bool PostProcessor::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
         std::cerr << "[post-process] motion blur pipeline failed; it stays off\n";
         motion_blur_pipeline_.Reset();
     }
+    if (!create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_ssr_ps)), kColorFormat, 0, ssr_pipeline_)) {
+        std::cerr << "[post-process] reflection pipeline failed; it stays off\n";
+        ssr_pipeline_.Reset();
+    }
     fault_selftest_ = test_fault("selftest");
     fault_targets_ = test_fault("targets");
     const bool smaa_pipelines = !test_fault("smaa") &&
@@ -484,6 +489,7 @@ void PostProcessor::shutdown() noexcept {
     dof_blur_pipeline_.Reset();
     dof_apply_pipeline_.Reset();
     motion_blur_pipeline_.Reset();
+    ssr_pipeline_.Reset();
     scene_temp_ = {};
     final_ = {};
     for (auto& t : bloom_down_targets_) t = {};
@@ -1138,6 +1144,36 @@ bool PostProcessor::record_dof(ID3D12GraphicsCommandList* list, DescriptorRing& 
                             static_cast<float>(in.height), 0.0f, 1.0f};
     record_scene_blend(list, srv_ring, dof_blur_pipeline_.Get(), in.color, in.color_rtv,
                        {in.depth, in.color}, {kDepthSrvFormat, kColorFormat}, vp, c);
+    return true;
+}
+
+bool PostProcessor::record_ssr(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                               ID3D12Resource* color, const SsaoInputs& in,
+                               std::uint64_t frame_index, unsigned frames_in_flight) {
+    if (!ssr_ready() || color == nullptr || in.depth == nullptr || in.width == 0u ||
+        in.height == 0u ||
+        !ensure_target(scene_temp_, in.width, in.height, kColorFormat, kSceneTempSlot,
+                       frame_index, frames_in_flight)) {
+        return false;
+    }
+    Constants c{};
+    c.rt_metrics[0] = 1.0f / static_cast<float>(in.width);
+    c.rt_metrics[1] = 1.0f / static_cast<float>(in.height);
+    c.rt_metrics[2] = static_cast<float>(in.width);
+    c.rt_metrics[3] = static_cast<float>(in.height);
+    for (unsigned i = 0; i < 4u; ++i) c.params[i] = in.viewport[i];
+    c.con0[0] = bits(in.camera_near);
+    c.con0[1] = bits(in.camera_far);
+    c.con0[2] = bits(in.proj[0]);
+    c.con0[3] = bits(in.proj[1]);
+    c.con1[0] = bits(in.proj[2]);
+    c.con1[1] = bits(in.proj[3]);
+    c.con1[2] = bits(in.radius);
+    c.con1[3] = bits(in.strength);
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
+                            static_cast<float>(in.height), 0.0f, 1.0f};
+    record_scene_blend(list, srv_ring, ssr_pipeline_.Get(), color, in.color_rtv,
+                       {in.depth, color}, {kDepthSrvFormat, kColorFormat}, vp, c);
     return true;
 }
 

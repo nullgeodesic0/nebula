@@ -510,8 +510,8 @@ public:
     // camera motion blur.
     void set_scene_view(const float* view) noexcept;
     // At scene end: ambient occlusion and contact shadows from the EFB depth,
-    // multiplied onto the EFB colour, then depth of field and camera motion
-    // blur. True when it
+    // multiplied onto the EFB colour, then reflections, depth of field and
+    // camera motion blur. True when it
     // recorded (GX bindings are then stale).
     [[nodiscard]] bool record_scene_effects();
     // GX copy-clear: color from the latched AR/GB regs, depth from z24
