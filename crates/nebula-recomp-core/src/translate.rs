@@ -2470,6 +2470,7 @@ fn lower_resident_integer_direct_calls(
                         && pc != 0x803A_BDF0
                         && !(target == 0x8039_8D3C && pc == 0x8039_8E7C)
                         && !is_animation_interpole_call(target)
+                        && !is_mario_action_main_call(target, pc)
                 });
                 let lean_contract = lean_body_call_contract(
                     target,
@@ -7636,6 +7637,11 @@ fn emit_direct_guest_call_with_exact_fpu(
     if is_animation_interpole_call(target) {
         output.push_str(&site_hook_call(pc, "AnimationInterpole", 0));
     }
+    // Mario::update's one call to Mario::actionMain (r3 the Mario): the runtime's Odyssey moveset
+    // reads Mario's state and adjusts his movement here, before the game moves him this frame.
+    if is_mario_action_main_call(target, pc) {
+        output.push_str(&site_hook_call(pc, "MarioActionMain", 0));
+    }
     fn emit_post_call_hook(
         output: &mut String,
         target: u32,
@@ -7958,6 +7964,11 @@ fn site_hook_call(pc: u32, kind: &str, argument: u32) -> String {
 
 fn is_animation_interpole_call(target: u32) -> bool {
     target == 0x8001_BB50
+}
+
+/// Mario::update (RMGE01 0x802ACDB4) calls Mario::actionMain (0x802AD338) once, at 0x802AD180.
+fn is_mario_action_main_call(target: u32, pc: u32) -> bool {
+    target == 0x802A_D338 && pc == 0x802A_D180
 }
 
 fn rmge01_native_screen_width_call(address: u32, function_end: u32, pc: u32, word: u32) -> bool {
@@ -14384,6 +14395,30 @@ mod tests {
             0x4E80_0020,
         ];
         assert!(!lower_instruction_fixture(0x8001_BAF0, &other).contains("AnimationInterpole"));
+    }
+
+    #[test]
+    fn rmge01_mario_action_main_hook_precedes_only_the_update_call() {
+        const TARGET: u32 = 0x802A_D338; // Mario::actionMain
+        let hook = "galaxy::site_hook(services, context, memory, 0x802AD180u, galaxy::SiteHookKind::MarioActionMain, 0u);";
+        let link = [
+            0x4800_0001 | (TARGET.wrapping_sub(0x802A_D180) & 0x03FF_FFFC),
+            0x4E80_0020,
+        ];
+        let output = lower_instruction_fixture(0x802A_D180, &link);
+        assert_eq!(output.matches(hook).count(), 1);
+        let bytes: Vec<u8> = link.iter().flat_map(|word| word.to_be_bytes()).collect();
+        let entries = BTreeMap::from([(TARGET, TARGET)]);
+        let output = lower_words_for_module(0x802A_D180, &bytes, &BTreeSet::new(), &entries)
+            .expect("resolved actionMain call lowers");
+        let at = output.find(hook).expect("the resolved call keeps the hook");
+        assert!(at < output.find(&format!("fn_{TARGET:08X}")).expect("the call follows"));
+        // The same call from anywhere else is left alone.
+        let elsewhere = [
+            0x4800_0001 | (TARGET.wrapping_sub(0x802A_D184) & 0x03FF_FFFC),
+            0x4E80_0020,
+        ];
+        assert!(!lower_instruction_fixture(0x802A_D184, &elsewhere).contains("MarioActionMain"));
     }
 
     #[test]

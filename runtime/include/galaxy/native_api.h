@@ -516,6 +516,9 @@ enum class SiteHookKind : std::uint32_t {
     // Before XanimePlayer::updateInterpoleRatio (r3 the player); the runtime reshapes the
     // cross-fade for the motion style setting.
     AnimationInterpole = 31,
+    // Before Mario::actionMain, Mario::update's one call to it (r3 the Mario); the runtime's Odyssey
+    // moveset reads his state and adjusts his movement for the frame.
+    MarioActionMain = 40,
 };
 
 inline void site_hook(

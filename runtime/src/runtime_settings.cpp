@@ -124,6 +124,19 @@ RuntimeInputMode parse_input_mode(
     return fallback;
 }
 
+// "on"/"true"/"1"/"yes" and "off"/"false"/"0"/"no"; anything else keeps `fallback`.
+bool parse_switch(const char* value, bool fallback) {
+    if (_stricmp(value, "on") == 0 || _stricmp(value, "true") == 0 || _stricmp(value, "yes") == 0 ||
+        std::strcmp(value, "1") == 0) {
+        return true;
+    }
+    if (_stricmp(value, "off") == 0 || _stricmp(value, "false") == 0 || _stricmp(value, "no") == 0 ||
+        std::strcmp(value, "0") == 0) {
+        return false;
+    }
+    return fallback;
+}
+
 std::string_view trim(std::string_view text) {
     const std::size_t begin = text.find_first_not_of(" \t\r\n");
     if (begin == std::string_view::npos) {
@@ -164,6 +177,18 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
         for (const MotionStyle style : {MotionStyle::Original, MotionStyle::Smooth, MotionStyle::Modern}) {
             if (_stricmp(value, motion_style_key(style)) == 0) settings.motion_style = style;
         }
+    } else if (std::strcmp(key, "odyssey_moveset") == 0) {
+        settings.moveset.enabled = parse_switch(value, settings.moveset.enabled);
+    } else if (std::strcmp(key, "moveset_roll") == 0) {
+        settings.moveset.roll = parse_switch(value, settings.moveset.roll);
+    } else if (std::strcmp(key, "moveset_roll_jump") == 0) {
+        settings.moveset.roll_jump = parse_switch(value, settings.moveset.roll_jump);
+    } else if (std::strcmp(key, "moveset_ground_pound_jump") == 0) {
+        settings.moveset.ground_pound_jump = parse_switch(value, settings.moveset.ground_pound_jump);
+    } else if (std::strcmp(key, "moveset_dive") == 0) {
+        settings.moveset.dive = parse_switch(value, settings.moveset.dive);
+    } else if (std::strcmp(key, "moveset_turn_boost") == 0) {
+        settings.moveset.turn_boost = parse_switch(value, settings.moveset.turn_boost);
     } else if (std::strcmp(key, "custom_animations") == 0) {
         if (_stricmp(value, "on") == 0 || std::strcmp(value, "1") == 0) settings.custom_animations = true;
         if (_stricmp(value, "off") == 0 || std::strcmp(value, "0") == 0) settings.custom_animations = false;
@@ -310,6 +335,7 @@ void apply_env_overrides(RuntimeSettings& settings) {
     apply_env(settings, "GALAXY_LANGUAGE", "language");
     apply_env(settings, "GALAXY_BUTTON_PROMPTS", "button_prompts");
     apply_env(settings, "GALAXY_MOTION_STYLE", "motion_style");
+    apply_env(settings, "GALAXY_ODYSSEY_MOVESET", "odyssey_moveset");
     apply_env(settings, "GALAXY_CUSTOM_ANIMATIONS", "custom_animations");
     apply_env(settings, "GALAXY_CUSTOM_MODEL", "custom_model");
     apply_env(settings, "GALAXY_CUSTOM_VOICE", "custom_voice");
@@ -514,6 +540,7 @@ bool reload_runtime_audio_settings_if_changed() noexcept {
         settings.language = parsed.language;
         settings.button_prompts = parsed.button_prompts;
         settings.motion_style = parsed.motion_style;
+        settings.moveset = parsed.moveset;
         settings.custom_animations = parsed.custom_animations;
         settings.custom_model = parsed.custom_model;
         settings.custom_voice = parsed.custom_voice;
@@ -558,6 +585,12 @@ bool save_runtime_settings_to_file() {
                  << "custom_animations=" << (settings.custom_animations ? "on" : "off") << '\n'
                  << "custom_model=" << (settings.custom_model ? "on" : "off") << '\n'
                  << "custom_voice=" << (settings.custom_voice ? "on" : "off") << '\n'
+                 << "odyssey_moveset=" << (settings.moveset.enabled ? "on" : "off") << '\n'
+                 << "moveset_roll=" << (settings.moveset.roll ? "on" : "off") << '\n'
+                 << "moveset_roll_jump=" << (settings.moveset.roll_jump ? "on" : "off") << '\n'
+                 << "moveset_ground_pound_jump=" << (settings.moveset.ground_pound_jump ? "on" : "off") << '\n'
+                 << "moveset_dive=" << (settings.moveset.dive ? "on" : "off") << '\n'
+                 << "moveset_turn_boost=" << (settings.moveset.turn_boost ? "on" : "off") << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;

@@ -713,7 +713,7 @@ unsigned native_settings_row_count(unsigned tab) {
     case 1: return fsr3_available() ? 19u : 18u;
     case 2: return controls_row_count();
     case 3: return 6u;
-    case 4: return 7u;
+    case 4: return 8u;
     default: return 0u;
     }
 }
@@ -1270,6 +1270,12 @@ void adjust_native_setting_unlogged(int delta) {
     if (tab == 4u && row == 6u) {
         // Voice lines change live.
         settings.custom_voice = !settings.custom_voice;
+        set_runtime_settings(settings);
+        s_native_settings_dirty.store(true, std::memory_order_release);
+    }
+    if (tab == 4u && row == 7u) {
+        // The Odyssey moveset switches on and off live (the per-move switches are in runtime_settings.ini).
+        settings.moveset.enabled = !settings.moveset.enabled;
         set_runtime_settings(settings);
         s_native_settings_dirty.store(true, std::memory_order_release);
     }
@@ -9802,6 +9808,7 @@ std::string native_settings_row_text(
         if (row == 4u) return std::string("CUSTOM ANIMATIONS: ") + (runtime.custom_animations ? "ON" : "OFF");
         if (row == 5u) return std::string("CUSTOM MODEL: ") + (runtime.custom_model ? "ON" : "OFF");
         if (row == 6u) return std::string("CUSTOM VOICE: ") + (runtime.custom_voice ? "ON" : "OFF");
+        if (row == 7u) return std::string("ODYSSEY MOVES: ") + (runtime.moveset.enabled ? "ON" : "OFF");
         return {};
     default:
         return {};
