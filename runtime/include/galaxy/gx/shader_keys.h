@@ -107,6 +107,7 @@ inline constexpr std::uint8_t kMaterialWritten  = 0x80u;  // a GX draw wrote thi
 inline constexpr std::uint8_t kMaterialLit      = 0x01u;  // colour channel 0 is lit by a light
 inline constexpr std::uint8_t kMaterialGlossy   = 0x02u;  // environment-mapped or specular
 inline constexpr std::uint8_t kMaterialIndirect = 0x04u;  // indirect texturing (water, glass)
+inline constexpr std::uint8_t kMaterialSkinned  = 0x08u;  // per-vertex matrix index: characters, enemies, actors
 
 struct PixelShaderKey {
     std::uint8_t num_tev_stages;    // 1-16

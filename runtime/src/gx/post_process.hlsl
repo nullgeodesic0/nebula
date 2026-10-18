@@ -304,6 +304,7 @@ static const uint kMaterialWritten = 0x80u;
 static const uint kMaterialLit = 0x01u;
 static const uint kMaterialGlossy = 0x02u;
 static const uint kMaterialIndirect = 0x04u;
+static const uint kMaterialSkinned = 0x08u;
 uint SceneMaterial(int2 p) { return stencilTex.Load(int3(p, 0)).g; }
 // Target pixel of a view-space point (inverse of SsaoViewPos).
 float2 SsaoProject(float3 v) {
@@ -349,7 +350,8 @@ float3 SsaoNormal(int2 p, float zv, float3 P, out float slope) {
 // thick ghosts. Returns the shadow, 0 (lit) to 1 (fully shadowed); an occluder
 // near the end of the ray casts a softer, fainter shadow.
 float ShadowRay(int2 p, float3 P, float3 N, float zv, float slope, float noise, float3 L,
-                float ray_length, float thickness_base, float growth, float cone, int steps) {
+                float ray_length, float thickness_base, float growth, float cone, int steps,
+                bool receiver_skinned) {
     // Lift the start off the surface by about a pixel's depth error so flat
     // ground does not shadow itself.
     const float lift = 0.0015 * zv;
@@ -382,7 +384,10 @@ float ShadowRay(int2 p, float3 P, float3 N, float zv, float slope, float noise, 
         const float delta = -S.z - zq;
         const float thickness = thickness_base + 0.01 * zv + growth * ray_length * t * t;
         if (delta > 0.002 * zq + slope && delta < thickness) {
-            return 1.0 - smoothstep(0.55, 1.0, t);
+            // An actor's own parts (Mario's cap over his face) shadow each other
+            // only faintly: the hard self-shadow looks like a rendering error.
+            const bool self = receiver_skinned && (SceneMaterial(q) & kMaterialSkinned) != 0u;
+            return (1.0 - smoothstep(0.55, 1.0, t)) * (self ? 0.2 : 1.0);
         }
     }
     return 0.0;
@@ -392,20 +397,23 @@ float ShadowRay(int2 p, float3 P, float3 N, float zv, float slope, float noise, 
 // hard one for contact shadows under small occluders, and a long jittered one
 // for soft, widening shadows of larger ones (a tree on the grass, a wall across
 // the path). 1 = lit.
-float ContactShadow(int2 p, float3 P, float3 N, float zv, float slope, float noise) {
+float ContactShadow(int2 p, float3 P, float3 N, float zv, float slope, float noise, uint material) {
     const float strength = asfloat(g_con3.x);
     if (strength <= 0.0) return 1.0;
     const float3 L = normalize(float3(asfloat(g_con2.y), asfloat(g_con2.z), asfloat(g_con2.w)) - P);
     const float ndl = dot(N, L);
     if (ndl <= 0.0) return 1.0;
+    const bool skinned = (material & kMaterialWritten) != 0u && (material & kMaterialSkinned) != 0u;
+    // Characters get a softer contact ray (a wider cone spreads the edge into a
+    // penumbra) as well as the faint self-shadow in ShadowRay.
     const float contact = ShadowRay(p, P, N, zv, slope, noise, L, asfloat(g_con3.y),
-                                    asfloat(g_con3.z), 0.0, 0.006, 16);
+                                    asfloat(g_con3.z), 0.0, skinned ? 0.04 : 0.006, 16, skinned);
     const float long_length = asfloat(g_con3.w);
     float far_shadow = 0.0;
     if (long_length > 0.0) {
         // Different jitter phase than the contact ray, so the two do not alias.
         far_shadow = ShadowRay(p, P, N, zv, slope, frac(noise * 3.0 + 0.5), L, long_length,
-                               asfloat(g_con3.z), 0.12, 0.07, 24) * 0.85;
+                               asfloat(g_con3.z), 0.12, 0.07, 24, skinned) * 0.85;
     }
     const float visible = (1.0 - contact * strength) * (1.0 - far_shadow * strength);
     // Near grazing angles the game's lighting is already dim; fade the shadow in
@@ -431,7 +439,7 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     // other unlit materials are their own light.
     const uint material = SceneMaterial(p);
     const bool lit = (material & kMaterialWritten) == 0u || (material & kMaterialLit) != 0u;
-    const float shadow = lit ? ContactShadow(p, P, N, zv, slope, noise) : 1.0;
+    const float shadow = lit ? ContactShadow(p, P, N, zv, slope, noise, material) : 1.0;
 
     const float radius = asfloat(g_con1.z);
     const float strength = asfloat(g_con1.w);

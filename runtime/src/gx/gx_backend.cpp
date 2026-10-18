@@ -6279,6 +6279,11 @@ std::uint8_t GxBackend::classify_material() const {
     if (gm.num_ind_stages != 0u) {
         material |= kMaterialIndirect;
     }
+    // A per-vertex position matrix index (VCD bit 0) is how the game skins its
+    // actors: Mario, enemies, NPCs. Stage geometry has none.
+    if ((state_.cp(cp::kVcdLo) & 1u) != 0u) {
+        material |= kMaterialSkinned;
+    }
     return material;
 }
 
@@ -10073,7 +10078,7 @@ ID3D12PipelineState* GxBackend::flush_draw_state(
     const bool vcd_dirty  = (dirty & GxState::kDirtyVcd)         != 0;
     const bool tev_c_dirty = (dirty & GxState::kDirtyTevConstants) != 0;
     const bool vs_c_dirty = (dirty & GxState::kDirtyVsConstants) != 0;
-    if (tev_dirty || xf_dirty || dirty == ~0u) {
+    if (tev_dirty || xf_dirty || vcd_dirty || dirty == ~0u) {
         current_material_ = classify_material();
     }
 
