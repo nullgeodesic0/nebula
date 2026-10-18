@@ -45,6 +45,9 @@ struct PostProcessSettings {
     std::uint8_t saturation = 108;
     std::uint8_t contrast = 104;
     std::uint8_t vignette = 8;
+    // Lens flare ghosts and halo from the bloom pyramid's bright pass, 0-100
+    // (0 = off); drawn only while bloom is on.
+    std::uint8_t lens_flare = 40;
     // Ambient occlusion strength 0-100 (0 = off), applied to the 3D scene EFB.
     std::uint8_t ssao = 40;
 
@@ -141,8 +144,9 @@ public:
                 std::uint64_t frame_index,
                 unsigned frames_in_flight);
 
-    // Ambient occlusion on the scene EFB, multiplied onto its colour (see the
-    // SSAO notes in post_process.hlsl). All sizes are EFB pixels at the render scale.
+    // Ambient occlusion and contact shadows on the scene EFB, multiplied onto its
+    // colour (see the SSAO notes in post_process.hlsl). All sizes are EFB pixels
+    // at the render scale.
     struct SsaoInputs {
         ID3D12Resource* depth = nullptr;            // R24G8 typeless, DEPTH_WRITE-free (shader resource state)
         D3D12_CPU_DESCRIPTOR_HANDLE color_rtv{};    // the EFB colour render target
@@ -155,6 +159,11 @@ public:
         float radius = 120.0f;                      // world units
         float strength = 0.5f;                      // 0-1
         float bias = 0.02f;
+        // Contact shadows: march from each pixel toward the light through the depth.
+        float light[3]{};                           // view-space light position
+        float shadow_strength = 0.0f;               // 0-1; 0 skips the march
+        float shadow_length = 80.0f;                // world units
+        float shadow_thickness = 30.0f;             // world units an occluder is assumed deep
     };
     // True when the passes were recorded. The caller moves the depth buffer into
     // PIXEL_SHADER_RESOURCE before the call and restores it after.
@@ -162,6 +171,56 @@ public:
                      const SsaoInputs& inputs, std::uint64_t frame_index,
                      unsigned frames_in_flight);
     [[nodiscard]] bool ssao_ready() const noexcept { return ready_ && ssao_ao_pipeline_ && ssao_blur_pipeline_ && ssao_apply_pipeline_; }
+
+    // Screen-space reflections on the scene EFB (see the SSR notes in
+    // post_process.hlsl), Fresnel-weighted and blended over the EFB colour.
+    // Reads the same inputs as ambient occlusion: radius is the ray's maximum
+    // length in world units and strength the reflection strength 0-1.
+    bool record_ssr(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                    ID3D12Resource* color, const SsaoInputs& inputs,
+                    std::uint64_t frame_index, unsigned frames_in_flight);
+    [[nodiscard]] bool ssr_ready() const noexcept { return ready_ && ssr_pipeline_ && dof_apply_pipeline_; }
+
+    // Far-field depth of field on the scene EFB (see the DOF notes in
+    // post_process.hlsl): a gather blur whose radius grows with distance past
+    // the focus, blended over the EFB colour (alpha untouched).
+    struct DofInputs {
+        ID3D12Resource* depth = nullptr;            // R24G8 typeless, in PIXEL_SHADER_RESOURCE
+        ID3D12Resource* color = nullptr;            // the EFB colour, in RENDER_TARGET
+        D3D12_CPU_DESCRIPTOR_HANDLE color_rtv{};
+        unsigned width = 0;                         // EFB resource size
+        unsigned height = 0;
+        float viewport[4]{};                        // scene viewport x, y, w, h
+        float camera_near = 1.0f;
+        float camera_far = 1000.0f;
+        float max_radius = 8.0f;                    // blur radius in pixels at full blur
+        float focus_start = 3.0f;                   // blur starts at this multiple of the focus distance
+        float focus_full = 4.0f;                    // and is full at this multiple of the start
+    };
+    // True when the passes were recorded; the colour is back in RENDER_TARGET.
+    bool record_dof(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                    const DofInputs& inputs, std::uint64_t frame_index,
+                    unsigned frames_in_flight);
+    [[nodiscard]] bool dof_ready() const noexcept { return ready_ && dof_blur_pipeline_ && dof_apply_pipeline_; }
+
+    // Camera motion blur on the scene EFB from the rotation between the previous
+    // and current scene cameras (see the MOTION BLUR notes in post_process.hlsl),
+    // blended over the EFB colour with the depth of field apply.
+    struct MotionBlurInputs {
+        ID3D12Resource* color = nullptr;            // the EFB colour, in RENDER_TARGET
+        D3D12_CPU_DESCRIPTOR_HANDLE color_rtv{};
+        unsigned width = 0;
+        unsigned height = 0;
+        float viewport[4]{};                        // scene viewport x, y, w, h
+        float proj[4]{};                            // GX projection A, B, C, D
+        float rotation[9]{};                        // previous view rotation * current^T, row-major
+        float shutter = 0.5f;                       // fraction of the frame's motion smeared
+        float max_length = 32.0f;                   // pixels
+    };
+    bool record_motion_blur(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                            const MotionBlurInputs& inputs, std::uint64_t frame_index,
+                            unsigned frames_in_flight);
+    [[nodiscard]] bool motion_blur_ready() const noexcept { return ready_ && motion_blur_pipeline_ && dof_apply_pipeline_; }
 
     [[nodiscard]] const PostProcessSettings& settings() const noexcept { return settings_; }
 
@@ -246,6 +305,23 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> ssao_apply_pipeline_;  // dest *= source
     Target ssao_ao_;
     Target ssao_blur_;
+    bool create_pipeline_over(D3D12_SHADER_BYTECODE vs, D3D12_SHADER_BYTECODE ps,
+                              DXGI_FORMAT format,
+                              Microsoft::WRL::ComPtr<ID3D12PipelineState>& out);
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_blur_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_apply_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_blur_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> ssr_pipeline_;
+    // The colour pass shared by depth of field and motion blur: `pipeline`
+    // reads `inputs` (the EFB colour among them) into scene_temp_, which is
+    // then blended over the EFB colour.
+    void record_scene_blend(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                            ID3D12PipelineState* pipeline, ID3D12Resource* color,
+                            D3D12_CPU_DESCRIPTOR_HANDLE color_rtv,
+                            std::initializer_list<ID3D12Resource*> inputs,
+                            std::initializer_list<DXGI_FORMAT> formats,
+                            const D3D12_VIEWPORT& viewport, const Constants& constants);  // dest = lerp(dest, source, source alpha), rgb only
+    Target scene_temp_;                 // reflection, depth of field and motion blur result
     Target final_;                      // window-sized scene handed to the look pass
     Target bloom_down_targets_[kBloomLevels];
     Target bloom_up_targets_[kBloomLevels - 1u];

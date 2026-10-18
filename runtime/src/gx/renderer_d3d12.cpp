@@ -333,6 +333,7 @@ PostProcessSettings post_process_settings_from(const RenderConfig& cfg) noexcept
     post.saturation = static_cast<std::uint8_t>(std::min(cfg.saturation, 200u));
     post.contrast = static_cast<std::uint8_t>(std::min(cfg.contrast, 200u));
     post.vignette = static_cast<std::uint8_t>(std::min(cfg.vignette, 100u));
+    post.lens_flare = static_cast<std::uint8_t>(std::min(cfg.lens_flare, 100u));
     return post;
 }
 
@@ -538,6 +539,11 @@ unsigned pending_settings_changes() {
     changes += d.contrast != live.contrast;
     changes += d.vignette != live.vignette;
     changes += d.ssao != live.ssao;
+    changes += d.contact_shadows != live.contact_shadows;
+    changes += d.depth_of_field != live.depth_of_field;
+    changes += d.motion_blur != live.motion_blur;
+    changes += d.reflections != live.reflections;
+    changes += d.lens_flare != live.lens_flare;
     changes += d.anisotropic_filtering != live.anisotropic_filtering;
     changes += d.enhanced_mipmaps != live.enhanced_mipmaps;
     changes += d.per_pixel_lighting != live.per_pixel_lighting;
@@ -695,7 +701,7 @@ unsigned graphics_row(unsigned row) {
 unsigned native_settings_row_count(unsigned tab) {
     switch (tab % kNativeSettingsTabCount) {
     case 0: return 8u;
-    case 1: return fsr3_available() ? 14u : 13u;
+    case 1: return fsr3_available() ? 19u : 18u;
     case 2: return controls_row_count();
     case 3: return 6u;
     case 4: return 2u;
@@ -799,6 +805,11 @@ void apply_native_settings_draft() {
     applied.contrast = next.contrast;
     applied.vignette = next.vignette;
     applied.ssao = next.ssao;
+    applied.contact_shadows = next.contact_shadows;
+    applied.depth_of_field = next.depth_of_field;
+    applied.motion_blur = next.motion_blur;
+    applied.reflections = next.reflections;
+    applied.lens_flare = next.lens_flare;
     applied.anisotropic_filtering = next.anisotropic_filtering;
     applied.enhanced_mipmaps = next.enhanced_mipmaps;
     applied.per_pixel_lighting = next.per_pixel_lighting;
@@ -1075,6 +1086,26 @@ void adjust_native_setting_unlogged(int delta) {
         case 13:
             draft.ssao = static_cast<unsigned>(std::clamp(
                 static_cast<int>(std::min(draft.ssao, 100u)) + delta * 5, 0, 100));
+            break;
+        case 14:
+            draft.contact_shadows = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.contact_shadows, 100u)) + delta * 5, 0, 100));
+            break;
+        case 15:
+            draft.depth_of_field = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.depth_of_field, 100u)) + delta * 5, 0, 100));
+            break;
+        case 16:
+            draft.motion_blur = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.motion_blur, 100u)) + delta * 5, 0, 100));
+            break;
+        case 17:
+            draft.reflections = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.reflections, 100u)) + delta * 5, 0, 100));
+            break;
+        case 18:
+            draft.lens_flare = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.lens_flare, 100u)) + delta * 5, 0, 100));
             break;
         default: return;
         }
@@ -4064,7 +4095,8 @@ void RendererD3D12::sync_post_process_settings() {
     if (next.aa != current.aa || next.smaa_quality != current.smaa_quality ||
         next.upscaler != current.upscaler || next.sharpness != current.sharpness ||
         next.bloom != current.bloom || next.saturation != current.saturation ||
-        next.contrast != current.contrast || next.vignette != current.vignette) {
+        next.contrast != current.contrast || next.vignette != current.vignette ||
+        next.lens_flare != current.lens_flare) {
         post_process_.apply_settings(next, frame_index_, kFramesInFlight);
     }
 }
@@ -5713,6 +5745,7 @@ bool RendererD3D12::quit_requested() const noexcept {
 
 void RendererD3D12::invalidate_gx_bindings() {
     bound_pipeline_ = nullptr;
+    bound_stencil_ref_ = 0xFFFFu;
     bound_vs_constants_ = 0;
     bound_ps_constants_ = 0;
     bound_texture_table_ = {};
@@ -7068,6 +7101,7 @@ bool RendererD3D12::scene_temporal_begin(float& jitter_x, float& jitter_y) {
     jitter_x = 0.0f;
     jitter_y = 0.0f;
     scene_projection_valid_ = false;
+    scene_light_valid_ = false;
     scene_temporal_ = false;
     if (!temporal_mode() || output_efb_active_) {
         temporal_.reset();
@@ -7125,14 +7159,60 @@ void RendererD3D12::set_scene_projection(const float abcd[4], const float viewpo
     scene_projection_valid_ = true;
 }
 
-bool RendererD3D12::record_scene_ssao() {
+void RendererD3D12::set_scene_light(const float position[3]) noexcept {
+    std::memcpy(scene_light_, position, sizeof(scene_light_));
+    scene_light_valid_ = true;
+}
+
+void RendererD3D12::set_scene_view(const float* view) noexcept {
+    std::memcpy(scene_prev_view_, scene_view_, sizeof(scene_prev_view_));
+    scene_prev_view_valid_ = scene_view_valid_;
+    scene_view_valid_ = view != nullptr;
+    if (view != nullptr) {
+        std::memcpy(scene_view_, view, sizeof(scene_view_));
+    }
+}
+
+namespace {
+float env_float(const char* name, float fallback, float minimum) {
+    char v[32]{};
+    std::size_t n = 0;
+    if (getenv_s(&n, v, sizeof(v), name) == 0 && n > 1) {
+        return std::max(minimum, static_cast<float>(std::atof(v)));
+    }
+    return fallback;
+}
+}  // namespace
+
+bool RendererD3D12::record_scene_effects() {
     if (!scene_projection_valid_ || output_efb_active_ || replay_recording_ ||
-        !post_process_.ready() || !post_process_.ssao_ready() || !efb_color_ || !efb_depth_ ||
-        command_list_ == nullptr) {
+        !post_process_.ready() || !efb_color_ || !efb_depth_ || command_list_ == nullptr) {
         return false;
     }
     const RenderConfig cfg = get_render_config();
-    if (cfg.ssao == 0u) {
+    const bool shadows = cfg.contact_shadows != 0u && scene_light_valid_;
+    const bool occlusion = post_process_.ssao_ready() && (cfg.ssao != 0u || shadows);
+    const bool dof = post_process_.dof_ready() && cfg.depth_of_field != 0u;
+    const bool reflections = post_process_.ssr_ready() && cfg.reflections != 0u;
+    // Previous view rotation * current^T, which carries a current view ray into
+    // the previous camera. Skipped on a camera cut (more than 20 degrees).
+    float rotation[9]{};
+    bool motion = post_process_.motion_blur_ready() && cfg.motion_blur != 0u &&
+                  scene_view_valid_ && scene_prev_view_valid_;
+    if (motion) {
+        for (unsigned r = 0; r < 3u; ++r) {
+            for (unsigned c = 0; c < 3u; ++c) {
+                float sum = 0.0f;
+                for (unsigned k = 0; k < 3u; ++k) {
+                    sum += scene_prev_view_[r * 4u + k] * scene_view_[c * 4u + k];
+                }
+                rotation[r * 3u + c] = sum;
+            }
+        }
+        const float cos_angle = 0.5f * (rotation[0] + rotation[4] + rotation[8] - 1.0f);
+        motion = std::isfinite(cos_angle) && cos_angle > 0.94f && cos_angle < 0.999999f;
+    }
+    if (!occlusion && !reflections && !dof && !motion) {
         return false;
     }
     const float scale = static_cast<float>(efb_scale_);
@@ -7146,16 +7226,16 @@ bool RendererD3D12::record_scene_ssao() {
     in.camera_near = scene_camera_[0];
     in.camera_far = scene_camera_[1];
     for (unsigned i = 0; i < 4u; ++i) in.proj[i] = scene_proj_[i];
-    static const float radius = [] {
-        char v[32]{};
-        std::size_t n = 0;
-        if (getenv_s(&n, v, sizeof(v), "GALAXY_SSAO_RADIUS") == 0 && n > 1) {
-            return std::max(1.0f, static_cast<float>(std::atof(v)));
-        }
-        return 120.0f;
-    }();
+    static const float radius = env_float("GALAXY_SSAO_RADIUS", 120.0f, 1.0f);
     in.radius = radius;
     in.strength = static_cast<float>(std::min(cfg.ssao, 100u)) / 100.0f;
+    if (shadows) {
+        static const float shadow_length = env_float("GALAXY_CONTACT_SHADOW_LENGTH", 80.0f, 1.0f);
+        std::memcpy(in.light, scene_light_, sizeof(in.light));
+        in.shadow_strength = static_cast<float>(std::min(cfg.contact_shadows, 100u)) / 100.0f;
+        in.shadow_length = shadow_length;
+        in.shadow_thickness = shadow_length * 0.4f;
+    }
 
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -7166,8 +7246,47 @@ bool RendererD3D12::record_scene_ssao() {
     command_list_->ResourceBarrier(1, &bar);
     ID3D12DescriptorHeap* heaps[] = {srv_ring_.heap(), sampler_heap_.Get()};
     command_list_->SetDescriptorHeaps(2, heaps);
-    const bool recorded = post_process_.record_ssao(
+    bool recorded = occlusion && post_process_.record_ssao(
         command_list_.Get(), srv_ring_, in, frame_index_, kFramesInFlight);
+    if (reflections) {
+        static const float distance = env_float("GALAXY_REFLECTION_DISTANCE", 2000.0f, 10.0f);
+        PostProcessor::SsaoInputs s = in;
+        s.radius = distance;
+        s.strength = static_cast<float>(std::min(cfg.reflections, 100u)) / 100.0f;
+        recorded |= post_process_.record_ssr(
+            command_list_.Get(), srv_ring_, efb_color_.Get(), s, frame_index_, kFramesInFlight);
+    }
+    if (dof) {
+        PostProcessor::DofInputs d{};
+        d.depth = efb_depth_.Get();
+        d.color = efb_color_.Get();
+        d.color_rtv = efb_rtv_;
+        d.width = in.width;
+        d.height = in.height;
+        std::memcpy(d.viewport, in.viewport, sizeof(d.viewport));
+        d.camera_near = in.camera_near;
+        d.camera_far = in.camera_far;
+        // Full strength blurs the backdrop by 2% of the viewport height.
+        d.max_radius = in.viewport[3] * 0.02f *
+                       static_cast<float>(std::min(cfg.depth_of_field, 100u)) / 100.0f;
+        recorded |= post_process_.record_dof(
+            command_list_.Get(), srv_ring_, d, frame_index_, kFramesInFlight);
+    }
+    if (motion) {
+        PostProcessor::MotionBlurInputs m{};
+        m.color = efb_color_.Get();
+        m.color_rtv = efb_rtv_;
+        m.width = in.width;
+        m.height = in.height;
+        std::memcpy(m.viewport, in.viewport, sizeof(m.viewport));
+        std::memcpy(m.proj, in.proj, sizeof(m.proj));
+        std::memcpy(m.rotation, rotation, sizeof(m.rotation));
+        // 100% is a full-frame (360 degree) shutter; the default 50 is the film 180.
+        m.shutter = static_cast<float>(std::min(cfg.motion_blur, 100u)) / 100.0f;
+        m.max_length = in.viewport[3] * 0.05f;
+        recorded |= post_process_.record_motion_blur(
+            command_list_.Get(), srv_ring_, m, frame_index_, kFramesInFlight);
+    }
     std::swap(bar.Transition.StateBefore, bar.Transition.StateAfter);
     command_list_->ResourceBarrier(1, &bar);
     // The upscaler and output-EFB paths do the same after their own passes.
@@ -7630,8 +7749,10 @@ void RendererD3D12::clear_efb(
         // REVERSED-Z buffer: GX z24 (near=0, far=2^24) inverts into the D3D depth value.
         // GX_MAX_Z24 (0xFFFFFF = "clear to farthest") becomes about 0.0 here, which the flipped
         // GEQUAL-style funcs pass.
+        // The material stencil clears with the depth it describes.
         command_list_->ClearDepthStencilView(
-            dsv, D3D12_CLEAR_FLAG_DEPTH, clear.reversed_depth, 0, num_rects, rects);
+            dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clear.reversed_depth, 0,
+            num_rects, rects);
     }
 }
 
@@ -7647,6 +7768,10 @@ void RendererD3D12::draw(const DrawCall& call) {
     if (call.pipeline != bound_pipeline_) {
         command_list_->SetPipelineState(call.pipeline);
         bound_pipeline_ = call.pipeline;
+    }
+    if (call.stencil_ref != bound_stencil_ref_) {
+        command_list_->OMSetStencilRef(call.stencil_ref);
+        bound_stencil_ref_ = call.stencil_ref;
     }
     if (call.vs_constants &&
         call.vs_constants != bound_vs_constants_) {
@@ -9508,6 +9633,21 @@ std::string native_settings_row_text(
             return text;
         case 13:
             std::snprintf(text, sizeof(text), "AMBIENT OCCLUSION: %u%%", std::min(render.ssao, 100u));
+            return text;
+        case 14:
+            std::snprintf(text, sizeof(text), "CONTACT SHADOWS: %u%%", std::min(render.contact_shadows, 100u));
+            return text;
+        case 15:
+            std::snprintf(text, sizeof(text), "DEPTH OF FIELD: %u%%", std::min(render.depth_of_field, 100u));
+            return text;
+        case 16:
+            std::snprintf(text, sizeof(text), "MOTION BLUR: %u%%", std::min(render.motion_blur, 100u));
+            return text;
+        case 17:
+            std::snprintf(text, sizeof(text), "REFLECTIONS: %u%%", std::min(render.reflections, 100u));
+            return text;
+        case 18:
+            std::snprintf(text, sizeof(text), "LENS FLARE: %u%%", std::min(render.lens_flare, 100u));
             return text;
         default:
             return {};

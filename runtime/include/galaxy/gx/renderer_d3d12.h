@@ -367,6 +367,9 @@ struct DrawCall {
     // Render target 1 in temporal scenes: 1 the motion target (opaque
     // motion writers), 2 the reactive mask (blended draws), 0 none.
     std::uint8_t aux_target = 0;
+    // Material class written to the EFB stencil where the draw writes depth
+    // (kMaterial* in shader_keys.h).
+    std::uint8_t stencil_ref = 0;
     // Interpolated redraw: the scene transform record whose VS constants a
     // sub-frame replaces, -1 for draws outside the 3D scene.
     std::int32_t replay_record = -1;
@@ -501,9 +504,19 @@ public:
     // draw; with set_scene_camera this makes the scene's depth usable for ambient
     // occlusion. Cleared at every scene begin.
     void set_scene_projection(const float abcd[4], const float viewport[4]) noexcept;
-    // At scene end: ambient occlusion from the EFB depth, multiplied onto the EFB
-    // colour. True when it recorded (GX bindings are then stale).
-    [[nodiscard]] bool record_scene_ssao();
+    // View-space position of the light the scene's contact shadows are cast
+    // from (the XF light position, which the game places in view space).
+    // Cleared at every scene begin.
+    void set_scene_light(const float position[3]) noexcept;
+    // The game camera's view matrix (3x4, row-major) for the scene that just
+    // began, or null when it is unknown; the previous scene's is kept for
+    // camera motion blur.
+    void set_scene_view(const float* view) noexcept;
+    // At scene end: ambient occlusion and contact shadows from the EFB depth,
+    // multiplied onto the EFB colour, then reflections, depth of field and
+    // camera motion blur. True when it
+    // recorded (GX bindings are then stale).
+    [[nodiscard]] bool record_scene_effects();
     // GX copy-clear: color from the latched AR/GB regs, depth from z24
     // (converted z24 / 0xFFFFFF into the D24 target).  The clear is scoped to
     // the given rect in unscaled EFB pixels (w==0 -> full target), matching
@@ -852,6 +865,12 @@ private:
     float scene_proj_[4]{};
     float scene_viewport_[4]{};
     bool scene_projection_valid_ = false;
+    float scene_light_[3]{};
+    bool scene_light_valid_ = false;
+    float scene_view_[12]{};
+    float scene_prev_view_[12]{};
+    bool scene_view_valid_ = false;
+    bool scene_prev_view_valid_ = false;
     Microsoft::WRL::ComPtr<ID3D12Resource> motion_target_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> motion_rtv_heap_;
     D3D12_CPU_DESCRIPTOR_HANDLE motion_rtv_{};
@@ -1042,6 +1061,7 @@ private:
     // The vertex view is part of the set: its GPU VA comes from the per-frame
     // vertex ring, so a stale entry can never survive that rewind.
     ID3D12PipelineState* bound_pipeline_ = nullptr;
+    std::uint16_t bound_stencil_ref_ = 0xFFFFu;  // 0xFFFF: unknown
     D3D12_GPU_VIRTUAL_ADDRESS bound_vs_constants_ = 0;
     D3D12_GPU_VIRTUAL_ADDRESS bound_ps_constants_ = 0;
     D3D12_GPU_DESCRIPTOR_HANDLE bound_texture_table_{};
