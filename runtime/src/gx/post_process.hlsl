@@ -633,6 +633,7 @@ float4 PSMain(FullscreenOut i) : SV_Target {
         const float2 end = clamp(SsaoProject(origin + ray * max(last_t, 0.05)),
                                  g_params.xy + 2.0, g_params.xy + g_params.zw - 2.0);
         const float3 env = colorTex.SampleLevel(LinearSampler, end * g_rt_metrics.xy, 0).rgb;
+        if (asfloat(g_con2.x) > 0.5) return float4(0.0, 1.0, 1.0, saturate(strength * toward * 0.9));
         return float4(env, strength * toward * 0.3);
     }
     float lo_t = prev_t;
@@ -644,7 +645,9 @@ float4 PSMain(FullscreenOut i) : SV_Target {
         if (zq > 0.0 && -S.z > zq) hi_t = mid; else lo_t = mid;
     }
     const float2 hit = SsaoProject(origin + ray * hi_t);
-    const float2 edge = min(hit - g_params.xy, g_params.xy + g_params.zw - hit) / (0.1 * g_params.zw);
+    // Fade only in the last 3% of the viewport: a reflected object high on the
+    // screen (Mario mid-jump) must not lose its reflection to the edge fade.
+    const float2 edge = min(hit - g_params.xy, g_params.xy + g_params.zw - hit) / (0.03 * g_params.zw);
     const float fade = saturate(min(edge.x, edge.y)) * (1.0 - hi_t * hi_t) * toward;
     const float3 colour = colorTex.SampleLevel(LinearSampler, hit * g_rt_metrics.xy, 0).rgb;
     // The environment fallback is the floor under a confident hit's weight, so the
@@ -655,6 +658,13 @@ float4 PSMain(FullscreenOut i) : SV_Target {
                              g_params.xy + 2.0, g_params.xy + g_params.zw - 2.0) * g_rt_metrics.xy, 0).rgb;
     const float weight = max(fade * hit_conf, env_floor);
     const float3 mixed = lerp(env, colour, saturate(fade * hit_conf / max(weight, 1e-4)));
+    // g_con2.x = 1 (GALAXY_REFLECTION_DEBUG): show how each pixel resolved. Magenta
+    // is a hit, yellow a soft hit, cyan the environment fallback; the strength shows
+    // as the alpha, so rays that vanish with distance are easy to see.
+    if (asfloat(g_con2.x) > 0.5) {
+        const float3 key = hit_conf >= 0.999 ? float3(1.0, 0.0, 1.0) : float3(1.0, 1.0, 0.0);
+        return float4(key, saturate(strength * weight * 3.0));
+    }
     return float4(mixed, strength * weight);
 }
 #endif

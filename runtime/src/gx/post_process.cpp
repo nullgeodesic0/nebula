@@ -1230,6 +1230,12 @@ bool PostProcessor::record_ssr(ID3D12GraphicsCommandList* list, DescriptorRing& 
     c.con1[1] = bits(in.proj[3]);
     c.con1[2] = bits(in.radius);
     c.con1[3] = bits(in.strength);
+    static const bool debug = [] {
+        char v[8]{};
+        std::size_t n = 0;
+        return getenv_s(&n, v, sizeof(v), "GALAXY_REFLECTION_DEBUG") == 0 && n > 1;
+    }();
+    c.con2[0] = bits(debug ? 1.0f : 0.0f);
     const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
                             static_cast<float>(in.height), 0.0f, 1.0f};
     record_scene_blend(list, srv_ring, ssr_pipeline_.Get(), color, in.color_rtv,
