@@ -169,6 +169,28 @@ public:
                      unsigned frames_in_flight);
     [[nodiscard]] bool ssao_ready() const noexcept { return ready_ && ssao_ao_pipeline_ && ssao_blur_pipeline_ && ssao_apply_pipeline_; }
 
+    // Far-field depth of field on the scene EFB (see the DOF notes in
+    // post_process.hlsl): a gather blur whose radius grows with distance past
+    // the focus, blended over the EFB colour (alpha untouched).
+    struct DofInputs {
+        ID3D12Resource* depth = nullptr;            // R24G8 typeless, in PIXEL_SHADER_RESOURCE
+        ID3D12Resource* color = nullptr;            // the EFB colour, in RENDER_TARGET
+        D3D12_CPU_DESCRIPTOR_HANDLE color_rtv{};
+        unsigned width = 0;                         // EFB resource size
+        unsigned height = 0;
+        float viewport[4]{};                        // scene viewport x, y, w, h
+        float camera_near = 1.0f;
+        float camera_far = 1000.0f;
+        float max_radius = 8.0f;                    // blur radius in pixels at full blur
+        float focus_start = 3.0f;                   // blur starts at this multiple of the focus distance
+        float focus_full = 4.0f;                    // and is full at this multiple of the start
+    };
+    // True when the passes were recorded; the colour is back in RENDER_TARGET.
+    bool record_dof(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                    const DofInputs& inputs, std::uint64_t frame_index,
+                    unsigned frames_in_flight);
+    [[nodiscard]] bool dof_ready() const noexcept { return ready_ && dof_blur_pipeline_ && dof_apply_pipeline_; }
+
     [[nodiscard]] const PostProcessSettings& settings() const noexcept { return settings_; }
 
     // Takes new settings between frames on the render thread. A quality change rebuilds the two SMAA
@@ -252,6 +274,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> ssao_apply_pipeline_;  // dest *= source
     Target ssao_ao_;
     Target ssao_blur_;
+    bool create_pipeline_over(D3D12_SHADER_BYTECODE vs, D3D12_SHADER_BYTECODE ps,
+                              DXGI_FORMAT format,
+                              Microsoft::WRL::ComPtr<ID3D12PipelineState>& out);
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_blur_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_apply_pipeline_;  // dest = lerp(dest, source, source alpha), rgb only
+    Target dof_;
     Target final_;                      // window-sized scene handed to the look pass
     Target bloom_down_targets_[kBloomLevels];
     Target bloom_up_targets_[kBloomLevels - 1u];

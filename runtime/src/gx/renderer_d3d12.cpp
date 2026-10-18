@@ -539,6 +539,7 @@ unsigned pending_settings_changes() {
     changes += d.vignette != live.vignette;
     changes += d.ssao != live.ssao;
     changes += d.contact_shadows != live.contact_shadows;
+    changes += d.depth_of_field != live.depth_of_field;
     changes += d.anisotropic_filtering != live.anisotropic_filtering;
     changes += d.enhanced_mipmaps != live.enhanced_mipmaps;
     changes += d.per_pixel_lighting != live.per_pixel_lighting;
@@ -696,7 +697,7 @@ unsigned graphics_row(unsigned row) {
 unsigned native_settings_row_count(unsigned tab) {
     switch (tab % kNativeSettingsTabCount) {
     case 0: return 8u;
-    case 1: return fsr3_available() ? 15u : 14u;
+    case 1: return fsr3_available() ? 16u : 15u;
     case 2: return controls_row_count();
     case 3: return 6u;
     case 4: return 2u;
@@ -801,6 +802,7 @@ void apply_native_settings_draft() {
     applied.vignette = next.vignette;
     applied.ssao = next.ssao;
     applied.contact_shadows = next.contact_shadows;
+    applied.depth_of_field = next.depth_of_field;
     applied.anisotropic_filtering = next.anisotropic_filtering;
     applied.enhanced_mipmaps = next.enhanced_mipmaps;
     applied.per_pixel_lighting = next.per_pixel_lighting;
@@ -1081,6 +1083,10 @@ void adjust_native_setting_unlogged(int delta) {
         case 14:
             draft.contact_shadows = static_cast<unsigned>(std::clamp(
                 static_cast<int>(std::min(draft.contact_shadows, 100u)) + delta * 5, 0, 100));
+            break;
+        case 15:
+            draft.depth_of_field = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.depth_of_field, 100u)) + delta * 5, 0, 100));
             break;
         default: return;
         }
@@ -7148,15 +7154,16 @@ float env_float(const char* name, float fallback, float minimum) {
 }
 }  // namespace
 
-bool RendererD3D12::record_scene_ssao() {
+bool RendererD3D12::record_scene_effects() {
     if (!scene_projection_valid_ || output_efb_active_ || replay_recording_ ||
-        !post_process_.ready() || !post_process_.ssao_ready() || !efb_color_ || !efb_depth_ ||
-        command_list_ == nullptr) {
+        !post_process_.ready() || !efb_color_ || !efb_depth_ || command_list_ == nullptr) {
         return false;
     }
     const RenderConfig cfg = get_render_config();
     const bool shadows = cfg.contact_shadows != 0u && scene_light_valid_;
-    if (cfg.ssao == 0u && !shadows) {
+    const bool occlusion = post_process_.ssao_ready() && (cfg.ssao != 0u || shadows);
+    const bool dof = post_process_.dof_ready() && cfg.depth_of_field != 0u;
+    if (!occlusion && !dof) {
         return false;
     }
     const float scale = static_cast<float>(efb_scale_);
@@ -7190,8 +7197,24 @@ bool RendererD3D12::record_scene_ssao() {
     command_list_->ResourceBarrier(1, &bar);
     ID3D12DescriptorHeap* heaps[] = {srv_ring_.heap(), sampler_heap_.Get()};
     command_list_->SetDescriptorHeaps(2, heaps);
-    const bool recorded = post_process_.record_ssao(
+    bool recorded = occlusion && post_process_.record_ssao(
         command_list_.Get(), srv_ring_, in, frame_index_, kFramesInFlight);
+    if (dof) {
+        PostProcessor::DofInputs d{};
+        d.depth = efb_depth_.Get();
+        d.color = efb_color_.Get();
+        d.color_rtv = efb_rtv_;
+        d.width = in.width;
+        d.height = in.height;
+        std::memcpy(d.viewport, in.viewport, sizeof(d.viewport));
+        d.camera_near = in.camera_near;
+        d.camera_far = in.camera_far;
+        // Full strength blurs the backdrop by 2% of the viewport height.
+        d.max_radius = in.viewport[3] * 0.02f *
+                       static_cast<float>(std::min(cfg.depth_of_field, 100u)) / 100.0f;
+        recorded |= post_process_.record_dof(
+            command_list_.Get(), srv_ring_, d, frame_index_, kFramesInFlight);
+    }
     std::swap(bar.Transition.StateBefore, bar.Transition.StateAfter);
     command_list_->ResourceBarrier(1, &bar);
     // The upscaler and output-EFB paths do the same after their own passes.
@@ -9535,6 +9558,9 @@ std::string native_settings_row_text(
             return text;
         case 14:
             std::snprintf(text, sizeof(text), "CONTACT SHADOWS: %u%%", std::min(render.contact_shadows, 100u));
+            return text;
+        case 15:
+            std::snprintf(text, sizeof(text), "DEPTH OF FIELD: %u%%", std::min(render.depth_of_field, 100u));
             return text;
         default:
             return {};

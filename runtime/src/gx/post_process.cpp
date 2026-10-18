@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <utility>
 
 // SMAA lookup textures (third_party/smaa, MIT).
 #include "AreaTex.h"
@@ -41,6 +42,8 @@
 #include "post_ssao_ao_ps.h"
 #include "post_ssao_blur_ps.h"
 #include "post_ssao_apply_ps.h"
+#include "post_dof_blur_ps.h"
+#include "post_dof_apply_ps.h"
 
 namespace galaxy::gx {
 namespace {
@@ -62,9 +65,11 @@ constexpr DXGI_FORMAT kEdgesFormat = DXGI_FORMAT_R8G8_UNORM;
 constexpr DXGI_FORMAT kStencilFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 // Slots 0-3: SMAA/AA/scaling targets. 4: final_. 5-9: bloom down levels.
 // 10-13: bloom up levels.
-constexpr unsigned kRtvSlots = 16u;
+// 14-15: ambient occlusion. 16: depth of field.
+constexpr unsigned kRtvSlots = 20u;
 constexpr unsigned kSsaoAoSlot = 14u;
 constexpr unsigned kSsaoBlurSlot = 15u;
+constexpr unsigned kDofSlot = 16u;
 // R ambient occlusion, G contact shadow visibility.
 constexpr DXGI_FORMAT kSsaoFormat = DXGI_FORMAT_R8G8_UNORM;
 constexpr DXGI_FORMAT kDepthSrvFormat = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
@@ -199,6 +204,36 @@ bool PostProcessor::create_pipeline_multiply(D3D12_SHADER_BYTECODE vs, D3D12_SHA
     rt.DestBlendAlpha = D3D12_BLEND_ONE;
     rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
     rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.SampleMask = UINT_MAX;
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = format;
+    pd.SampleDesc.Count = 1;
+    return SUCCEEDED(device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
+}
+
+// dest.rgb = lerp(dest.rgb, source.rgb, source.a), alpha untouched: the depth
+// of field apply.
+bool PostProcessor::create_pipeline_over(D3D12_SHADER_BYTECODE vs, D3D12_SHADER_BYTECODE ps,
+                                         DXGI_FORMAT format,
+                                         ComPtr<ID3D12PipelineState>& out) {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = root_signature_.Get();
+    pd.VS = vs;
+    pd.PS = ps;
+    auto& rt = pd.BlendState.RenderTarget[0];
+    rt.BlendEnable = TRUE;
+    rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    rt.BlendOp = D3D12_BLEND_OP_ADD;
+    rt.SrcBlendAlpha = D3D12_BLEND_ZERO;
+    rt.DestBlendAlpha = D3D12_BLEND_ONE;
+    rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN |
+                               D3D12_COLOR_WRITE_ENABLE_BLUE;
     pd.SampleMask = UINT_MAX;
     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -358,6 +393,12 @@ bool PostProcessor::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
         ssao_blur_pipeline_.Reset();
         ssao_apply_pipeline_.Reset();
     }
+    if (!(create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_dof_blur_ps)), kColorFormat, 0, dof_blur_pipeline_) &&
+          create_pipeline_over(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_dof_apply_ps)), kColorFormat, dof_apply_pipeline_))) {
+        std::cerr << "[post-process] depth of field pipelines failed; it stays off\n";
+        dof_blur_pipeline_.Reset();
+        dof_apply_pipeline_.Reset();
+    }
     fault_selftest_ = test_fault("selftest");
     fault_targets_ = test_fault("targets");
     const bool smaa_pipelines = !test_fault("smaa") &&
@@ -435,6 +476,9 @@ void PostProcessor::shutdown() noexcept {
     ssao_apply_pipeline_.Reset();
     ssao_ao_ = {};
     ssao_blur_ = {};
+    dof_blur_pipeline_.Reset();
+    dof_apply_pipeline_.Reset();
+    dof_ = {};
     final_ = {};
     for (auto& t : bloom_down_targets_) t = {};
     for (auto& t : bloom_up_targets_) t = {};
@@ -1061,6 +1105,52 @@ bool PostProcessor::record_ssao(ID3D12GraphicsCommandList* list, DescriptorRing&
     D3D12_CPU_DESCRIPTOR_HANDLE color = in.color_rtv;
     list->OMSetRenderTargets(1, &color, FALSE, nullptr);
     draw(list, srv_ring, ssao_apply_pipeline_.Get(), {ssao_blur_.resource.Get()}, {kSsaoFormat}, vp, c);
+    return true;
+}
+
+bool PostProcessor::record_dof(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                               const DofInputs& in, std::uint64_t frame_index,
+                               unsigned frames_in_flight) {
+    if (!dof_ready() || in.depth == nullptr || in.color == nullptr || in.width == 0u ||
+        in.height == 0u ||
+        !ensure_target(dof_, in.width, in.height, kColorFormat, kDofSlot,
+                       frame_index, frames_in_flight)) {
+        return false;
+    }
+    Constants c{};
+    c.rt_metrics[0] = 1.0f / static_cast<float>(in.width);
+    c.rt_metrics[1] = 1.0f / static_cast<float>(in.height);
+    c.rt_metrics[2] = static_cast<float>(in.width);
+    c.rt_metrics[3] = static_cast<float>(in.height);
+    for (unsigned i = 0; i < 4u; ++i) c.params[i] = in.viewport[i];
+    c.con0[0] = bits(in.camera_near);
+    c.con0[1] = bits(in.camera_far);
+    c.con1[0] = bits(in.max_radius);
+    c.con1[1] = bits(in.focus_start);
+    c.con1[2] = bits(in.focus_full);
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
+                            static_cast<float>(in.height), 0.0f, 1.0f};
+    list->SetGraphicsRootSignature(root_signature_.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    D3D12_RESOURCE_BARRIER bar{};
+    bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    bar.Transition.pResource = in.color;
+    bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    bar.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    list->ResourceBarrier(1, &bar);
+    transition(list, dof_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    list->OMSetRenderTargets(1, &dof_.rtv, FALSE, nullptr);
+    draw(list, srv_ring, dof_blur_pipeline_.Get(), {in.depth, in.color},
+         {kDepthSrvFormat, kColorFormat}, vp, c);
+    transition(list, dof_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    std::swap(bar.Transition.StateBefore, bar.Transition.StateAfter);
+    list->ResourceBarrier(1, &bar);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE color = in.color_rtv;
+    list->OMSetRenderTargets(1, &color, FALSE, nullptr);
+    draw(list, srv_ring, dof_apply_pipeline_.Get(), {dof_.resource.Get()}, {kColorFormat}, vp, c);
     return true;
 }
 

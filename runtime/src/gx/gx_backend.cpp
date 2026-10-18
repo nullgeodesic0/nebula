@@ -6541,7 +6541,7 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
     // scene that begins before a display copy restores the render EFB.
     bool switched = false;
     if (marker == FifoMarker::SceneEnd) {
-        if (renderer_.record_scene_ssao()) {
+        if (renderer_.record_scene_effects()) {
             frame_bindings_dirty_ = true;
         }
         switched = renderer_.begin_output_efb();

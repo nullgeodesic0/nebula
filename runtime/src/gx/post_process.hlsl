@@ -269,7 +269,7 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 // apply treat both channels alike and the apply multiplies their product.
 #endif
 
-#if defined(PASS_SSAO_AO) || defined(PASS_SSAO_BLUR)
+#if defined(PASS_SSAO_AO) || defined(PASS_SSAO_BLUR) || defined(PASS_DOF_BLUR)
 Texture2D depthTex : register(t0);
 FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
 // Distance in front of the camera, or -1 where nothing was drawn.
@@ -443,6 +443,72 @@ float4 PSMain(FullscreenOut i) : SV_Target {
     const float2 terms = aoTex.Load(int3(int2(i.pos.xy), 0)).rg;
     const float ao = terms.r * terms.g;
     return float4(ao, ao, ao, 1.0);
+}
+#endif
+
+#if defined(PASS_DOF_BLUR)
+// Far-field depth of field on the scene EFB, the soft distant backdrop of a
+// modern platformer. The focus is the nearest depth among a few samples around
+// the viewport centre, where the camera keeps Mario. The blur radius is 0 up to
+// focus * g_con1.y and grows to g_con1.x pixels at focus * g_con1.y * g_con1.z;
+// the far plane (sky) and cleared pixels are fully blurred. Nothing nearer than
+// the focus is blurred, so the ground under Mario and the HUD stay sharp.
+// g_con0.xy = (near, far); g_params = scene viewport; the alpha output is the
+// blend weight the apply pass uses.
+Texture2D colorTex : register(t1);
+float DofCoc(float zv, float focus) {
+    const float far_z = asfloat(g_con0.y);
+    if (zv < 0.0) zv = far_z;
+    const float start = focus * asfloat(g_con1.y);
+    const float full = start * asfloat(g_con1.z);
+    return saturate((zv - start) / max(1e-3, full - start)) * asfloat(g_con1.x);
+}
+float DofFocus() {
+    const float2 c = g_params.xy + g_params.zw * 0.5;
+    const float2 offsets[5] = {
+        float2(0.0, 0.0), float2(-0.05, 0.0), float2(0.05, 0.0), float2(0.0, -0.08), float2(0.0, 0.08)};
+    float focus = asfloat(g_con0.y);
+    [unroll] for (int k = 0; k < 5; ++k) {
+        const float z = SsaoViewZ(int2(c + offsets[k] * g_params.zw));
+        if (z > 0.0) focus = min(focus, z);
+    }
+    return focus;
+}
+float4 PSMain(FullscreenOut i) : SV_Target {
+    const int2 p = int2(i.pos.xy);
+    if (!SsaoInView(p)) return float4(0.0, 0.0, 0.0, 0.0);
+    const float focus = DofFocus();
+    const float coc = DofCoc(SsaoViewZ(p), focus);
+    if (coc < 0.5) return float4(0.0, 0.0, 0.0, 0.0);
+    // Samples stay inside the scene viewport.
+    const float2 lo = (g_params.xy + 0.5) * g_rt_metrics.xy;
+    const float2 hi = (g_params.xy + g_params.zw - 0.5) * g_rt_metrics.xy;
+    const float2 centre = float2(p) + 0.5;
+    float3 sum = colorTex.Load(int3(p, 0)).rgb;
+    float weight = 1.0;
+    const int kTaps = 24;
+    [unroll] for (int k = 0; k < kTaps; ++k) {
+        const float t = (float(k) + 0.5) / float(kTaps);
+        const float r = coc * sqrt(t);
+        const float angle = float(k) * 2.39996323;
+        const float2 q = centre + float2(cos(angle), sin(angle)) * r;
+        // A sharper (nearer) sample only counts where its own blur reaches this
+        // pixel, so in-focus silhouettes do not smear into the backdrop.
+        const float cq = DofCoc(SsaoViewZ(int2(q)), focus);
+        const float w = saturate(1.0 + cq - r);
+        sum += colorTex.SampleLevel(LinearSampler, clamp(q * g_rt_metrics.xy, lo, hi), 0).rgb * w;
+        weight += w;
+    }
+    return float4(sum / weight, saturate(coc - 0.5));
+}
+#endif
+
+#if defined(PASS_DOF_APPLY)
+// Blended over the EFB colour by the pipeline's blend state.
+Texture2D dofTex : register(t0);
+FullscreenOut VSMain(uint id : SV_VertexID) { return FullscreenTriangle(id); }
+float4 PSMain(FullscreenOut i) : SV_Target {
+    return dofTex.Load(int3(int2(i.pos.xy), 0));
 }
 #endif
 

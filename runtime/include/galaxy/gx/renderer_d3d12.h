@@ -506,9 +506,9 @@ public:
     // Cleared at every scene begin.
     void set_scene_light(const float position[3]) noexcept;
     // At scene end: ambient occlusion and contact shadows from the EFB depth,
-    // multiplied onto the EFB colour. True when it recorded (GX bindings are
-    // then stale).
-    [[nodiscard]] bool record_scene_ssao();
+    // multiplied onto the EFB colour, then depth of field. True when it
+    // recorded (GX bindings are then stale).
+    [[nodiscard]] bool record_scene_effects();
     // GX copy-clear: color from the latched AR/GB regs, depth from z24
     // (converted z24 / 0xFFFFFF into the D24 target).  The clear is scoped to
     // the given rect in unscaled EFB pixels (w==0 -> full target), matching

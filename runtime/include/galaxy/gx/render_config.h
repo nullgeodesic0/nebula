@@ -127,6 +127,9 @@ struct RenderConfig {
     // key contact_shadows, env GALAXY_CONTACT_SHADOWS, world-unit ray length
     // GALAXY_CONTACT_SHADOW_LENGTH.
     unsigned contact_shadows     = 50;
+    // Far-field depth of field 0-100 (0 = off); key depth_of_field, env
+    // GALAXY_DEPTH_OF_FIELD.
+    unsigned depth_of_field      = 40;
 
     // Reserved for future DXR work. Clamped off until there is a real DXR
     // capability query, acceleration-structure path, ray PSO, and visible
