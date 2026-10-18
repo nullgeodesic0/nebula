@@ -533,6 +533,10 @@ unsigned pending_settings_changes() {
     changes += d.upscaler != live.upscaler;
     changes += d.temporal_quality != live.temporal_quality;
     changes += d.sharpness != live.sharpness;
+    changes += d.bloom != live.bloom;
+    changes += d.saturation != live.saturation;
+    changes += d.contrast != live.contrast;
+    changes += d.vignette != live.vignette;
     changes += d.anisotropic_filtering != live.anisotropic_filtering;
     changes += d.enhanced_mipmaps != live.enhanced_mipmaps;
     changes += d.per_pixel_lighting != live.per_pixel_lighting;
@@ -690,7 +694,7 @@ unsigned graphics_row(unsigned row) {
 unsigned native_settings_row_count(unsigned tab) {
     switch (tab % kNativeSettingsTabCount) {
     case 0: return 8u;
-    case 1: return fsr3_available() ? 9u : 8u;
+    case 1: return fsr3_available() ? 13u : 12u;
     case 2: return controls_row_count();
     case 3: return 6u;
     case 4: return 2u;
@@ -789,6 +793,10 @@ void apply_native_settings_draft() {
     applied.upscaler = next.upscaler;
     applied.temporal_quality = next.temporal_quality;
     applied.sharpness = next.sharpness;
+    applied.bloom = next.bloom;
+    applied.saturation = next.saturation;
+    applied.contrast = next.contrast;
+    applied.vignette = next.vignette;
     applied.anisotropic_filtering = next.anisotropic_filtering;
     applied.enhanced_mipmaps = next.enhanced_mipmaps;
     applied.per_pixel_lighting = next.per_pixel_lighting;
@@ -1046,6 +1054,22 @@ void adjust_native_setting_unlogged(int delta) {
         case 6: draft.enhanced_mipmaps = !draft.enhanced_mipmaps; break;
         case 7: draft.per_pixel_lighting = !draft.per_pixel_lighting; break;
         case 8: draft.hud_output_resolution = !draft.hud_output_resolution; break;
+        case 9:
+            draft.bloom = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.bloom, 100u)) + delta * 5, 0, 100));
+            break;
+        case 10:
+            draft.saturation = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.saturation, 200u)) + delta * 5, 0, 200));
+            break;
+        case 11:
+            draft.contrast = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.contrast, 200u)) + delta * 5, 50, 200));
+            break;
+        case 12:
+            draft.vignette = static_cast<unsigned>(std::clamp(
+                static_cast<int>(std::min(draft.vignette, 100u)) + delta * 5, 0, 100));
+            break;
         default: return;
         }
         return;
@@ -9404,6 +9428,18 @@ std::string native_settings_row_text(
         case 8:
             return std::string("2D LAYER: ") +
                    (render.hud_output_resolution ? "DISPLAY RES" : "INTERNAL RES");
+        case 9:
+            std::snprintf(text, sizeof(text), "BLOOM: %u%%", std::min(render.bloom, 100u));
+            return text;
+        case 10:
+            std::snprintf(text, sizeof(text), "SATURATION: %u%%", std::min(render.saturation, 200u));
+            return text;
+        case 11:
+            std::snprintf(text, sizeof(text), "CONTRAST: %u%%", std::clamp(render.contrast, 50u, 200u));
+            return text;
+        case 12:
+            std::snprintf(text, sizeof(text), "VIGNETTE: %u%%", std::min(render.vignette, 100u));
+            return text;
         default:
             return {};
         }
