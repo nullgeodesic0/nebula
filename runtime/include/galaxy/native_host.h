@@ -21,6 +21,7 @@
 #include <set>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -643,10 +644,43 @@ public:
         pe_finish_pending_.store(true, std::memory_order_release);
         wake_idle_simulation();
     }
+    // Each interrupting draw-sync token reaches the guest's handler in order. Galaxy's DrawSyncManager
+    // brackets every token with a CP FIFO breakpoint so the GPU stops until the handler has run; this
+    // GP does not stop, so a token completing while an earlier one is still pending waits in
+    // pe_token_backlog_ and is raised when the guest clears the interrupt. Overwriting the latch instead
+    // lost the earlier token's callback: the Star Pointer's depth peek (StarPointerPeekZ) never ran,
+    // and Star Bits, Pull Stars and Star Bit aiming ignored the pointer.
     void raise_pe_token(std::uint16_t token, bool interrupt) {
-        pe_token_value_.store(token, std::memory_order_release);
-        if (interrupt) {
+        {
+            const std::lock_guard<std::mutex> lock(pe_token_mutex_);
+            if (pe_token_pending_.load(std::memory_order_acquire)) {
+                if (interrupt && pe_token_backlog_.size() < kPeTokenBacklogLimit) {
+                    pe_token_backlog_.push_back(token);
+                }
+                return;
+            }
+            pe_token_value_.store(token, std::memory_order_release);
+            if (!interrupt) {
+                return;
+            }
             pe_token_pending_.store(true, std::memory_order_release);
+        }
+        wake_idle_simulation();
+    }
+    // The guest's PE_SR token clear: the next waiting token, if any, becomes the pending one.
+    void clear_pe_token() {
+        bool raised = false;
+        {
+            const std::lock_guard<std::mutex> lock(pe_token_mutex_);
+            if (pe_token_backlog_.empty()) {
+                pe_token_pending_.store(false, std::memory_order_release);
+            } else {
+                pe_token_value_.store(pe_token_backlog_.front(), std::memory_order_release);
+                pe_token_backlog_.pop_front();
+                raised = true;
+            }
+        }
+        if (raised) {
             wake_idle_simulation();
         }
     }
@@ -1917,6 +1951,11 @@ private:
     std::size_t fifo_stream_next_{0};
     std::atomic_bool pe_token_pending_{false};
     std::atomic<std::uint16_t> pe_token_value_{0};
+    // Interrupting tokens that completed while one was pending (raise_pe_token). Galaxy has at most a
+    // handful in flight per frame; the limit only bounds a guest that never clears the interrupt.
+    static constexpr std::size_t kPeTokenBacklogLimit = 64;
+    std::mutex pe_token_mutex_;
+    std::deque<std::uint16_t> pe_token_backlog_;
     // DSP mailbox: a to-DSP mail is a 16-bit high write (0x5000) then a low write
     // (0x5002). The boot-task protocol sends (command, value) pairs; the value of
     // 0x80F3D001 is the start vector, answered with DSP_INIT (0xDCD10000).

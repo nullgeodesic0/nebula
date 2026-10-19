@@ -30386,7 +30386,7 @@ static bool gx_efb_peek(
     // exists: no FIFO drain, no GPU round trip, one frame of staleness. Only the first peek of each kind in a
     // session takes the exact synchronous path below.
     // GALAXY_EFB_PEEK_EXACT=1 answers every peek exactly (no published field); GALAXY_TRACE_EFB_PEEK=1 logs
-    // every 30th published answer next to the exact value at the same pixel.
+    // every 15th published answer away from (0, 0) (an unconnected player 2 pointer) next to the exact value.
     static const bool exact_only = read_env_flag("GALAXY_EFB_PEEK_EXACT", false);
     static const bool trace_peeks = read_env_flag("GALAXY_TRACE_EFB_PEEK", false);
     const auto peek_kind = depth ? galaxy::gx::EfbPeekKind::Depth : galaxy::gx::EfbPeekKind::Color;
@@ -30395,7 +30395,7 @@ static bool gx_efb_peek(
         if (galaxy::gx::peek_efb_published(x, y, peek_kind, cached)) {
             ++state->efb_peek_published_count;
             static std::uint64_t traced = 0;
-            if (trace_peeks && traced++ % 30u == 0u) {
+            if (trace_peeks && (x | y) != 0u && traced++ % 15u == 0u) {
                 render_pending_gx_fifo_for_sync(*state, memory);
                 std::uint32_t exact = 0;
                 const bool ok = galaxy::gx::peek_efb(x, y, peek_kind, exact);
