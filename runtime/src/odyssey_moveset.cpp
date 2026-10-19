@@ -463,6 +463,10 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
                 }
             }
         }
+        if (edit.set_trail) {
+            ensure_names();
+            if (s_names.slide_dust != 0u) guest.call(edit.trail ? kPlayEffect : kStopEffect, self, s_names.slide_dust);
+        }
         if (edit.air_gust) {
             ensure_names();
             if (s_names.air_gust != 0u) guest.call(kPlayEffect, self, s_names.air_gust);
@@ -514,7 +518,6 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
                         guest.call(kStopAnimation, self, name, s_names.base);
                     }
                 }
-                if (s_names.slide_dust != 0u) guest.call(kStopEffect, self, s_names.slide_dust);
             }
             // The animation, and the one the game plays when it ends (0: the game decides).
             std::uint32_t name = 0u;
@@ -556,7 +559,6 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
             // The roll's dust: a puff where it starts and a trail behind him while it lasts.
             if (edit.anim == moveset::Anim::RollStart || edit.anim == moveset::Anim::GroundPoundRoll) {
                 if (s_names.brake_puff != 0u) guest.call(kPlayEffect, self, s_names.brake_puff);
-                if (s_names.slide_dust != 0u) guest.call(kPlayEffect, self, s_names.slide_dust);
             }
         }
 

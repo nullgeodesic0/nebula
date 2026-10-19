@@ -140,6 +140,8 @@ struct MarioEdit {
     bool stop_belly_slide = false;  // the dive's belly slide is over: stop its loop, back to the ground blend
     std::uint8_t attack_frames = 0;  // MarioActor::setPunchHitTimer: the spin's hit on enemies for this
                                      // many frames (the dive tackles what a spin stuns)
+    bool set_trail = false;       // start (trail) or stop the dust trail behind him: rolling, or running
+    bool trail = false;           // at a dash
     bool air_gust = false;        // a gust of air blowing out behind him (a roll boost)
     bool dust_puff = false;       // a puff of dust at his feet (the roll, every few frames, a boost)
     bool dust_landing = false;    // a landing's cloud of dust (a dive or a roll jump landing)
@@ -184,6 +186,8 @@ inline constexpr float kRollTurnDegrees = 5.0f;       // a roll turns at most th
 inline constexpr int kRollCancelWait = 9;             // frames after a start or boost before a roll cancel
 inline constexpr int kRollStopGrace = 6;              // frames a new roll ignores a stopped speed
 inline constexpr int kRollAirFrames = 8;               // frames off the ground (no jump) a roll rides out
+inline constexpr int kRunDustEvery = 10;              // frames between puffs while running at a dash or wall sliding
+inline constexpr float kRunStartSpeed = 0.5f;          // Galaxy walk speed a start from a standstill kicks up dust at
 inline constexpr int kRollDustEvery = 8;               // frames between the roll's dust puffs
 inline constexpr float kRollStopWalkSpeed = 0.6f;      // ran into something (Galaxy's speed fell under this)
 inline constexpr int kRollJumpGrace = 3;               // ticks after a roll in which a jump is a roll jump
@@ -245,6 +249,11 @@ public:
         if (!v.eligible || !finite(v.jump_vec) || !finite(v.front) || !finite(v.down) ||
             length(v.down) < 0.5f || v.table.walk_speed <= 0.0f) {
             edit.stop_roll_anim = rolling();
+            if (trail_on_) {
+                edit.set_trail = true;
+                edit.trail = false;
+                trail_on_ = false;
+            }
             if (rolling()) end_reason_ = "lost control";
             // The spin out of a roll cancel is a state of its own (not under the moveset's control); the
             // speed carried out of the roll waits for it to end.
@@ -563,11 +572,37 @@ public:
             run_anim_ = want;
         }
 
+        // --- Odyssey's dust and speed effects on Galaxy's own moves.
+        effects(v, edit, jump_started);
+
         remember(v, air_sideways);
         return edit;
     }
 
 private:
+    void effects(const MarioView& v, MarioEdit& edit, bool jump_started) noexcept {
+        const bool on_ground = v.grounded && !v.jumping;
+        ++effect_frame_;
+        // A puff as he starts running, as he skids or turns around, and now and then on a wall slide.
+        if (on_ground && prev_walk_speed_ < 0.1f && v.walk_speed >= kRunStartSpeed) edit.dust_puff = true;
+        if (on_ground && v.braking && !prev_braking_) edit.dust_puff = true;
+        if (v.wall_slide && effect_frame_ % kRunDustEvery == 0) edit.dust_puff = true;
+        // A cloud of dust where a ground pound lands (Galaxy adds its own impact effect).
+        if (v.hip_drop && v.grounded && !prev_grounded_) edit.dust_landing = true;
+        // A gust behind him as a long jump sets off.
+        if (jump_started && v.jump_type == kSquatJumpType && !edit.set_jump_vec) edit.air_gust = true;
+        // At a dash: puffs at his feet and the trail behind him, which also follows a roll on the ground.
+        const bool dashing = dash_ && on_ground && dash_speed_ >= kDashAnimSpeed;
+        if (dashing && effect_frame_ % kRunDustEvery == 0) edit.dust_puff = true;
+        const bool want_trail = (rolling() && v.grounded) || dashing;
+        if (want_trail != trail_on_) {
+            edit.set_trail = true;
+            edit.trail = want_trail;
+            trail_on_ = want_trail;
+        }
+        prev_walk_speed_ = v.walk_speed;
+    }
+
     // `boosted`: the roll counts as boosted already (ground pound, dive, long jump), so its first boost
     // is the yellow one.
     void start_roll(float speed, int boost_due, bool boosted, float unit, MarioEdit& edit) noexcept {
@@ -696,7 +731,10 @@ private:
     int paused_ = 0;    // frames it has waited out a state (the roll cancel's spin)
     bool carry_ = false;  // the fast run is a roll's speed carried on
     RunAnim run_anim_ = RunAnim::Blend;
-    float stride_ = 0.0f;  // the dash's stride, 0..1
+    float stride_ = 0.0f;
+    bool trail_on_ = false;
+    float prev_walk_speed_ = 0.0f;
+    std::uint32_t effect_frame_ = 0;  // the dash's stride, 0..1
     int dash_air_ = 0;
     bool dash_ = false;
     float dash_speed_ = 0.0f;

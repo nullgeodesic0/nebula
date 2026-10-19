@@ -446,6 +446,39 @@ bool test_ineligible_mario_is_left_alone() {
     return passed;
 }
 
+bool test_effects() {
+    bool passed = true;
+    Moveset m;
+    (void)m.step(standing());
+    MarioView start = standing();
+    start.walk_speed = 0.6f;
+    start.stick_mag = 1.0f;
+    passed &= expect(m.step(start).dust_puff, "a puff as he starts running");
+    MarioView skid = running();
+    skid.braking = true;
+    passed &= expect(m.step(skid).dust_puff, "a puff as he skids");
+    Moveset r;
+    MarioView press = crouching();
+    press.trig_c = true;
+    const MarioEdit rolled = r.step(press);
+    passed &= expect(rolled.set_trail && rolled.trail, "the trail starts with the roll");
+    MarioView let_go = crouching();
+    let_go.lvl_z = false;
+    let_go.stick_mag = 0.0f;
+    bool stopped = false;
+    for (int i = 0; i < 100; ++i) {
+        const MarioEdit e = r.step(let_go);
+        stopped |= e.set_trail && !e.trail;
+    }
+    passed &= expect(stopped, "and stops when it is over");
+    Moveset l;
+    (void)l.step(running());
+    MarioView long_jump = airborne();
+    long_jump.jump_type = kSquatJumpType;
+    passed &= expect(l.step(long_jump).air_gust, "a gust as a long jump sets off");
+    return passed;
+}
+
 bool test_turn_boost() {
     bool passed = true;
     Moveset m;
@@ -538,6 +571,7 @@ int main() {
     passed &= test_long_jump_roll();
     passed &= test_ineligible_mario_is_left_alone();
     passed &= test_turn_boost();
+    passed &= test_effects();
     passed &= test_roll_speed_carries();
     if (!passed) {
         return 1;
