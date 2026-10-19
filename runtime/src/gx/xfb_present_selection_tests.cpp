@@ -594,6 +594,28 @@ int main() {
             "nearby alpha/shadow workspaces remain scaled");
     }
     {
+        galaxy::gx::EfbCopyParams shadow{};
+        shadow.target_format = 7u;
+        passed &= expect(galaxy::gx::is_galaxy_shadow_capture_copy(shadow, false, 96u, 96u),
+            "an alpha-format actor shadow capture is a shadow silhouette");
+        passed &= expect(galaxy::gx::is_galaxy_shadow_capture_copy(shadow, false, 64u, 48u),
+            "actor shadow captures need not be square");
+        passed &= expect(!galaxy::gx::is_galaxy_shadow_capture_copy(shadow, false, 96u, 96u, false),
+            "the 160x160-only rule leaves other sizes at game resolution");
+        passed &= expect(galaxy::gx::is_galaxy_shadow_capture_copy(shadow, false, 160u, 160u, false),
+            "Mario's 160x160 capture qualifies under both rules");
+        passed &= expect(!galaxy::gx::is_galaxy_shadow_capture_copy(shadow, true, 96u, 96u),
+            "a depth source is never a shadow silhouette");
+        passed &= expect(!galaxy::gx::is_galaxy_shadow_capture_copy(shadow, false, 640u, 456u),
+            "a full-size capture stays an ordinary scaled copy");
+        shadow.target_format = 4u;
+        passed &= expect(!galaxy::gx::is_galaxy_shadow_capture_copy(shadow, false, 160u, 114u),
+            "RGB565 bloom sources are not shadow silhouettes");
+        shadow.copy_to_xfb = true;
+        passed &= expect(!galaxy::gx::is_galaxy_shadow_capture_copy(shadow, false, 160u, 160u),
+            "a display copy is never a shadow silhouette");
+    }
+    {
         const galaxy::gx::ScaledEfbCopyExtent native =
             galaxy::gx::compute_scaled_efb_copy_extent(640u, 456u, 1u);
         const galaxy::gx::ScaledEfbCopyExtent double_res =

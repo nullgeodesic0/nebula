@@ -8298,8 +8298,47 @@ bool RendererD3D12::copy_efb_to_texture(
         return getenv_s(&length, value, sizeof(value), "GALAXY_NATIVE_SHADOW_CAPTURE") == 0 &&
             length == 2u && value[0] == '1';
     }();
-    const bool shadow_capture = !native_shadow_capture && !is_depth_copy &&
-        dw_unscaled == 160u && dh_unscaled == 160u;
+    // Other actors' shadows (the Toads, enemies) use other sizes; the alpha-format
+    // rule catches them. GALAXY_SHADOW_CAPTURE_ALPHA=0 limits this to 160x160.
+    static const bool shadow_alpha_rule = [] {
+        char value[8]{};
+        std::size_t length = 0u;
+        return !(getenv_s(&length, value, sizeof(value), "GALAXY_SHADOW_CAPTURE_ALPHA") == 0 &&
+                 length == 2u && value[0] == '0');
+    }();
+    const bool shadow_capture = !native_shadow_capture &&
+        is_galaxy_shadow_capture_copy(params, is_depth_copy, dw_unscaled, dh_unscaled,
+                                      shadow_alpha_rule);
+    // GALAXY_TRACE_EFB_COPY=1: log each distinct small texture copy once (size,
+    // format, flags, destination address) and its running count, to see which
+    // copies are shadow silhouettes and which are effect sources.
+    static const bool trace_efb_copy = [] {
+        char value[8]{};
+        std::size_t length = 0u;
+        return getenv_s(&length, value, sizeof(value), "GALAXY_TRACE_EFB_COPY") == 0 && length > 1u;
+    }();
+    if (trace_efb_copy && dw_unscaled <= 320u && dh_unscaled <= 228u && !params.copy_to_xfb) {
+        static std::unordered_map<std::uint64_t, std::uint32_t> seen;
+        const std::uint64_t key = static_cast<std::uint64_t>(dw_unscaled) |
+            (static_cast<std::uint64_t>(dh_unscaled) << 16) |
+            (static_cast<std::uint64_t>(params.target_format) << 32) |
+            (static_cast<std::uint64_t>(params.half_scale) << 40) |
+            (static_cast<std::uint64_t>(params.intensity) << 41) |
+            (static_cast<std::uint64_t>(is_depth_copy) << 42) |
+            (static_cast<std::uint64_t>(params.clear) << 43) |
+            (static_cast<std::uint64_t>(params.dest_addr >> 5) << 44);
+        const std::uint32_t count = ++seen[key];
+        if (count == 1u || count == 600u) {
+            std::fprintf(stderr,
+                "[efb-copy-trace] %ux%u src=(%u,%u %ux%u) fmt=%u depth=%d half=%d intensity=%d gamma=%u "
+                "clear=%d stride=%u addr=%08X shadow=%d count=%u\n",
+                dw_unscaled, dh_unscaled, params.src_x, params.src_y, params.src_width,
+                params.src_height, static_cast<unsigned>(params.target_format),
+                is_depth_copy ? 1 : 0, params.half_scale ? 1 : 0, params.intensity ? 1 : 0,
+                static_cast<unsigned>(params.gamma), params.clear ? 1 : 0, params.dest_stride,
+                params.dest_addr, shadow_capture ? 1 : 0, count);
+        }
+    }
     const bool effect_copy = native_effect_copies
         ? dw_unscaled <= 320u && dh_unscaled <= 228u && !shadow_capture
         : is_galaxy_bloom_workspace_copy(params, is_depth_copy);
