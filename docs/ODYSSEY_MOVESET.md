@@ -27,14 +27,13 @@ Speeds are Odyssey's, in units per frame (both games' units are about a centimet
 
 | Move | Input | What happens |
 |---|---|---|
-| Roll | Z (crouch), then 1 | At least 20, up to 35; loses 0.3% a frame (Odyssey 0.2%); turns at most 5 degrees a frame. Holding Z keeps it going; after its standing-up delay (47 frames, 33 out of a pound/dive/long jump, 46 after a boost) letting go stands him up at the roll's speed. Below 17 he is back in a crouch. Dust, a slide sound and a whoosh. |
+| Roll | Z (crouch), then 1 | At least 20, up to 35; loses 0.3% a frame (Odyssey 0.2%); turns at most 5 degrees a frame. Holding Z keeps it going; after its standing-up delay (47 frames, 33 out of a pound or dive, 46 after a boost) letting go stands him up at the roll's speed. Below 17 he is back in a crouch. Dust, a slide sound and a whoosh. |
 | Roll boost | 1 again, every 16 frames (32 after a ground-pound roll) | 23 after a crouch roll, 26 after anything else; a gust of air. |
 | Roll cancel | Spin during a roll, 9 frames after its start or a boost | Out of the roll at its speed, through Galaxy's spin. |
 | Roll jump | A during a roll (after 12 frames) | A jump a little higher than the first jump, at the roll's speed. Z then A quickly stays Galaxy's long jump. |
 | Ground-pound roll | Z held and 1 as a ground pound lands | A roll at 30. |
 | Ground-pound jump | A as a ground pound lands | Higher than the triple jump. |
-| Dive | 1 in the air, or during a ground pound | Towards the stick at 20, rising 182 units (40 out of a pound). It cannot be cancelled except by the spin; only a fresh air spin earns another dive. It hits enemies as the spin does. Landing with Z held rolls on; otherwise a belly slide, out of which 1 rolls. |
-| Long-jump roll | Land a long jump with Z held | Rolls on at least 20. |
+| Dive | 1 in the air, or during a ground pound | Towards the stick at 20, rising 182 units (40 out of a pound). It cannot be cancelled except by the spin; only a fresh air spin earns another dive. It hits enemies as the spin does. Landing with Z held rolls on; otherwise a smooth belly slide at the dive's speed (no hard landing), out of which 1 rolls. |
 | Run after a turn | Skid, then run the other way | Odyssey's RunAfterTurn: 17 for a second, then back to the run's cap at 7/60 a frame. |
 | Rolling into a wall | | Galaxy's long-jump bounce off the wall. |
 
