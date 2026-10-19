@@ -12521,16 +12521,63 @@ void GuestAddressSpace::open_game_pak(const std::filesystem::path& path) {
         std::cout << "[di] game.pak mapped: " << pak_size_ << " bytes at "
                   << static_cast<const void*>(pak_view_) << '\n';
     }
-    load_disc_mod_overrides_from_env();
+    load_disc_mod_overrides_from_env(path.parent_path());
 }
 
-void GuestAddressSpace::load_disc_mod_overrides_from_env() {
+void GuestAddressSpace::apply_disc_overrides(
+    std::uint64_t disc_offset, std::uint32_t guest_address, std::uint32_t size) {
+    const std::uint64_t end = disc_offset + size;
+    for (const DiscOverride& entry : disc_overrides_) {
+        const std::uint64_t entry_end = entry.disc_offset + entry.bytes.size();
+        const std::uint64_t first = std::max(disc_offset, entry.disc_offset);
+        const std::uint64_t last = std::min(end, entry_end);
+        if (first >= last) {
+            continue;
+        }
+        copy(guest_address + static_cast<std::uint32_t>(first - disc_offset),
+             std::span<const std::byte>(entry.bytes).subspan(
+                 static_cast<std::size_t>(first - entry.disc_offset),
+                 static_cast<std::size_t>(last - first)));
+    }
+}
+
+void GuestAddressSpace::load_disc_mod_overrides_from_env(
+    const std::filesystem::path& content_root) {
     disc_overrides_.clear();
-    const std::optional<std::filesystem::path> manifest =
-        get_env_path(L"GALAXY_DISC_MOD_MANIFEST");
-    if (!manifest) {
+    if (const std::optional<std::filesystem::path> manifest =
+            get_env_path(L"GALAXY_DISC_MOD_MANIFEST")) {
+        load_disc_mod_manifest(*manifest);
         return;
     }
+    // The custom animations and model (runtime_settings.h) are disc mods kept with the game content,
+    // each in its own folder and area of the disc. The animations come in two builds: "animations" for
+    // the game's model, and "animations-model", which also switches the custom model's extra faces.
+    const auto manifest_in = [&content_root](const wchar_t* folder) {
+        return content_root / L"mods" / folder / L"manifest.txt";
+    };
+    const auto exists = [](const std::filesystem::path& path) {
+        std::error_code error;
+        return std::filesystem::is_regular_file(path, error);
+    };
+    const bool model = custom_model_for_boot() && exists(manifest_in(L"model"));
+    std::vector<std::filesystem::path> manifests;
+    if (custom_animations_for_boot()) {
+        const std::filesystem::path with_faces = manifest_in(L"animations-model");
+        manifests.push_back(model && exists(with_faces) ? with_faces : manifest_in(L"animations"));
+    }
+    if (model) {
+        manifests.push_back(manifest_in(L"model"));
+    }
+    for (const std::filesystem::path& manifest : manifests) {
+        if (exists(manifest)) {
+            std::cerr << "[mods] " << manifest.string() << '\n';
+            load_disc_mod_manifest(manifest);
+        }
+    }
+}
+
+void GuestAddressSpace::load_disc_mod_manifest(const std::filesystem::path& manifest_file) {
+    const std::filesystem::path* const manifest = &manifest_file;
     std::ifstream file(*manifest);
     if (!file) {
         throw std::runtime_error(
@@ -32782,6 +32829,18 @@ void initialize_boot_memory(
     address_space.write_u32(0x8000310C, arena_low);
     address_space.write_u32(0x80003110, fst_address);
     address_space.open_game_pak(content_root / L"game.pak");
+    // A disc mod may move or resize a file, which it does by patching the disc's FST; the guest's copy
+    // comes from sys/fst.bin, so the same patch is applied to it. boot.bin 0x424 holds the FST's disc
+    // offset in words.
+    if (boot.size() >= 0x428u) {
+        const auto byte_at = [&boot](std::size_t i) { return std::to_integer<std::uint32_t>(boot[i]); };
+        const std::uint64_t fst_disc_offset =
+            static_cast<std::uint64_t>((byte_at(0x424) << 24) | (byte_at(0x425) << 16) |
+                                       (byte_at(0x426) << 8) | byte_at(0x427))
+            << 2;
+        address_space.apply_disc_overrides(
+            fst_disc_offset, fst_address, static_cast<std::uint32_t>(fst.size()));
+    }
     // Does not re-zero the declared BSS range. RMGE01's BSS span (0x805F5A40..0x806ADF90) interleaves with two loaded
     // data sections: .sdata (0x8069CCA0, initialised SDA1 globals, including __mailboxAck at 0x8069E390, the IPC
     // free-slot semaphore whose retail initial value is 1) and .sdata2 (0x806A3280, SDA2 float/double constants).

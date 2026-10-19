@@ -1087,6 +1087,10 @@ public:
     // Opens and memory-maps the game.pak image produced by build-pak. If the file
     // is missing, a warning is printed and disc reads return EIO.
     void open_game_pak(const std::filesystem::path& path);
+    // Copies the disc mod overrides that cover [disc_offset, disc_offset + size) over guest memory at
+    // guest_address, for disc data the host loads itself rather than through /dev/di (the FST).
+    void apply_disc_overrides(
+        std::uint64_t disc_offset, std::uint32_t guest_address, std::uint32_t size);
 
     // Pre-wires the CP FIFO ring with the dummy GXFifoObj base/end so direct
     // CP_WRITE_POINTER writes drain before GXInit runs.
@@ -1372,7 +1376,9 @@ private:
         bool destination_matches_source{};
         bool ioctlv{};
     };
-    void load_disc_mod_overrides_from_env();
+    void load_disc_mod_overrides_from_env(const std::filesystem::path& content_root);
+    // Adds one manifest's overrides; overrides from every manifest loaded must not overlap.
+    void load_disc_mod_manifest(const std::filesystem::path& manifest_file);
     [[nodiscard]] bool disc_read_in_range(
         std::uint64_t disc_offset,
         std::uint32_t size) const noexcept;

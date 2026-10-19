@@ -45,6 +45,16 @@ struct RuntimeSettings {
     ButtonPrompts button_prompts = ButtonPrompts::Auto;
     // Animation smoothing and Mario's movement feel (motion_style.h). Changes live.
     MotionStyle motion_style = MotionStyle::Original;
+    // Mario's animations from the user's converted mod (content\mods\animations, built by
+    // tools/animations/build_mod.py) instead of the game's own. The archive is part of the disc, so a
+    // change takes effect at the next start; without the mod folder this does nothing.
+    bool custom_animations = true;
+    // Mario's model from the user's converted mod (content\mods\model, built by
+    // tools/animations/build_model_mod.py). Like the animations, a change takes effect at the next start.
+    bool custom_model = true;
+    // Mario's voice lines from the user's clips (content\mods\voice, built by
+    // tools/animations/build_voice_mod.py). Changes live.
+    bool custom_voice = true;
 };
 
 // The language the game runs in this session: the setting when the game first asks (at boot), then
@@ -58,6 +68,15 @@ struct RuntimeSettings {
 [[nodiscard]] const char* button_prompts_key(ButtonPrompts prompts) noexcept;
 // "original", "smooth" or "modern" (runtime_settings.ini).
 [[nodiscard]] const char* motion_style_key(MotionStyle style) noexcept;
+
+// Whether this session uses the custom animations: the setting when the disc first opens (read from the
+// settings file then, since that is before the rest of the settings load), then fixed.
+[[nodiscard]] bool custom_animations_for_boot() noexcept;
+// Whether the disc has opened yet, and if so, the value it opened with.
+[[nodiscard]] bool running_custom_animations(bool& enabled) noexcept;
+// The same two for the custom model.
+[[nodiscard]] bool custom_model_for_boot() noexcept;
+[[nodiscard]] bool running_custom_model(bool& enabled) noexcept;
 
 // A coherent input-source snapshot. The generation changes only when the selected input mode changes,
 // so device FIFOs can reject reports acquired under an older source. Unrelated audio-setting writes are
