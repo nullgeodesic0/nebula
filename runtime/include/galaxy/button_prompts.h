@@ -16,6 +16,8 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace galaxy::prompts {
 
@@ -63,6 +65,12 @@ inline constexpr int kCellW = 34;
 inline constexpr int kCellH = 35;
 // Straight-alpha RGBA, kCellW * kCellH * 4 bytes. Needs GDI for the letters.
 void render_glyph(Family family, Label label, std::uint8_t* rgba);
+// The same prompt drawn at `scale` times the cell (width/height are the result).
+void render_glyph_scaled(Family family, Label label, float scale, int& width, int& height,
+                         std::vector<std::uint8_t>& rgba);
+// A tutorial picture (kind 0 tilt, 1 spin, 2 ball; frame as numbered in the game's
+// layouts): a controller held at that pose on a sky, 32 * scale pixels square.
+void render_guidance(Family family, int kind, int frame, float scale, int& size, std::vector<std::uint8_t>& rgba);
 [[nodiscard]] std::uint16_t encode_rgb5a3(std::uint8_t r, std::uint8_t g, std::uint8_t b,
                                           std::uint8_t a) noexcept;
 
@@ -70,5 +78,21 @@ void render_glyph(Family family, Label label, std::uint8_t* rgba);
 // font in guest memory, in small slices, and draws the published prompts into
 // it. Cheap when nothing changed.
 void tick(GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t pc) noexcept;
+
+// HD prompts. The texture cache asks for a replacement whenever it decodes a
+// texture: the picture-font sheets that carry the icons and the HUD A icon come
+// back kHdScale times larger with the prompts drawn at full resolution (the
+// other cells of a sheet are the game's own, enlarged). Render thread; `source`
+// is the texture's guest bytes. `key` names the image for the cache and changes
+// with the prompts shown.
+inline constexpr unsigned kHdScale = 4;
+struct HdImage {
+    std::uint32_t width = 0, height = 0;
+    std::vector<std::uint8_t> rgba;  // straight alpha
+    std::string key;
+};
+[[nodiscard]] bool hd_replacement(std::uint32_t guest_address, std::uint32_t width, std::uint32_t height,
+                                  std::uint8_t gx_format, const std::uint8_t* source, std::uint32_t source_bytes,
+                                  HdImage& out);
 
 }  // namespace galaxy::prompts
