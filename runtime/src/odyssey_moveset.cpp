@@ -132,8 +132,10 @@ constexpr std::array<std::uint8_t, 6> kSoundRolling = {0x8d, 0xe2, 0x8a, 0x8a, 0
 constexpr std::array<std::uint8_t, 20> kSoundRollStart = {0x83, 0x58, 0x83, 0x79, 0x83, 0x56, 0x83, 0x83, 0x83, 0x8b, 0x83, 0x5f, 0x83, 0x62, 0x83, 0x56, 0x83, 0x85, 0x8e, 0xe3};  // スペシャルダッシュ弱
 constexpr std::array<std::uint8_t, 20> kSoundRollBoost = {0x83, 0x58, 0x83, 0x79, 0x83, 0x56, 0x83, 0x83, 0x83, 0x8b, 0x83, 0x5f, 0x83, 0x62, 0x83, 0x56, 0x83, 0x85, 0x8b, 0xad};  // スペシャルダッシュ強
 constexpr std::array<std::uint8_t, 6> kSoundBump = {0x95, 0xc7, 0x8f, 0xd5, 0x93, 0xcb};  // 壁衝突
-// 引き戻し着地 (PullBackLand) <- Odyssey LandRolling: the dive's landing, from hands and knees up to standing.
+// 引き戻し着地 (PullBackLand) <- Odyssey RollingStandUp: the dive's roll-out, a forward tumble up to standing.
 constexpr std::array<std::uint8_t, 12> kNameDiveTumble = {0x88, 0xf8, 0x82, 0xab, 0x96, 0xdf, 0x82, 0xb5, 0x92, 0x85, 0x92, 0x6e};
+constexpr std::int16_t kDiveTumbleFrames = 9;  // its length with the custom animations (RollingStandUp)
+constexpr float kDiveTumbleRate = 0.55f;       // about 16 frames
 constexpr std::array<std::uint8_t, 4> kNameFall = {0x97, 0x8e, 0x89, 0xba};
 constexpr std::array<std::uint8_t, 4> kNameBase = {0x8a, 0xee, 0x96, 0x7b};
 // The run track's two animations: ãƒ©ãƒ³ (Run) and ãƒ¡ã‚¿ãƒ«ãƒ€ãƒƒã‚·ãƒ¥ (RunDash, Odyssey Dash when converted).
@@ -560,6 +562,15 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
             case moveset::Anim::None: break;
             }
             if (name != 0u) guest.call(kChangeAnimation, self, name, next);
+            if (edit.anim == moveset::Anim::DiveLand && name != 0u) {
+                // Odyssey's roll-out is 9 frames; played slower it reads as a tumble out of the slide.
+                const std::uint32_t animator = guest.u32(actor + kActorAnimator);
+                const std::uint32_t player = plausible_mario(animator) ? guest.u32(animator + kAnimatorPlayer) : 0u;
+                const std::uint32_t ctrl = plausible_mario(player) ? guest.u32(player + kPlayerFrameCtrl) : 0u;
+                if (plausible_mario(ctrl) && static_cast<std::int16_t>(guest.u16(ctrl + 8u)) == kDiveTumbleFrames) {
+                    guest.set_f32(ctrl + 0xCu, kDiveTumbleRate);
+                }
+            }
             std::uint32_t voice = 0u;
             switch (edit.anim) {
             case moveset::Anim::RollStart:
