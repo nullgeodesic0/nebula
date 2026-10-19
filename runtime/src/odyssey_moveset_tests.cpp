@@ -295,7 +295,7 @@ bool test_dive() {
     jump.trig_c = true;
     const MarioEdit edit = m.step(jump);
     const float rise = std::sqrt(2.0f * 1.8f * kDiveRise);
-    passed &= expect(edit.set_jump_vec && m.diving() && edit.anim == Anim::Dive && edit.hard_landing &&
+    passed &= expect(edit.set_jump_vec && m.diving() && edit.anim == Anim::Dive && !edit.hard_landing &&
                          edit.end_jump_hold && edit.jump_type == kNormalJumpType,
                      "C in the air dives");
     passed &= expect(edit.attack_frames > 0, "the dive hits enemies as a spin does");
@@ -342,7 +342,7 @@ bool test_dive() {
     MarioView land = crouching();
     const MarioEdit rolled = m.step(land);
     passed &= expect(m.rolling() && rolled.anim == Anim::RollStart && near(units(rolled), 24.0f) &&
-                         rolled.dust_landing,
+                         rolled.dust_puff,
                      "a dive landing with Z held rolls at its speed");
     // The game may still say "jumping" on the landing frame.
     Moveset g2;
@@ -361,8 +361,12 @@ bool test_dive() {
     (void)n.step(jump);
     (void)n.step(flying);
     const MarioEdit belly = n.step(standing());
-    passed &= expect(!n.rolling() && belly.dust_landing && belly.anim == Anim::DiveLand,
-                     "without Z it is the belly slide");
+    passed &= expect(!n.rolling() && belly.dust_puff && belly.anim == Anim::DiveLand && belly.set_walk_speed &&
+                         near(units(belly), 24.0f),
+                     "without Z it is the belly slide, at the dive's speed");
+    const MarioEdit sliding = n.step(standing());
+    passed &= expect(sliding.set_walk_speed && units(sliding) < 24.0f && units(sliding) > 20.0f,
+                     "which eases to a stop");
     bool stopped = false;
     for (int i = 0; i < kBellySlideFrames; ++i) stopped |= n.step(standing()).stop_belly_slide;
     passed &= expect(stopped, "and he gets up after it");
@@ -374,7 +378,7 @@ bool test_dive() {
     MarioView cap = standing();
     cap.trig_c = true;
     const MarioEdit out = c.step(cap);
-    passed &= expect(c.rolling() && out.stop_belly_slide && out.anim == Anim::RollStart && near(units(out), 24.0f),
+    passed &= expect(c.rolling() && out.stop_belly_slide && out.anim == Anim::RollStart && units(out) > 20.0f,
                      "the cap button rolls out of the belly slide at the dive's speed");
     // Not in a spin or a wall slide; switched off.
     Moveset s;
@@ -412,7 +416,7 @@ bool test_dive() {
     return passed;
 }
 
-bool test_long_jump_roll() {
+bool test_no_roll_out_of_jumps() {
     bool passed = true;
     Moveset m;
     (void)m.step(running());
@@ -420,10 +424,13 @@ bool test_long_jump_roll() {
     jump.jump_type = kSquatJumpType;
     jump.jump_vec = {0.0f, 15.0f, 16.5f};
     (void)m.step(jump);
-    passed &= expect(!m.rolling(), "a long jump is Galaxy's");
-    const MarioEdit rolled = m.step(crouching());
-    passed &= expect(m.rolling() && near(units(rolled), kRollCrouchSpeed),
-                     "landing from a long jump with Z held rolls on (at least 20)");
+    (void)m.step(crouching());
+    passed &= expect(!m.rolling(), "landing from a long jump with Z held is Galaxy's crouch");
+    Moveset n;
+    (void)n.step(running());
+    (void)n.step(airborne());
+    (void)n.step(crouching());
+    passed &= expect(!n.rolling(), "so is landing from a jump");
     return passed;
 }
 
@@ -568,7 +575,7 @@ int main() {
     passed &= test_roll_jump();
     passed &= test_ground_pound_jump_and_roll();
     passed &= test_dive();
-    passed &= test_long_jump_roll();
+    passed &= test_no_roll_out_of_jumps();
     passed &= test_ineligible_mario_is_left_alone();
     passed &= test_turn_boost();
     passed &= test_effects();

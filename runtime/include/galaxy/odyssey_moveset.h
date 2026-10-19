@@ -32,9 +32,9 @@ namespace galaxy::moveset {
 //   Ground-pound roll Z held and C as a ground pound lands: a roll at 30 u/fr.
 //   Ground-pound jump A as a ground pound lands: the second highest jump, after the triple jump.
 //   Dive              C during a ground pound (Z then C in the air), or C in any jump: forward at a
-//                     fixed speed, rising 182 units. Landing with Z held rolls on; otherwise a belly slide.
+//                     fixed speed, rising 182 units. Landing with Z held rolls on; otherwise a belly slide
+//                     that slides on and eases to a stop (no hard landing).
 //                     The dive hits enemies as the spin does (stunning what a spin stuns).
-//   Long-jump roll    Landing from a long jump with Z held rolls on.
 //   Run after a turn  A skid into a run the other way runs at 17 for a second (Odyssey's RunAfterTurn),
 //                     with the fast dash animation; its first jump has the dash jump's.
 //   Roll cancel       The spin during a roll (Odyssey's cap throw): out of the roll at its speed.
@@ -202,7 +202,8 @@ inline constexpr float kDiveStick = 0.3f;             // the stick pushed this f
 inline constexpr std::uint8_t kDiveAttackFrames = 4;  // the hit is renewed each frame of the dive
 inline constexpr int kDiveSpinGuard = 12;             // frames a new dive ignores the spin input
 inline constexpr float kPoundDiveRise = 40.0f;         // out of a ground pound's stall: a lift, not a jump
-inline constexpr int kBellySlideFrames = 30;          // the belly slide after a dive (Galaxy slides 25)
+inline constexpr int kBellySlideFrames = 30;          // the belly slide after a dive
+inline constexpr float kBellySlideDecay = 0.92f;       // per frame: the slide eases to a stop
 // How long a roll goes on before letting go of Z stands him up (Odyssey's standing-up delay).
 inline constexpr int kRollHoldCrouch = 47;            // a crouch roll
 inline constexpr int kRollHoldPound = 33;             // a ground-pound, dive or long-jump roll
@@ -322,7 +323,6 @@ public:
                 edit.set_jump_vec = true;
                 edit.jump_vec = heading * kDiveSpeed + up * rise;
                 edit.end_jump_hold = true;
-                edit.hard_landing = true;
                 edit.end_hip_drop_air = v.hip_drop;
                 edit.set_jump_type = true;  // the first jump's gravity, whatever jump he dived out of
                 edit.jump_type = kNormalJumpType;
@@ -363,17 +363,19 @@ public:
         const bool landed = v.grounded && !prev_grounded_;
         bool land_roll = false;
         float land_speed = 0.0f;
-        if (landed && (dive_ || long_jump_air_)) {
+        if (landed && dive_) {
             land_speed = length(prev_air_sideways_);
             land_roll = options_.roll && v.lvl_z;
         }
         if (landed || v.grounded) {
             if (landed && dive_) {
-                edit.dust_landing = true;
+                edit.dust_puff = true;
                 if (!land_roll) {
                     edit.anim = Anim::DiveLand;  // the belly slide
                     belly_frames_ = kBellySlideFrames;
                     belly_speed_ = land_speed;
+                    edit.set_walk_speed = true;
+                    edit.walk_speed = land_speed / v.table.walk_speed;
                 }
             }
             dive_ = false;
@@ -382,6 +384,12 @@ public:
 
         // --- The belly slide ends after its time, or as soon as he jumps. The cap button rolls out of it.
         bool belly_roll = false;
+        if (belly_frames_ > 0 && edit.anim != Anim::DiveLand && v.grounded) {
+            // He slides on his belly at the dive's speed, slowing smoothly.
+            belly_speed_ *= kBellySlideDecay;
+            edit.set_walk_speed = true;
+            edit.walk_speed = belly_speed_ / v.table.walk_speed;
+        }
         if (belly_frames_ > 0 && edit.anim != Anim::DiveLand) {
             belly_roll = options_.roll && v.trig_c && v.grounded && !v.jumping;
             if (--belly_frames_ == 0 || v.jumping || belly_roll) {
