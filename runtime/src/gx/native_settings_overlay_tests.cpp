@@ -417,7 +417,8 @@ int main() {
     passed &= expect(key(VK_LEFT) && key(VK_LEFT) &&
                          galaxy::get_runtime_settings().motion_style == galaxy::MotionStyle::Original,
                      "left returns to the game's motion");
-    passed &= expect(key(VK_UP) && key(VK_UP) && galaxy::gx::native_settings_overlay_snapshot().row == 0u,
+    passed &= expect(key(VK_UP) && key(VK_UP) && key(VK_UP) &&
+                         galaxy::gx::native_settings_overlay_snapshot().row == 0u,
                      "up returns to text speed");
     passed &= expect(key(VK_TAB), "Tab navigation wraps");
     passed &= expect(
