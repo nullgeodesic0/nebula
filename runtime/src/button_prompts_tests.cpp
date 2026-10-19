@@ -37,7 +37,7 @@ void defaults() {
     const auto at = [](const PromptSet& s, Slot slot) { return s.labels[static_cast<std::size_t>(slot)]; };
     check(at(x, Slot::A) == Label::South, "xbox A is the south face button");
     check(at(x, Slot::B) == Label::East, "xbox B follows jump/back");
-    check(at(x, Slot::C) == Label::L3, "xbox C is the left stick click");
+    check(at(x, Slot::C) == Label::L3, "xbox C (camera reset) is the left stick click");
     check(at(x, Slot::Z) == Label::L2, "xbox Z is the left trigger");
     check(at(x, Slot::Plus) == Label::Start, "xbox + is Menu");
     check(at(x, Slot::Minus) == Label::Back, "xbox - is View");
