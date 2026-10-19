@@ -13,6 +13,8 @@
 #endif
 
 #include "galaxy/gx/texture_cache.h"
+
+#include "galaxy/button_prompts.h"
 #include "galaxy/gx/dependency_event_capture.h"
 
 #include "galaxy/gx/render_config.h"
@@ -2094,45 +2096,63 @@ bool TextureCache::try_pack_replacement(
         texture_pack_initialized_ = true;
         texture_pack_.initialize();
     }
-    if (!texture_pack_.enabled() || upload_list_ == nullptr) {
+    if (upload_list_ == nullptr) {
         return false;
     }
-    // Paletted textures need Dolphin's min/max-trimmed TLUT hash; the pack has none.
-    if (image.format == TexFormat::C4 || image.format == TexFormat::C8 ||
-        image.format == TexFormat::C14X2) {
-        return false;
-    }
-    const std::uint32_t level0_bytes =
-        texture_guest_byte_size(image.format, image.width, image.height, 1u);
-    if (level0_bytes == 0u || level0_bytes > total_guest_size) {
-        return false;
-    }
-    ++texture_pack_lookups_;
-    const std::uint64_t hash = texture_pack_xxh64(src, level0_bytes);
-    const bool mipmapped = (static_cast<unsigned>(mode.min_filter) & 0x3u) != 0u;
-    char name[96];
+    // Controller button prompts (button_prompts.h): the picture font and the HUD A
+    // icon come back enlarged with the prompts of the controller in use.
+    prompts::HdImage generated;
+    const bool is_generated =
+        (image.format == TexFormat::RGB5A3 || image.format == TexFormat::IA4 ||
+         image.format == TexFormat::RGB565) &&
+        prompts::hd_replacement(image.guest_addr, image.width, image.height,
+                                static_cast<std::uint8_t>(image.format), src, total_guest_size,
+                                generated);
     const std::filesystem::path* path = nullptr;
     std::string chosen;
-    for (int attempt = 0; attempt < 2 && path == nullptr; ++attempt) {
-        const bool with_m = (attempt == 0) ? mipmapped : !mipmapped;
-        std::snprintf(name, sizeof(name), "tex1_%ux%u%s_%016llx_%u",
-                      static_cast<unsigned>(image.width),
-                      static_cast<unsigned>(image.height), with_m ? "_m" : "",
-                      static_cast<unsigned long long>(hash),
-                      static_cast<unsigned>(image.format));
-        path = texture_pack_.find(name);
-        if (path != nullptr) {
-            chosen = name;
-        }
+    static const std::filesystem::path kGeneratedPath{"<generated>"};
+    if (is_generated) {
+        chosen = generated.key;
+        path = &kGeneratedPath;
+    } else {
+    if (!texture_pack_.enabled()) {
+        return false;
     }
-    static const bool log_lookups = [] {
-        char v[8]{};
-        std::size_t n = 0;
-        return getenv_s(&n, v, sizeof(v), "NEBULA_TEXTURE_PACK_LOG") == 0 && n > 1;
-    }();
-    if (log_lookups && (path != nullptr || texture_pack_lookups_ <= 400u)) {
-        std::fprintf(stderr, "[texpack] %s %s\n",
-                     path != nullptr ? "HIT " : "miss", path ? chosen.c_str() : name);
+        // Paletted textures need Dolphin's min/max-trimmed TLUT hash; the pack has none.
+        if (image.format == TexFormat::C4 || image.format == TexFormat::C8 ||
+            image.format == TexFormat::C14X2) {
+            return false;
+        }
+        const std::uint32_t level0_bytes =
+            texture_guest_byte_size(image.format, image.width, image.height, 1u);
+        if (level0_bytes == 0u || level0_bytes > total_guest_size) {
+            return false;
+        }
+        ++texture_pack_lookups_;
+        const std::uint64_t hash = texture_pack_xxh64(src, level0_bytes);
+        const bool mipmapped = (static_cast<unsigned>(mode.min_filter) & 0x3u) != 0u;
+        char name[96];
+        for (int attempt = 0; attempt < 2 && path == nullptr; ++attempt) {
+            const bool with_m = (attempt == 0) ? mipmapped : !mipmapped;
+            std::snprintf(name, sizeof(name), "tex1_%ux%u%s_%016llx_%u",
+                          static_cast<unsigned>(image.width),
+                          static_cast<unsigned>(image.height), with_m ? "_m" : "",
+                          static_cast<unsigned long long>(hash),
+                          static_cast<unsigned>(image.format));
+            path = texture_pack_.find(name);
+            if (path != nullptr) {
+                chosen = name;
+            }
+        }
+        static const bool log_lookups = [] {
+            char v[8]{};
+            std::size_t n = 0;
+            return getenv_s(&n, v, sizeof(v), "NEBULA_TEXTURE_PACK_LOG") == 0 && n > 1;
+        }();
+        if (log_lookups && (path != nullptr || texture_pack_lookups_ <= 400u)) {
+            std::fprintf(stderr, "[texpack] %s %s\n",
+                         path != nullptr ? "HIT " : "miss", path ? chosen.c_str() : name);
+        }
     }
     if (path == nullptr || texture_pack_bad_.contains(chosen)) {
         return false;
@@ -2149,7 +2169,12 @@ bool TextureCache::try_pack_replacement(
         levels = cached->second.levels;
     } else {
     PackImage pi;
-    if (!TexturePack::load(*path, pi)) {
+    if (is_generated) {
+        pi.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        pi.block_compressed = false;
+        pi.levels.push_back({generated.width, generated.height, generated.height, generated.width * 4u, 0u});
+        pi.data = std::move(generated.rgba);
+    } else if (!TexturePack::load(*path, pi)) {
         texture_pack_bad_.insert(chosen);
         std::fprintf(stderr, "[texpack] cannot load %s\n", path->string().c_str());
         return false;

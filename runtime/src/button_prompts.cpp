@@ -112,13 +112,22 @@ float ring(float d, float width) { return std::fabs(d) - width * 0.5f; }
 
 class Canvas {
 public:
+    // `scale` multiplies every coordinate the drawing code uses (cell units).
+    explicit Canvas(float scale = 1.0f, float cell_w = kCellW, float cell_h = kCellH)
+        : scale_(scale),
+          w_(static_cast<int>(std::ceil(cell_w * scale))),
+          h_(static_cast<int>(std::ceil(cell_h * scale))),
+          px_(static_cast<std::size_t>(w_) * static_cast<std::size_t>(h_) * 4u, 0.0f) {}
+    [[nodiscard]] int width() const { return w_; }
+    [[nodiscard]] int height() const { return h_; }
+
     template <class Sdf>
     void fill(Sdf&& sdf, Rgb color, float opacity = 1.0f) {
-        for (int y = 0; y < kCellH; ++y) {
-            for (int x = 0; x < kCellW; ++x) {
-                const float d = sdf(x + 0.5f, y + 0.5f);
-                const float coverage = std::clamp(0.5f - d, 0.0f, 1.0f) * opacity;
-                if (coverage > 0.0f) blend(y * kCellW + x, color, coverage);
+        for (int y = 0; y < h_; ++y) {
+            for (int x = 0; x < w_; ++x) {
+                const float d = sdf((x + 0.5f) / scale_, (y + 0.5f) / scale_);
+                const float coverage = std::clamp(0.5f - d * scale_, 0.0f, 1.0f) * opacity;
+                if (coverage > 0.0f) blend(y * w_ + x, color, coverage);
             }
         }
     }
@@ -132,18 +141,24 @@ public:
         fill([&](float x, float y) { return std::max(sdf(x, y) + 1.0f, y - (kCy - 2.0f)); },
              rgb8(255, 255, 255), 0.07f);
     }
+    void sky(Rgb top, Rgb bottom) {
+        for (int y = 0; y < h_; ++y) {
+            const float k = h_ > 1 ? static_cast<float>(y) / static_cast<float>(h_ - 1) : 0.0f;
+            const Rgb c{top.r + (bottom.r - top.r) * k, top.g + (bottom.g - top.g) * k, top.b + (bottom.b - top.b) * k};
+            for (int x = 0; x < w_; ++x) blend(y * w_ + x, c, 1.0f);
+        }
+    }
     void text(const wchar_t* s, int pixel_height, float cx, float cy, Rgb color, float opacity = 1.0f);
     void to_rgba(std::uint8_t* out) const {
-        for (int i = 0; i < kCellW * kCellH; ++i) {
-            const float* q = px_[i];
-            out[i * 4 + 0] = static_cast<std::uint8_t>(std::lround(std::clamp(q[0], 0.0f, 1.0f) * 255.0f));
-            out[i * 4 + 1] = static_cast<std::uint8_t>(std::lround(std::clamp(q[1], 0.0f, 1.0f) * 255.0f));
-            out[i * 4 + 2] = static_cast<std::uint8_t>(std::lround(std::clamp(q[2], 0.0f, 1.0f) * 255.0f));
-            out[i * 4 + 3] = static_cast<std::uint8_t>(std::lround(std::clamp(q[3], 0.0f, 1.0f) * 255.0f));
+        for (std::size_t i = 0; i < static_cast<std::size_t>(w_) * h_; ++i) {
+            const float* q = &px_[i * 4];
+            for (int c = 0; c < 4; ++c) {
+                out[i * 4 + c] = static_cast<std::uint8_t>(std::lround(std::clamp(q[c], 0.0f, 1.0f) * 255.0f));
+            }
         }
     }
     void blend(int index, Rgb c, float a) {
-        float* q = px_[index];
+        float* q = &px_[static_cast<std::size_t>(index) * 4];
         const float out_a = a + q[3] * (1.0f - a);
         if (out_a <= 0.0f) return;
         const float keep = q[3] * (1.0f - a);
@@ -154,12 +169,13 @@ public:
     }
 
 private:
-    float px_[kCellW * kCellH][4]{};
+    float scale_;
+    int w_, h_;
+    std::vector<float> px_;
 };
-
 // Antialiased text through GDI, cropped to its ink and centred by it.
 struct TextRenderer {
-    static constexpr int kSize = 64;
+    static constexpr int kSize = 256;
     HDC dc = nullptr;
     HBITMAP bitmap = nullptr;
     std::uint8_t* bits = nullptr;
@@ -205,7 +221,7 @@ TextRenderer& text_renderer() {
 void Canvas::text(const wchar_t* s, int pixel_height, float cx, float cy, Rgb color, float opacity) {
     TextRenderer& tr = text_renderer();
     if (!tr.ensure()) return;
-    HFONT font = tr.font(pixel_height);
+    HFONT font = tr.font(std::max(1, static_cast<int>(std::lround(pixel_height * scale_))));
     if (font == nullptr) return;
     std::memset(tr.bits, 0, static_cast<std::size_t>(TextRenderer::kSize) * TextRenderer::kSize * 4u);
     SelectObject(tr.dc, font);
@@ -222,19 +238,18 @@ void Canvas::text(const wchar_t* s, int pixel_height, float cx, float cy, Rgb co
     }
     if (x1 < x0) return;
     const int w = x1 - x0 + 1, h = y1 - y0 + 1;
-    const int left = static_cast<int>(std::lround(cx - w * 0.5f));
-    const int top = static_cast<int>(std::lround(cy - h * 0.5f));
+    const int left = static_cast<int>(std::lround(cx * scale_ - w * 0.5f));
+    const int top = static_cast<int>(std::lround(cy * scale_ - h * 0.5f));
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             const int dx = left + x, dy = top + y;
-            if (dx < 0 || dy < 0 || dx >= kCellW || dy >= kCellH) continue;
+            if (dx < 0 || dy < 0 || dx >= w_ || dy >= h_) continue;
             const float coverage =
                 tr.bits[((y0 + y) * TextRenderer::kSize + (x0 + x)) * 4 + 1] / 255.0f * opacity;
-            if (coverage > 0.0f) blend(dy * kCellW + dx, color, coverage);
+            if (coverage > 0.0f) blend(dy * w_ + dx, color, coverage);
         }
     }
 }
-
 constexpr Rgb kBody = rgb8(0x2a, 0x2e, 0x35);
 constexpr Rgb kRim = rgb8(0xb9, 0xbf, 0xc8);
 constexpr Rgb kInk = rgb8(0xf4, 0xf6, 0xf8);
@@ -349,10 +364,153 @@ void draw_round_text(Canvas& c, const wchar_t* text, int size) {
     c.text(text, size, kCx, kCy, kInk);
 }
 
+// ------------------------------------------------------------ guidance art
+
+float smooth_min(float a, float b, float k) {
+    const float h = std::clamp(0.5f + 0.5f * (b - a) / k, 0.0f, 1.0f);
+    return b + (a - b) * h - k * h * (1.0f - h);
+}
+
+// A whole controller seen from the front, `s` cell units per controller unit
+// (the body is 25 units wide), turned by `degrees`. Drawn for the tutorial
+// pictures (tilt, spin, ball).
+void draw_controller_art(Canvas& c, Family family, float cx, float cy, float s, float degrees) {
+    const float angle = degrees * 3.14159265f / 180.0f;
+    const float ca = std::cos(angle), sa = std::sin(angle);
+    const auto local = [&](float x, float y, float& u, float& v) {
+        const float dx = x - cx, dy = y - cy;
+        u = (dx * ca + dy * sa) / s;
+        v = (-dx * sa + dy * ca) / s;
+    };
+    const auto body = [&](float x, float y) {
+        float u, v;
+        local(x, y, u, v);
+        const float center = sd_rbox(u, v, 0.0f, -1.0f, 11.8f, 6.2f, 5.0f);
+        const float left = sd_rbox(u, v, -8.6f, 5.0f, 3.9f, 7.2f, 3.7f);
+        const float right = sd_rbox(u, v, 8.6f, 5.0f, 3.9f, 7.2f, 3.7f);
+        return smooth_min(smooth_min(center, left, 3.0f), right, 3.0f) * s;
+    };
+    const bool xbox = family == Family::Xbox;
+    const Rgb outline = rgb8(8, 10, 14);
+    const Rgb shell = xbox ? rgb8(0x2b, 0x2f, 0x36) : rgb8(0xee, 0xf1, 0xf5);
+    // Bumpers behind the body.
+    for (const float side : {-1.0f, 1.0f}) {
+        c.fill([&](float x, float y) {
+            float u, v;
+            local(x, y, u, v);
+            return (sd_rbox(u, v, side * 8.4f, -7.4f, 4.2f, 1.5f, 1.2f) - 0.5f) * s;
+        }, outline);
+        c.fill([&](float x, float y) {
+            float u, v;
+            local(x, y, u, v);
+            return sd_rbox(u, v, side * 8.4f, -7.4f, 4.2f, 1.5f, 1.2f) * s;
+        }, xbox ? rgb8(0x4a, 0x4f, 0x58) : rgb8(0xdd, 0xe1, 0xe7));
+    }
+    c.fill([&](float x, float y) { return body(x, y) - 0.45f * s; }, outline);
+    c.fill(body, shell);
+    c.fill([&](float x, float y) {  // light from above
+        float u, v;
+        local(x, y, u, v);
+        return std::max(body(x, y) + 0.6f * s, v + 0.5f * 6.0f - 3.0f);
+    }, rgb8(255, 255, 255), xbox ? 0.07f : 0.35f);
+    const auto disc = [&](float u0, float v0, float r, Rgb color, float opacity = 1.0f) {
+        c.fill([&](float x, float y) {
+            float u, v;
+            local(x, y, u, v);
+            return (std::hypot(u - u0, v - v0) - r) * s;
+        }, color, opacity);
+    };
+    const auto bar = [&](float u0, float v0, float hw, float hh, float r, Rgb color, float opacity = 1.0f) {
+        c.fill([&](float x, float y) {
+            float u, v;
+            local(x, y, u, v);
+            return sd_rbox(u, v, u0, v0, hw, hh, r) * s;
+        }, color, opacity);
+    };
+    const Rgb green = rgb8(0x6d, 0xc3, 0x31), red = rgb8(0xf2, 0x4a, 0x3f);
+    const Rgb blue = rgb8(0x42, 0xa2, 0xf0), yellow = rgb8(0xfb, 0xc5, 0x1d);
+    if (xbox) {
+        disc(0.0f, -3.4f, 1.9f, rgb8(0xe9, 0xec, 0xf0));   // the Xbox button
+        disc(0.0f, -3.4f, 1.2f, rgb8(0x2b, 0x2f, 0x36));
+        disc(-6.4f, -2.2f, 2.9f, rgb8(0x14, 0x17, 0x1b));  // left stick
+        disc(-6.4f, -2.2f, 2.0f, rgb8(0x56, 0x5c, 0x66));
+        disc(3.6f, 2.8f, 2.9f, rgb8(0x14, 0x17, 0x1b));    // right stick
+        disc(3.6f, 2.8f, 2.0f, rgb8(0x56, 0x5c, 0x66));
+        bar(-3.4f, 2.8f, 2.6f, 0.9f, 0.4f, rgb8(0xc9, 0xce, 0xd6));  // d-pad
+        bar(-3.4f, 2.8f, 0.9f, 2.6f, 0.4f, rgb8(0xc9, 0xce, 0xd6));
+        disc(6.4f, -4.1f, 1.1f, yellow);                    // Y
+        disc(6.4f, -0.3f, 1.1f, green);                     // A
+        disc(4.5f, -2.2f, 1.1f, blue);                      // X
+        disc(8.3f, -2.2f, 1.1f, red);                       // B
+        bar(-1.5f, -1.0f, 0.9f, 0.5f, 0.3f, rgb8(0xc9, 0xce, 0xd6), 0.9f);
+        bar(1.5f, -1.0f, 0.9f, 0.5f, 0.3f, rgb8(0xc9, 0xce, 0xd6), 0.9f);
+    } else {
+        bar(0.0f, -1.2f, 6.6f, 5.6f, 2.6f, rgb8(0x17, 0x19, 0x1d));  // the dark middle
+        bar(0.0f, -3.4f, 4.4f, 2.0f, 1.2f, rgb8(0x3d, 0x41, 0x4a));  // touch pad
+        bar(-5.2f, -1.4f, 0.35f, 3.4f, 0.3f, rgb8(0x4d, 0x8d, 0xff), 0.95f);  // light bar
+        bar(5.2f, -1.4f, 0.35f, 3.4f, 0.3f, rgb8(0x4d, 0x8d, 0xff), 0.95f);
+        disc(0.0f, 2.6f, 1.0f, rgb8(0xee, 0xf1, 0xf5), 0.9f);        // PS button
+        disc(-3.4f, 2.8f, 2.5f, rgb8(0x08, 0x09, 0x0c));             // sticks
+        disc(-3.4f, 2.8f, 1.6f, rgb8(0x3b, 0x3f, 0x47));
+        disc(3.4f, 2.8f, 2.5f, rgb8(0x08, 0x09, 0x0c));
+        disc(3.4f, 2.8f, 1.6f, rgb8(0x3b, 0x3f, 0x47));
+        bar(-8.4f, -2.2f, 2.2f, 0.8f, 0.3f, rgb8(0x17, 0x19, 0x1d));  // d-pad
+        bar(-8.4f, -2.2f, 0.8f, 2.2f, 0.3f, rgb8(0x17, 0x19, 0x1d));
+        disc(8.4f, -4.0f, 1.0f, rgb8(0x57, 0xd8, 0xa4));              // triangle
+        disc(8.4f, -0.4f, 1.0f, rgb8(0x7f, 0xa9, 0xea));              // cross
+        disc(6.6f, -2.2f, 1.0f, rgb8(0xf2, 0x8e, 0xd8));              // square
+        disc(10.2f, -2.2f, 1.0f, rgb8(0xff, 0x6f, 0x7d));             // circle
+    }
+}
+
+struct GuidanceFrame {
+    float roll;
+    bool swoosh;
+};
+
+// How the tutorial frames of the game's tilt, spin and ball pictures hold the
+// controller (kind 0 tilt, 1 spin, 2 ball; the frame numbers of the layouts).
+GuidanceFrame guidance_frame(int kind, int frame) {
+    switch (kind) {
+    case 0:
+        switch (frame) { case 1: return {0.0f, false}; case 2: return {-30.0f, false};
+                         case 3: return {-80.0f, false}; default: return {35.0f, false}; }
+    case 1:
+        switch (frame) { case 7: return {0.0f, false}; case 8: return {0.0f, true}; default: return {-55.0f, false}; }
+    default:
+        switch (frame) { case 1: return {25.0f, false}; case 2: return {-30.0f, false}; case 3: return {-65.0f, false};
+                         case 6: return {10.0f, false}; case 7: return {-80.0f, false}; default: return {0.0f, false}; }
+    }
+}
+
 }  // namespace
 
-void render_glyph(Family family, Label label, std::uint8_t* rgba) {
-    Canvas c;
+// The tutorial picture of a controller held at the pose of the game's frame:
+// 32 * scale pixels square (scale 4 is the game's 128x128).
+void render_guidance(Family family, int kind, int frame, float scale, int& size, std::vector<std::uint8_t>& rgba) {
+    Canvas c(scale, 32.0f, 32.0f);
+    c.sky(rgb8(0x9c, 0xcf, 0xff), rgb8(0xc6, 0xe7, 0xff));
+    const GuidanceFrame pose = guidance_frame(kind, frame);
+    if (pose.swoosh) {
+        // A white arc over the shoulder: the shake.
+        c.fill([](float x, float y) {
+            const float dx = x - 16.0f, dy = y - 23.0f;
+            const float r = std::hypot(dx, dy);
+            const float a = std::atan2(dy, dx);
+            float d = std::fabs(r - 17.5f) - 0.8f;
+            if (a > -0.55f || a < -2.6f) d = 1e3f;
+            return d;
+        }, rgb8(255, 255, 255), 0.95f);
+    }
+    draw_controller_art(c, family, 16.0f, 17.0f, 1.0f, pose.roll);
+    size = c.width();
+    rgba.resize(static_cast<std::size_t>(c.width()) * c.height() * 4u);
+    c.to_rgba(rgba.data());
+}
+
+void render_glyph_scaled(Family family, Label label, float scale, int& width, int& height,
+                         std::vector<std::uint8_t>& rgba) {
+    Canvas c(scale);
     const bool xbox = family == Family::Xbox;
     switch (label) {
     case Label::South: case Label::East: case Label::West: case Label::North:
@@ -399,7 +557,17 @@ void render_glyph(Family family, Label label, std::uint8_t* rgba) {
     case Label::Digit2: draw_round_text(c, L"2", 18); break;
     case Label::None: break;
     }
-    c.to_rgba(rgba);
+    width = c.width();
+    height = c.height();
+    rgba.resize(static_cast<std::size_t>(width) * height * 4u);
+    c.to_rgba(rgba.data());
+}
+
+void render_glyph(Family family, Label label, std::uint8_t* rgba) {
+    int w = 0, h = 0;
+    std::vector<std::uint8_t> pixels;
+    render_glyph_scaled(family, label, 1.0f, w, h, pixels);
+    std::memcpy(rgba, pixels.data(), pixels.size());
 }
 
 std::uint16_t encode_rgb5a3(std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a) noexcept {
@@ -482,6 +650,17 @@ namespace {
 
 std::mutex g_publish_mutex;
 PromptSet g_published;
+
+// Guest textures the HD replacement may redraw (texture cache thread reads, the
+// simulation thread rewrites after every scan change).
+struct HdRegion {
+    std::uint32_t address = 0;
+    bool icon = false;
+    bool guidance = false;
+    int index = 0;  // font sheet number, icon target or guidance target
+};
+std::mutex g_region_mutex;
+std::vector<HdRegion> g_regions;
 std::atomic<std::uint32_t> g_revision{0};
 
 constexpr std::uint32_t kMem1 = 0x80000000u;
@@ -536,7 +715,43 @@ struct IconCopy {
     std::uint64_t current_hash = 0;  // of the bytes as last drawn (or found)
 };
 
+// The tutorial pictures of tilting, spinning and balancing (layouts
+// Tilt/Spin/BallGuidanceReplace): 128x128 RGB565 frames of a hand holding a Wii
+// Remote, found like the A icon. kind 0 tilt, 1 spin, 2 ball.
+struct GuidanceTarget {
+    int kind;
+    int frame;
+    std::uint32_t window_offset;
+    std::uint64_t window_hash;
+    std::uint64_t full_hash;
+};
+constexpr GuidanceTarget kGuidanceTargets[] = {
+    {0, 1, 8608u, 0xDEF120EB82048E1Full, 0xD817B605EA5CEB19ull},
+    {0, 2, 10752u, 0x47DAF43816535ED2ull, 0x7E61AAE8602C6852ull},
+    {0, 3, 12736u, 0xCE9DE58933469E22ull, 0x9EECE82A16E5EA80ull},
+    {0, 4, 8608u, 0x49B3842D45A8519Dull, 0x8A03E2BDC0F901C1ull},
+    {1, 7, 8864u, 0x423D39A6555C9CD2ull, 0x379FD58FC8B081D9ull},
+    {1, 8, 8480u, 0x8D3BBC3005CE15EAull, 0x49812AC66CB604D3ull},
+    {1, 9, 9440u, 0x25A7F7DD0582E8E4ull, 0x041CD0F3FCA13F45ull},
+    {2, 1, 8320u, 0x7899270BA8BEA1ECull, 0x821F1D079727516Cull},
+    {2, 2, 8864u, 0xD545D656CE1072D6ull, 0xA21E7FEEE7B6A042ull},
+    {2, 3, 8672u, 0x6F41B7AA30BAC8F5ull, 0x3CE61E6489CE642Bull},
+    {2, 4, 8608u, 0xD32A15629AFF9996ull, 0x7D4181A9CF808673ull},  // also frames 5 and 8
+    {2, 6, 8608u, 0x06F7E514560F4E43ull, 0xBE4B432E8193D3D0ull},
+    {2, 7, 14784u, 0xB73D3F7E3D60E6A3ull, 0x3F7153A1864BD26Cull},
+};
+constexpr std::uint32_t kGuidanceBytes = 128u * 128u * 2u;
+
+struct GuidanceCopy {
+    std::uint32_t address = 0;
+    int target = 0;
+    std::vector<std::uint8_t> original;
+    std::uint64_t current_hash = 0;
+};
+
 struct State {
+    std::vector<GuidanceCopy> guidance;
+    std::map<std::uint32_t, std::vector<std::uint8_t>> guidance_pixels;
     std::vector<IconCopy> icons;
     std::map<std::uint32_t, std::vector<std::uint8_t>> icon_pixels;
     std::vector<FontCopy> fonts;
@@ -548,6 +763,7 @@ struct State {
     ULONGLONG next_scan = 0;
     ULONGLONG next_verify = 0;
     ULONGLONG next_icon_verify = 0;
+    ULONGLONG next_guidance_verify = 0;
     std::map<std::uint32_t, std::vector<std::uint16_t>> cells;
     int debug = -1;
 };
@@ -673,6 +889,28 @@ void scan_slice(GuestMemoryV1* memory, State& s, const NativeServicesV1* service
             std::snprintf(message, sizeof(message), "button prompts: A icon %dx%d at 0x%08X", target.size, target.size, start);
             log_line(services, s, message);
         }
+        for (int g = 0; g < static_cast<int>(std::size(kGuidanceTargets)); ++g) {
+            const GuidanceTarget& target = kGuidanceTargets[g];
+            if (window != target.window_hash || a < target.window_offset) continue;
+            const std::uint32_t start = a - target.window_offset;
+            const bool known = std::any_of(s.guidance.begin(), s.guidance.end(),
+                                           [&](const GuidanceCopy& c) { return c.address == start; });
+            const std::byte* data = known ? nullptr : resolve_guest_fast(memory, start, kGuidanceBytes);
+            if (data == nullptr) continue;
+            const auto* raw = reinterpret_cast<const std::uint8_t*>(data);
+            if (fnv64(raw, kGuidanceBytes) != target.full_hash) continue;
+            GuidanceCopy copy;
+            copy.address = start;
+            copy.target = g;
+            copy.original.assign(raw, raw + kGuidanceBytes);
+            copy.current_hash = target.full_hash;
+            s.guidance.push_back(std::move(copy));
+            s.dirty = true;
+            char message[96];
+            std::snprintf(message, sizeof(message), "button prompts: tutorial picture %d/%d at 0x%08X", target.kind,
+                          target.frame, start);
+            log_line(services, s, message);
+        }
     }
 }
 
@@ -716,6 +954,55 @@ const std::vector<std::uint8_t>& icon_pixels(State& s, Family family, Label labe
         }
     }
     return s.icon_pixels.emplace(key, std::move(data)).first->second;
+}
+
+void publish_regions(const State& s) {
+    std::vector<HdRegion> regions;
+    for (const FontCopy& f : s.fonts) {
+        for (int sheet : {0, 2}) {
+            regions.push_back({f.sheets + static_cast<std::uint32_t>(sheet) * kSheetBytes, false, false, sheet});
+        }
+    }
+    for (const IconCopy& c : s.icons) regions.push_back({c.address, true, false, c.target});
+    for (const GuidanceCopy& c : s.guidance) regions.push_back({c.address, false, true, c.target});
+    std::lock_guard lock(g_region_mutex);
+    g_regions = std::move(regions);
+}
+
+// The tutorial picture at 128x128 as RGB565 4x4-pixel tiles.
+const std::vector<std::uint8_t>& guidance_pixels(State& s, Family family, int target) {
+    const std::uint32_t key = static_cast<std::uint32_t>(family) << 8 | static_cast<std::uint32_t>(target);
+    auto it = s.guidance_pixels.find(key);
+    if (it != s.guidance_pixels.end()) return it->second;
+    int size = 0;
+    std::vector<std::uint8_t> rgba;
+    render_guidance(family, kGuidanceTargets[target].kind, kGuidanceTargets[target].frame, 4.0f, size, rgba);
+    std::vector<std::uint8_t> data(kGuidanceBytes, 0);
+    for (int y = 0; y < 128; ++y) {
+        for (int x = 0; x < 128; ++x) {
+            const std::uint8_t* q = &rgba[(static_cast<std::size_t>(y) * 128 + x) * 4];
+            const unsigned v = ((q[0] * 31u + 127u) / 255u) << 11 | ((q[1] * 63u + 127u) / 255u) << 5 |
+                               ((q[2] * 31u + 127u) / 255u);
+            const std::size_t off = (static_cast<std::size_t>(y >> 2) * 32u + (x >> 2)) * 32u +
+                                    (static_cast<std::size_t>(y & 3) * 4u + (x & 3)) * 2u;
+            data[off] = static_cast<std::uint8_t>(v >> 8);
+            data[off + 1] = static_cast<std::uint8_t>(v & 0xFF);
+        }
+    }
+    return s.guidance_pixels.emplace(key, std::move(data)).first->second;
+}
+
+void draw_guidance(GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t pc, State& s,
+                   GuidanceCopy& copy, const PromptSet& want) {
+    std::byte* data = resolve_guest_fast(memory, copy.address, kGuidanceBytes);
+    if (data == nullptr) return;
+    const std::vector<std::uint8_t>& target = want.family != Family::None
+        ? guidance_pixels(s, want.family, copy.target) : copy.original;
+    auto* current = reinterpret_cast<std::uint8_t*>(data);
+    for (std::uint32_t i = 0; i < kGuidanceBytes; ++i) {
+        if (current[i] != target[i]) guest_store_u8(memory, copy.address + i, target[i], services, pc);
+    }
+    copy.current_hash = fnv64(current, kGuidanceBytes);
 }
 
 void draw_icon(GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t pc, State& s,
@@ -816,14 +1103,19 @@ void tick(GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t
         const ULONGLONG now = GetTickCount64();
         // Look for the font (and for more copies of it) while a controller is in use.
         if (s.applied.family != Family::None && now >= s.next_scan) {
+            const std::size_t known = s.fonts.size() + s.icons.size() + s.guidance.size();
             scan_slice(memory, s, services);
-            s.next_scan = now + (s.fonts.empty() && s.icons.empty() ? 40u : 100u);
+            if (s.fonts.size() + s.icons.size() + s.guidance.size() != known) publish_regions(s);
+            s.next_scan = now + (s.fonts.empty() && s.icons.empty() && s.guidance.empty() ? 40u : 100u);
         }
         if (!s.fonts.empty() && now >= s.next_verify) {
             s.next_verify = now + 3000u;
             const std::size_t before = s.fonts.size();
             std::erase_if(s.fonts, [&](const FontCopy& f) { return !header_ok(memory, f.base); });
-            if (s.fonts.size() != before) log_line(services, s, "button prompts: a picture font went away");
+            if (s.fonts.size() != before) {
+                log_line(services, s, "button prompts: a picture font went away");
+                publish_regions(s);
+            }
         }
         if (!s.icons.empty() && now >= s.next_icon_verify) {
             s.next_icon_verify = now + 3000u;
@@ -834,13 +1126,201 @@ void tick(GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t
                 const std::uint64_t hash = fnv64(reinterpret_cast<const std::uint8_t*>(data), static_cast<std::size_t>(size) * size);
                 return hash != c.current_hash && hash != kIconTargets[c.target].full_hash;
             });
+            publish_regions(s);
+        }
+        if (!s.guidance.empty() && now >= s.next_guidance_verify) {
+            s.next_guidance_verify = now + 3000u;
+            std::erase_if(s.guidance, [&](const GuidanceCopy& c) {
+                const std::byte* data = resolve_guest_fast(memory, c.address, kGuidanceBytes);
+                if (data == nullptr) return true;
+                const std::uint64_t hash = fnv64(reinterpret_cast<const std::uint8_t*>(data), kGuidanceBytes);
+                return hash != c.current_hash && hash != kGuidanceTargets[c.target].full_hash;
+            });
+            publish_regions(s);
         }
         if (s.dirty) {
+            for (GuidanceCopy& copy : s.guidance) draw_guidance(memory, services, pc, s, copy, s.applied);
             for (IconCopy& icon : s.icons) draw_icon(memory, services, pc, s, icon, s.applied);
             for (const FontCopy& font : s.fonts) draw_font(memory, services, pc, s, font, s.applied);
             s.dirty = false;
         }
     } catch (...) {
+    }
+}
+
+// ------------------------------------------------------------ HD replacement
+
+namespace {
+
+constexpr float kHd = static_cast<float>(kHdScale);
+
+struct HdGlyph {
+    int width = 0, height = 0;
+    std::vector<std::uint8_t> rgba;
+};
+
+std::mutex g_hd_mutex;
+std::map<std::uint32_t, HdGlyph> g_hd_glyphs;
+std::map<std::uint32_t, HdGlyph> g_hd_icons;
+
+const HdGlyph& hd_glyph(Family family, Label label) {
+    const std::uint32_t key = static_cast<std::uint32_t>(family) << 8 | static_cast<std::uint32_t>(label);
+    auto it = g_hd_glyphs.find(key);
+    if (it != g_hd_glyphs.end()) return it->second;
+    HdGlyph glyph;
+    render_glyph_scaled(family, label, kHd, glyph.width, glyph.height, glyph.rgba);
+    return g_hd_glyphs.emplace(key, std::move(glyph)).first->second;
+}
+
+// The glyph drawn to fill a size x size icon at kHdScale: a square RGBA image.
+const HdGlyph& hd_icon(Family family, Label label, int size) {
+    const std::uint32_t key = static_cast<std::uint32_t>(family) << 16 | static_cast<std::uint32_t>(label) << 8 |
+                              static_cast<std::uint32_t>(size);
+    auto it = g_hd_icons.find(key);
+    if (it != g_hd_icons.end()) return it->second;
+    const int n = size * static_cast<int>(kHdScale);
+    const float scale = n / 30.0f;  // the 28 cell units of art fill the icon
+    int w = 0, h = 0;
+    std::vector<std::uint8_t> canvas;
+    render_glyph_scaled(family, label, scale, w, h, canvas);
+    HdGlyph icon;
+    icon.width = icon.height = n;
+    icon.rgba.assign(static_cast<std::size_t>(n) * n * 4u, 0);
+    const int ox = static_cast<int>(std::lround(17.0f * scale - n * 0.5f));
+    const int oy = static_cast<int>(std::lround(19.0f * scale - n * 0.5f));
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const int sx = x + ox, sy = y + oy;
+            if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+            std::memcpy(&icon.rgba[(static_cast<std::size_t>(y) * n + x) * 4u],
+                        &canvas[(static_cast<std::size_t>(sy) * w + sx) * 4u], 4u);
+        }
+    }
+    return g_hd_icons.emplace(key, std::move(icon)).first->second;
+}
+
+// RGB5A3 tiles to straight-alpha RGBA, then k times larger by bilinear filtering
+// of premultiplied colour.
+void upscale_rgb5a3(const std::uint8_t* source, int size, int k, std::vector<std::uint8_t>& out) {
+    std::vector<float> premultiplied(static_cast<std::size_t>(size) * size * 4u);
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const std::size_t at = (static_cast<std::size_t>(y >> 2) * (size / 4) + (x >> 2)) * 32u +
+                                   (static_cast<std::size_t>(y & 3) * 4u + (x & 3)) * 2u;
+            const unsigned v = source[at] << 8 | source[at + 1];
+            float r, g, b, a;
+            if (v & 0x8000u) {
+                a = 1.0f;
+                r = ((v >> 10) & 31u) / 31.0f; g = ((v >> 5) & 31u) / 31.0f; b = (v & 31u) / 31.0f;
+            } else {
+                a = ((v >> 12) & 7u) / 7.0f;
+                r = ((v >> 8) & 15u) / 15.0f; g = ((v >> 4) & 15u) / 15.0f; b = (v & 15u) / 15.0f;
+            }
+            float* q = &premultiplied[(static_cast<std::size_t>(y) * size + x) * 4u];
+            q[0] = r * a; q[1] = g * a; q[2] = b * a; q[3] = a;
+        }
+    }
+    const int n = size * k;
+    out.assign(static_cast<std::size_t>(n) * n * 4u, 0);
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const float sx = (x + 0.5f) / k - 0.5f, sy = (y + 0.5f) / k - 0.5f;
+            const int x0 = static_cast<int>(std::floor(sx)), y0 = static_cast<int>(std::floor(sy));
+            const float fx = sx - x0, fy = sy - y0;
+            float acc[4] = {0, 0, 0, 0};
+            for (int j = 0; j < 2; ++j) {
+                for (int i = 0; i < 2; ++i) {
+                    const int px = std::clamp(x0 + i, 0, size - 1), py = std::clamp(y0 + j, 0, size - 1);
+                    const float w = (i ? fx : 1.0f - fx) * (j ? fy : 1.0f - fy);
+                    const float* q = &premultiplied[(static_cast<std::size_t>(py) * size + px) * 4u];
+                    for (int c = 0; c < 4; ++c) acc[c] += q[c] * w;
+                }
+            }
+            std::uint8_t* o = &out[(static_cast<std::size_t>(y) * n + x) * 4u];
+            const float a = acc[3];
+            for (int c = 0; c < 3; ++c) {
+                o[c] = static_cast<std::uint8_t>(std::lround(std::clamp(a > 0.0f ? acc[c] / a : 0.0f, 0.0f, 1.0f) * 255.0f));
+            }
+            o[3] = static_cast<std::uint8_t>(std::lround(std::clamp(a, 0.0f, 1.0f) * 255.0f));
+        }
+    }
+}
+
+}  // namespace
+
+bool hd_replacement(std::uint32_t guest_address, std::uint32_t width, std::uint32_t height, std::uint8_t gx_format,
+                    const std::uint8_t* source, std::uint32_t source_bytes, HdImage& out) {
+    try {
+        HdRegion region;
+        {
+            std::lock_guard lock(g_region_mutex);
+            const auto it = std::find_if(g_regions.begin(), g_regions.end(),
+                                         [&](const HdRegion& r) { return r.address == guest_address; });
+            if (it == g_regions.end()) return false;
+            region = *it;
+        }
+        const PromptSet set = published();
+        if (set.family == Family::None) return false;
+        std::lock_guard lock(g_hd_mutex);
+        char key[96];
+        if (region.guidance) {
+            if (width != 128u || height != 128u || gx_format != 4u) return false;
+            const GuidanceTarget& target = kGuidanceTargets[region.index];
+            int size = 0;
+            render_guidance(set.family, target.kind, target.frame, 4.0f * kHd, size, out.rgba);
+            out.width = out.height = static_cast<std::uint32_t>(size);
+            std::snprintf(key, sizeof(key), "prompts_guidance%d_%d_%d_%d", target.kind, target.frame,
+                          static_cast<int>(set.family), static_cast<int>(kHdScale));
+            out.key = key;
+            return true;
+        }
+        if (region.icon) {
+            const int size = kIconTargets[region.index].size;
+            if (width != static_cast<std::uint32_t>(size) || height != width || gx_format != 2u) return false;
+            const Label label = set.labels[static_cast<std::size_t>(Slot::A)];
+            if (label == Label::None) return false;
+            const HdGlyph& icon = hd_icon(set.family, label, size);
+            out.width = static_cast<std::uint32_t>(icon.width);
+            out.height = static_cast<std::uint32_t>(icon.height);
+            out.rgba = icon.rgba;
+            std::snprintf(key, sizeof(key), "prompts_icon%d_%d_%d_%d", size, static_cast<int>(set.family),
+                          static_cast<int>(label), static_cast<int>(kHdScale));
+            out.key = key;
+            return true;
+        }
+        if (width != 128u || height != 128u || gx_format != 5u || source_bytes < 128u * 128u * 2u) return false;
+        upscale_rgb5a3(source, 128, static_cast<int>(kHdScale), out.rgba);
+        out.width = out.height = 128u * kHdScale;
+        std::uint64_t identity = 14695981039346656037ull;
+        const auto mix = [&](std::uint64_t value) { identity = (identity ^ value) * 1099511628211ull; };
+        mix(static_cast<std::uint64_t>(set.family));
+        mix(static_cast<std::uint64_t>(region.index));
+        for (std::size_t slot = 0; slot < kSlotCount; ++slot) {
+            const std::uint32_t glyph = kSlotGlyph[slot];
+            if (static_cast<int>(glyph / 9u) != region.index) continue;
+            const Label label = set.labels[slot];
+            if (label == Label::None) continue;
+            mix(slot << 8 | static_cast<std::uint64_t>(label));
+            const HdGlyph& cell = hd_glyph(set.family, label);
+            const int cell_index = static_cast<int>(glyph % 9u);
+            const int ox = (cell_index % 3) * 35 * static_cast<int>(kHdScale);
+            const int oy = (cell_index / 3) * 36 * static_cast<int>(kHdScale);
+            const int stride = static_cast<int>(out.width);
+            for (int y = 0; y < cell.height; ++y) {
+                for (int x = 0; x < cell.width; ++x) {
+                    const int dx = ox + x, dy = oy + y;
+                    if (dx >= stride || dy >= stride) continue;
+                    std::memcpy(&out.rgba[(static_cast<std::size_t>(dy) * stride + dx) * 4u],
+                                &cell.rgba[(static_cast<std::size_t>(y) * cell.width + x) * 4u], 4u);
+                }
+            }
+        }
+        std::snprintf(key, sizeof(key), "prompts_font%d_%016llx", region.index,
+                      static_cast<unsigned long long>(identity));
+        out.key = key;
+        return true;
+    } catch (...) {
+        return false;
     }
 }
 

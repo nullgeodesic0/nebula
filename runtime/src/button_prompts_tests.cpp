@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -27,6 +28,8 @@ void check(bool condition, const char* what) {
         std::cerr << "FAIL: " << what << '\n';
     }
 }
+
+void write_bmp(const char* path, const std::vector<std::uint8_t>& rgba, int w, int h);
 
 void defaults() {
     const input::BindingTable xbox = input::default_binding_table(ControlScheme::Xbox);
@@ -89,6 +92,37 @@ void rendering(const char* bmp_path) {
             check(opaque > 80 && minx >= 1 && miny >= 2 && maxx <= kCellW - 2 && maxy <= kCellH - 1, what);
         }
     }
+    {
+        // Tutorial pictures: every frame draws, the pose changes the picture.
+        int size = 0;
+        std::vector<std::uint8_t> a, b;
+        render_guidance(Family::Xbox, 0, 1, 4.0f, size, a);
+        check(size == 128 && a.size() == 128u * 128u * 4u, "guidance picture size");
+        render_guidance(Family::Xbox, 2, 3, 4.0f, size, b);
+        check(a != b, "guidance poses differ");
+        render_guidance(Family::DualSense, 0, 1, 4.0f, size, b);
+        check(a != b, "guidance families differ");
+        char path[260]{};
+        std::size_t length = 0;
+        if (getenv_s(&length, path, sizeof(path), "PROMPTS_GUIDE_BMP") == 0 && length > 1) {
+            std::vector<std::uint8_t> sheet(static_cast<std::size_t>(128 * 8) * 256 * 4, 255);
+            int column = 0;
+            for (Family family : {Family::Xbox, Family::DualSense}) {
+                column = 0;
+                const int frames[][2] = {{0, 1}, {0, 2}, {0, 3}, {0, 4}, {1, 7}, {1, 8}, {1, 9}, {2, 1}};
+                for (const auto& f : frames) {
+                    render_guidance(family, f[0], f[1], 4.0f, size, a);
+                    for (int y = 0; y < 128; ++y) {
+                        std::memcpy(&sheet[((static_cast<std::size_t>(y) + (family == Family::Xbox ? 0 : 128)) * 1024 +
+                                            static_cast<std::size_t>(column) * 128) * 4],
+                                    &a[static_cast<std::size_t>(y) * 128 * 4], 128u * 4u);
+                    }
+                    ++column;
+                }
+            }
+            write_bmp(path, sheet, 1024, 256);
+        }
+    }
     check(encode_rgb5a3(255, 255, 255, 255) == 0xFFFF, "opaque white");
     check(encode_rgb5a3(0, 0, 0, 255) == 0x8000, "opaque black");
     check(encode_rgb5a3(10, 10, 10, 0) == 0x0FFF, "transparent");
@@ -147,6 +181,34 @@ void rendering(const char* bmp_path) {
     std::fclose(f);
 }
 
+// Opaque-over-grey BMP of straight-alpha RGBA.
+void write_bmp(const char* path, const std::vector<std::uint8_t>& rgba, int w, int h) {
+    std::FILE* f = nullptr;
+    if (fopen_s(&f, path, "wb") != 0 || f == nullptr) return;
+    const std::uint32_t row = (static_cast<std::uint32_t>(w) * 3u + 3u) & ~3u;
+    const std::uint32_t size = 54u + row * static_cast<std::uint32_t>(h);
+    std::uint8_t header[54]{'B', 'M'};
+    std::memcpy(header + 2, &size, 4);
+    const std::uint32_t off = 54, dib = 40;
+    std::memcpy(header + 10, &off, 4);
+    std::memcpy(header + 14, &dib, 4);
+    std::memcpy(header + 18, &w, 4);
+    std::memcpy(header + 22, &h, 4);
+    header[26] = 1;
+    header[28] = 24;
+    std::fwrite(header, 1, sizeof(header), f);
+    std::vector<std::uint8_t> line(row);
+    for (int y = h - 1; y >= 0; --y) {
+        for (int x = 0; x < w; ++x) {
+            const std::uint8_t* p = &rgba[(static_cast<std::size_t>(y) * w + x) * 4];
+            const int grey = ((x / 16 + y / 16) & 1) ? 120 : 104;
+            for (int c = 0; c < 3; ++c) line[x * 3 + c] = static_cast<std::uint8_t>((p[2 - c] * p[3] + grey * (255 - p[3])) / 255);
+        }
+        std::fwrite(line.data(), 1, row, f);
+    }
+    std::fclose(f);
+}
+
 struct Ram {
     std::vector<std::byte> mem1 = std::vector<std::byte>(0x01800000u);
     std::vector<std::byte> mem2 = std::vector<std::byte>(0x04000000u);
@@ -196,8 +258,32 @@ void font_patch() {
     }
     check(!outside_changed, "the blank cell is untouched");
 
+    // HD: the texture cache asks for sheet 0 (A, B, C, remote, nunchuk, 1, 2) and sheet 2.
+    {
+        HdImage hd;
+        const auto* sheet0 = reinterpret_cast<const std::uint8_t*>(data);
+        check(hd_replacement(base + 0x60u, 128, 128, 5, sheet0, 0x8000u, hd), "xbox: HD sheet 0");
+        check(hd.width == 128u * kHdScale && hd.height == hd.width && hd.rgba.size() == hd.width * hd.height * 4u,
+              "HD sheet size");
+        check(hd.key.rfind("prompts_font0_", 0) == 0, "HD sheet key");
+        HdImage again;
+        check(hd_replacement(base + 0x60u, 128, 128, 5, sheet0, 0x8000u, again) && again.key == hd.key, "HD key is stable");
+        check(!hd_replacement(base + 0x60u + 0x8000u, 128, 128, 5, sheet0, 0x8000u, again), "sheet 1 has no prompts");
+        check(!hd_replacement(base + 0x60u, 64, 64, 5, sheet0, 0x2000u, again), "wrong size is not a sheet");
+        char path[260]{};
+        std::size_t length = 0;
+        if (getenv_s(&length, path, sizeof(path), "PROMPTS_HD_BMP") == 0 && length > 1) {
+            write_bmp(path, hd.rgba, static_cast<int>(hd.width), static_cast<int>(hd.height));
+        }
+    }
+
     publish({});
     tick(&ram.memory, &services, 0);
+    {
+        HdImage none;
+        check(!hd_replacement(base + 0x60u, 128, 128, 5, reinterpret_cast<const std::uint8_t*>(data), 0x8000u, none),
+              "wii remote prompts: no HD replacement");
+    }
     check(std::memcmp(before.data(), data, before.size()) == 0, "back to a keyboard: the original bytes return");
 
     publish(make_prompt_set(Family::DualSense, input::default_binding_table(ControlScheme::DualSense)));
