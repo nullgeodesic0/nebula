@@ -78,6 +78,9 @@ MAP = {
     # The dive's belly slide (飛び込み準備: waiting at the water's edge to dive). The dive's lunge ends on the
     # belly, so its landing goes straight into the slide.
     'divewait': ('HeadSliding', 1.0),
+    # The dive's landing without Z (引き戻し着地, the landing after a Pull Star): Odyssey's roll-out, which
+    # picks up from the belly slide's pose and tumbles forward onto the feet.
+    'pullbackland': ('RollingStandUp', 1.0),
 }
 
 # Expressions from the source's face animation. Galaxy picks Mario's face itself (the face model, which
@@ -94,7 +97,8 @@ NEUTRAL_ACTION = 'Wait oddysey idle'
 # instead of being stretched onto their host animation's length.
 FRAMES = {'aircontrol': (9, True),'swimdashringstart': (6, False), 'slidestomachrecover': (28, False),
           'icejumpland': (20, False), 'surfland': (12, False), 'icejumpstopland': (6, False),
-          'rolling': (30, False), 'dive': (48, False), 'divewait': (20, True)}
+          'rolling': (30, False), 'dive': (48, False), 'divewait': (20, True),
+          'pullbackland': (18, False)}
 # The custom model's joints without geometry (build_odyssey_model_mod.py UNSKINNED).
 UNSKINNED = ('IndexFinger', 'MiddleFinger', 'ThirdFinger', 'LittleFinger', 'Thumb')
 HIDDEN = 0.001

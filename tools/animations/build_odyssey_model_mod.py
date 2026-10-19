@@ -87,7 +87,9 @@ MATERIALS = {
     'EyeBallMT': ('MarioEyeBall_alb.png', (448, 256, 64, 64)),
 }
 BODY_SHAPE = 8
-PARTS = ('MarioFace.arc', 'MarioHandL.arc', 'MarioHandR.arc', 'MarioHair.arc')
+# Galaxy part models drawn over the body. The face and hands stay: the power-up suits (Bee, Hopper) use them,
+# and Nebula skips them on the normal body, which has its own (native_runtime.cpp hide_mario_parts).
+PARTS = ('MarioHair.arc',)
 # Mario's power-up models. Galaxy plays them with the main model's animation player, which is sized to the
 # main model's joints: with fewer joints of their own it writes past them (a crash on taking a Bee
 # Mushroom). They get the same added joints, without geometry.
