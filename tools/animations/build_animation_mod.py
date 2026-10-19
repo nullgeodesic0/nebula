@@ -129,17 +129,16 @@ MAP = {
     'damagewait': ('DamageWait', 1.0),
     'diefall': ('DeadFall', 1.0),
     'diefire': ('DeadFire', 1.0),
-    # Pipes and stars.
+    # Pipes. Getting a Power Star or Grand Star keeps Galaxy's own animations (powerstarget, grandstarget):
+    # Odyssey's GetShine is a short pose that does not fit the game's long star-get sequence.
     'earthenpipein': ('Dokan entrar', 1.0),
     'earthenpipeout': ('Dokan Salir', 1.0),
-    'powerstarget': ('GetShine', 1.0),
-    'grandstarget': ('GetShineGrand', 1.0),
 }
 # One-shots whose source is far shorter than the game's animation: 'hold' plays the source at its own speed
 # and holds its last frame (a grab, a pose), 'repeat' plays its cycle over and over (sleeping), instead of
 # stretching it into slow motion.
 FILL = {'treeclimbstart': 'hold', 'squarepolestart': 'hold', 'carrystart': 'hold', 'turn': 'hold',
-        'powerstarget': 'hold', 'grandstarget': 'hold', 'sleep': 'repeat'}
+        'sleep': 'repeat'}
 # Body offsets (model units: x right, y up, z forward) moving Odyssey's grip onto where Galaxy puts the pole
 # or ledge relative to Mario: Odyssey holds a pole further forward and hangs lower from a ledge.
 _TREE, _HANDSTAND, _SQUARE, _HANG = (0.0, 7.0, -14.0), (0.0, 25.0, -6.0), (0.0, 0.0, -33.0), (0.0, 32.0, 0.0)
