@@ -132,6 +132,8 @@ constexpr std::array<std::uint8_t, 6> kSoundRolling = {0x8d, 0xe2, 0x8a, 0x8a, 0
 constexpr std::array<std::uint8_t, 20> kSoundRollStart = {0x83, 0x58, 0x83, 0x79, 0x83, 0x56, 0x83, 0x83, 0x83, 0x8b, 0x83, 0x5f, 0x83, 0x62, 0x83, 0x56, 0x83, 0x85, 0x8e, 0xe3};  // スペシャルダッシュ弱
 constexpr std::array<std::uint8_t, 20> kSoundRollBoost = {0x83, 0x58, 0x83, 0x79, 0x83, 0x56, 0x83, 0x83, 0x83, 0x8b, 0x83, 0x5f, 0x83, 0x62, 0x83, 0x56, 0x83, 0x85, 0x8b, 0xad};  // スペシャルダッシュ強
 constexpr std::array<std::uint8_t, 6> kSoundBump = {0x95, 0xc7, 0x8f, 0xd5, 0x93, 0xcb};  // 壁衝突
+// 引き戻し着地 (PullBackLand) <- Odyssey LandRolling: the dive's landing, from hands and knees up to standing.
+constexpr std::array<std::uint8_t, 12> kNameDiveTumble = {0x88, 0xf8, 0x82, 0xab, 0x96, 0xdf, 0x82, 0xb5, 0x92, 0x85, 0x92, 0x6e};
 constexpr std::array<std::uint8_t, 4> kNameFall = {0x97, 0x8e, 0x89, 0xba};
 constexpr std::array<std::uint8_t, 4> kNameBase = {0x8a, 0xee, 0x96, 0x7b};
 // The run track's two animations: ãƒ©ãƒ³ (Run) and ãƒ¡ã‚¿ãƒ«ãƒ€ãƒƒã‚·ãƒ¥ (RunDash, Odyssey Dash when converted).
@@ -164,6 +166,7 @@ struct GuestNames {
     std::uint32_t pound_roll = 0;
     std::uint32_t dash_jump = 0;
     std::uint32_t dive_land = 0;
+    std::uint32_t dive_tumble = 0;
     std::uint32_t wall_bump = 0;
     std::array<std::uint32_t, 6> sounds{};
     std::uint32_t voice_roll = 0;
@@ -383,6 +386,7 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
             s_names.dash_jump = guest.find_string(kNameDashJump);
             s_names.dash_slow = guest.find_string(kNameDashSlow);
             s_names.dive_land = guest.find_string(kNameDiveLand);
+            s_names.dive_tumble = guest.find_string(kNameDiveTumble);
             s_names.wall_bump = guest.find_string(kNameWallBump);
             s_names.sounds = {guest.find_string(kSoundStepLeft), guest.find_string(kSoundStepRight),
                               guest.find_string(kSoundRolling), guest.find_string(kSoundRollStart),
@@ -458,8 +462,10 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
         }
         if (edit.stop_belly_slide) {
             ensure_names();
-            if (s_names.dive_land != 0u && (guest.call(kIsAnimationRun, self, s_names.dive_land) & 0xFFu) != 0u) {
-                guest.call(kStopAnimation, self, s_names.dive_land, s_names.base);
+            for (const std::uint32_t name : {s_names.dive_land, s_names.dive_tumble}) {
+                if (name != 0u && (guest.call(kIsAnimationRun, self, name) & 0xFFu) != 0u) {
+                    guest.call(kStopAnimation, self, name, s_names.base);
+                }
             }
         }
         if (edit.sounds != 0u) {
@@ -545,7 +551,7 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
             case moveset::Anim::DashJump: name = s_names.dash_jump; next = s_names.fall; break;
             case moveset::Anim::DiveHold: name = s_names.dive_land; break;
             case moveset::Anim::RollBump: name = s_names.wall_bump; next = s_names.base; break;
-            case moveset::Anim::DiveLand: name = s_names.dive_land; break;  // a loop, stopped later
+            case moveset::Anim::DiveLand: name = s_names.dive_tumble; next = s_names.base; break;
             case moveset::Anim::GroundPoundRoll:
                 name = s_names.pound_roll != 0u ? s_names.pound_roll : s_names.roll;
                 break;

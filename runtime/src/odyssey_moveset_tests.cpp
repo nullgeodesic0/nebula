@@ -366,10 +366,13 @@ bool test_dive() {
     Moveset n;
     (void)n.step(jump);
     (void)n.step(flying);
-    const MarioEdit belly = n.step(standing());
-    passed &= expect(!n.rolling() && belly.dust_puff && belly.anim == Anim::DiveLand && belly.set_walk_speed &&
-                         near(units(belly), 24.0f),
-                     "without Z it is the belly slide, at the dive's speed");
+    MarioView touch = standing();  // Galaxy still says jumping on the landing frame
+    touch.jumping = true;
+    const MarioEdit belly = n.step(touch);
+    passed &= expect(!n.rolling() && belly.dust_puff && belly.set_walk_speed && near(units(belly), 24.0f),
+                     "without Z he slides on at the dive's speed");
+    const MarioEdit tumble = n.step(standing());
+    passed &= expect(tumble.anim == Anim::DiveLand, "tumbling up once Galaxy's own landing is done");
     const MarioEdit sliding = n.step(standing());
     passed &= expect(sliding.set_walk_speed && units(sliding) < 24.0f && units(sliding) > 20.0f,
                      "which eases to a stop");

@@ -203,7 +203,7 @@ inline constexpr float kDiveStick = 0.3f;             // the stick pushed this f
 inline constexpr std::uint8_t kDiveAttackFrames = 4;  // the hit is renewed each frame of the dive
 inline constexpr int kDiveSpinGuard = 12;             // frames a new dive ignores the spin input
 inline constexpr float kPoundDiveRise = 40.0f;         // out of a ground pound's stall: a lift, not a jump
-inline constexpr int kBellySlideFrames = 30;          // the belly slide after a dive
+inline constexpr int kBellySlideFrames = 20;          // the slide after a dive, as he tumbles up out of it
 inline constexpr float kBellySlideDecay = 0.92f;       // per frame: the slide eases to a stop
 // How long a roll goes on before letting go of Z stands him up (Odyssey's standing-up delay).
 inline constexpr int kRollHoldCrouch = 47;            // a crouch roll
@@ -379,7 +379,9 @@ public:
             if (landed && dive_) {
                 edit.dust_puff = true;
                 if (!land_roll) {
-                    edit.anim = Anim::DiveLand;  // the belly slide
+                    // The tumble out of the dive, on the next frame: on this one Galaxy's own landing
+                    // still runs after us and would replace it.
+                    land_anim_pending_ = true;
                     belly_frames_ = kBellySlideFrames;
                     belly_speed_ = land_speed;
                     edit.set_walk_speed = true;
@@ -392,13 +394,18 @@ public:
 
         // --- The belly slide ends after its time, or as soon as he jumps. The cap button rolls out of it.
         bool belly_roll = false;
-        if (belly_frames_ > 0 && edit.anim != Anim::DiveLand && v.grounded) {
+        if (land_anim_pending_ && !v.jumping && !landed) {
+            land_anim_pending_ = false;
+            // (the cap button on that frame rolls out instead, below)
+            if (belly_frames_ > 0 && edit.anim == Anim::None && !(options_.roll && v.trig_c)) edit.anim = Anim::DiveLand;
+        }
+        if (belly_frames_ > 0 && v.grounded && !landed) {
             // He slides on his belly at the dive's speed, slowing smoothly.
             belly_speed_ *= kBellySlideDecay;
             edit.set_walk_speed = true;
             edit.walk_speed = belly_speed_ / v.table.walk_speed;
         }
-        if (belly_frames_ > 0 && edit.anim != Anim::DiveLand) {
+        if (belly_frames_ > 0 && edit.anim != Anim::DiveLand && !landed) {
             belly_roll = options_.roll && v.trig_c && v.grounded && !v.jumping;
             if (--belly_frames_ == 0 || v.jumping || belly_roll) {
                 belly_frames_ = 0;
@@ -717,6 +724,7 @@ private:
         roll_jump_air_ = false;
         long_jump_air_ = false;
         belly_frames_ = 0;
+        land_anim_pending_ = false;
     }
     void remember(const MarioView& v, Vec3 air_sideways) noexcept {
         prev_jumping_ = v.jumping;
@@ -739,6 +747,7 @@ private:
     bool roll_jump_air_ = false;  // in the air after a roll jump
     bool long_jump_air_ = false;  // in the air in a long jump
     int belly_frames_ = 0;  // frames left of the belly slide
+    bool land_anim_pending_ = false;  // the dive's landing animation is due next frame
     float belly_speed_ = 0.0f;  // the dive's speed as it landed
     int hold_frames_ = kRollHoldCrouch;  // frames from the start or a boost before Z can be let go
     Vec3 prev_air_sideways_{};
