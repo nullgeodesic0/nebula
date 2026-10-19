@@ -558,7 +558,8 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
                 name = s_names.pound_roll != 0u ? s_names.pound_roll : s_names.roll;
                 break;
             case moveset::Anim::RollLand: name = s_names.roll_land; next = s_names.base; break;
-            case moveset::Anim::RollEnd: name = s_names.roll_end; next = s_names.base; break;
+            // Getting up out of a roll is the same tumble up as out of a dive (Odyssey's RollingStandUp).
+            case moveset::Anim::RollEnd: name = s_names.dive_tumble != 0u ? s_names.dive_tumble : s_names.roll_end; next = s_names.base; break;
             case moveset::Anim::None: break;
             }
             if (name != 0u) guest.call(kChangeAnimation, self, name, next);
