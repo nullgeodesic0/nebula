@@ -2,6 +2,7 @@
 
 #include "galaxy/button_prompts.h"
 #include "galaxy/motion_style.h"
+#include "galaxy/odyssey_moveset_guest.h"
 #include "galaxy/experimental_ultrawide_aspect.h"
 #include "galaxy/layout_aspect.h"
 #include "galaxy/layout_aspect_cinema.h"
@@ -231,6 +232,9 @@ void dispatch_site_hook(
         return;
     case SiteHookKind::AnimationInterpole:
         shape_rmge01_animation_interpole(context, memory, services, guest_pc);
+        return;
+    case SiteHookKind::MarioActionMain:
+        tick_odyssey_moveset(context, memory, services, guest_pc);
         return;
     case SiteHookKind::LodDistance:
         // LodCtrl::update keeps the game's distances: which model shows is

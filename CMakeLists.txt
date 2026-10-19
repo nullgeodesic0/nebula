@@ -756,6 +756,7 @@ add_executable(NebulaRuntime
     runtime/src/native_thp_video.cpp
     runtime/src/coop_scheduler.cpp
     runtime/src/site_hooks.cpp
+    runtime/src/odyssey_moveset.cpp
     runtime/src/voice_replacement.cpp
 )
 # Exported releases pass their source identity; working checkouts report Git
@@ -987,6 +988,9 @@ target_link_libraries(galaxy_layout_aspect_tests PRIVATE galaxy_runtime_abi)
 add_executable(galaxy_motion_style_tests runtime/src/motion_style_tests.cpp)
 target_link_libraries(galaxy_motion_style_tests PRIVATE galaxy_runtime_abi)
 
+add_executable(galaxy_odyssey_moveset_tests runtime/src/odyssey_moveset_tests.cpp)
+target_link_libraries(galaxy_odyssey_moveset_tests PRIVATE galaxy_runtime_abi)
+
 add_executable(
     galaxy_native_input_causality_tests
     runtime/src/native_input_causality_tests.cpp)
@@ -1188,6 +1192,7 @@ if(MSVC)
         galaxy_controls_tests
         galaxy_button_prompts_tests
         galaxy_motion_style_tests
+        galaxy_odyssey_moveset_tests
     )
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
     endforeach()
@@ -1242,6 +1247,7 @@ galaxy_add_native_test(
 galaxy_add_native_test(native_input_reports galaxy_native_input_tests)
 galaxy_add_native_test(layout_aspect_geometry galaxy_layout_aspect_tests)
 galaxy_add_native_test(motion_style galaxy_motion_style_tests)
+galaxy_add_native_test(odyssey_moveset galaxy_odyssey_moveset_tests)
 galaxy_add_native_test(diagnostic_stick_lease galaxy_diagnostic_stick_lease_tests)
 galaxy_add_native_test(simulation_cache_affinity galaxy_simulation_cache_affinity_tests)
 galaxy_add_native_test(

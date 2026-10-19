@@ -63,9 +63,10 @@ namespace Nebula.Setup
         /// site hooks of the text speed (TextStep) and language (Language) settings; fused multiply-adds
         /// without the C runtime (a 1.0.0 SSE2 module calls its soft-float fma for every fused guest
         /// instruction); no LodDistance hook. 3: the motion style setting's site hook
-        /// (AnimationInterpole) before XanimePlayer::updateInterpoleRatio.
+        /// (AnimationInterpole) before XanimePlayer::updateInterpoleRatio. 4: the Odyssey moveset's site hook
+        /// (MarioActionMain) before Mario::actionMain.
         /// </summary>
-        public const int ModuleGeneration = 3;
+        public const int ModuleGeneration = 4;
 
         /// <summary>Installed modules an update must recompile rather than relink.</summary>
         private static bool ModulesNeedRebuild(InstalledInfo current)
