@@ -299,6 +299,12 @@ bool test_dive() {
                          edit.end_jump_hold && edit.jump_type == kNormalJumpType,
                      "C in the air dives");
     passed &= expect(edit.attack_frames > 0, "the dive hits enemies as a spin does");
+    passed &= expect(edit.cancel_squat, "a dive leaves the long jump's crouch");
+    Moveset h;
+    (void)h.step(jump);
+    MarioView replaced = again_view(jump);
+    replaced.dive_anim_running = false;
+    passed &= expect(h.step(replaced).anim == Anim::DiveHold, "the dive's pose holds until he lands");
     passed &= expect(near(edit.jump_vec.z, kDiveSpeed) && near(edit.jump_vec.y, rise, 0.01f) &&
                          near(edit.jump_vec.x, 0.0f),
                      "forward at 20, rising 182 units");

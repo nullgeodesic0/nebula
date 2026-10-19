@@ -405,6 +405,13 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
                              s_names.slide_dust, s_names.brake_puff);
             }
         };
+        if (s_moveset.diving() && view.eligible) {
+            ensure_names();
+            const auto running = [&](std::uint32_t name) {
+                return name != 0u && (guest.call(kIsAnimationRun, self, name) & 0xFFu) != 0u;
+            };
+            view.dive_anim_running = s_names.dive == 0u || running(s_names.dive) || running(s_names.dive_land);
+        }
         if (s_moveset.rolling() && view.eligible) {
             ensure_names();
             // Rolling, or still in the roll's start, which hands over to rolling by itself.
@@ -536,6 +543,7 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
                 break;
             case moveset::Anim::RollJump: name = s_names.roll_jump; next = s_names.fall; break;
             case moveset::Anim::DashJump: name = s_names.dash_jump; next = s_names.fall; break;
+            case moveset::Anim::DiveHold: name = s_names.dive_land; break;
             case moveset::Anim::RollBump: name = s_names.wall_bump; next = s_names.base; break;
             case moveset::Anim::DiveLand: name = s_names.dive_land; break;  // a loop, stopped later
             case moveset::Anim::GroundPoundRoll:

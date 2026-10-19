@@ -81,7 +81,7 @@ struct Constants {
 // Roll* are the roll's moments: starting (then rolling), rolling, a boost, the roll jump, landing from
 // it, and getting up when it ends on the ground.
 enum class Anim : std::uint8_t {
-    None, HighJump, Dive, Roll, RollStart, RollBoost, RollJump, RollLand, RollEnd, GroundPoundRoll, DashJump, DiveLand, RollBump
+    None, HighJump, Dive, Roll, RollStart, RollBoost, RollJump, RollLand, RollEnd, GroundPoundRoll, DashJump, DiveLand, RollBump, DiveHold
 };
 
 struct MarioView {
@@ -98,6 +98,7 @@ struct MarioView {
     bool spin_request = false;  // the game would spin this frame (MarioActor::isRequestSpin/Rush): in the
                                 // air, and during a roll
     bool roll_anim_running = true;  // the roll's animation is playing
+    bool dive_anim_running = true;  // the dive's lunge or its belly pose is playing
     bool braking = false;       // Galaxy's turn-around skid (Mario::_3D0, MovementStates._4): it zeroes
                                 // his speed every frame, so forcing a speed there loops its sound
     std::uint32_t jump_type = 0;  // Mario::_430
@@ -323,6 +324,9 @@ public:
                 edit.set_jump_vec = true;
                 edit.jump_vec = heading * kDiveSpeed + up * rise;
                 edit.end_jump_hold = true;
+                // A long jump keeps Galaxy's crouch through the air, and its pose would come back when
+                // the lunge ends: the dive leaves it.
+                edit.cancel_squat = true;
                 edit.end_hip_drop_air = v.hip_drop;
                 edit.set_jump_type = true;  // the first jump's gravity, whatever jump he dived out of
                 edit.jump_type = kNormalJumpType;
@@ -355,6 +359,10 @@ public:
 
         // The dive tackles: the spin's hit on enemies, renewed every frame of it.
         if (dive_ && v.jumping && !v.grounded) edit.attack_frames = kDiveAttackFrames;
+        // The dive's pose holds until he lands: if anything replaced it, the belly pose comes back.
+        if (dive_ && v.jumping && !v.grounded && !v.dive_anim_running && edit.anim == Anim::None) {
+            edit.anim = Anim::DiveHold;
+        }
 
         // Air moves that can land into a roll.
         if (jump_started && v.jump_type == kSquatJumpType && !edit.set_jump_vec) long_jump_air_ = true;
