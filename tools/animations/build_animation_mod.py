@@ -115,7 +115,6 @@ MAP = {
     'turn': ('Turn', 1.0),
     'jumpturn': ('JumpTurn', 0.6),
     'jumpturnland': ('LandTurn', 1.0),
-    'landstiffen': ('LandStiffen calambre', 1.0),
     'push': ('Push empujar', 1.0),
     'sleep': ('Sleep', 1.0),
     'firerun': ('FireRun', 1.0),
@@ -129,6 +128,7 @@ MAP = {
     'damagewait': ('DamageWait', 1.0),
     'diefall': ('DeadFall', 1.0),
     'diefire': ('DeadFire', 1.0),
+    # The hard landing (ハード着地, landstiffen: after a Launch Star and long falls) keeps Galaxy's own.
     # Pipes. Getting a Power Star or Grand Star keeps Galaxy's own animations (powerstarget, grandstarget):
     # Odyssey's GetShine is a short pose that does not fit the game's long star-get sequence.
     'earthenpipein': ('Dokan entrar', 1.0),
