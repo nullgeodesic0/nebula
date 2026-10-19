@@ -234,11 +234,15 @@ def main():
             motion[:3, :3] = retarget.quat_to_mat(np.asarray(ch['rotation_quaternion'][0], float))
         return (rig_pose(parent) if parent else np.eye(4)) @ local @ motion
 
+    # The animation rig's armature is in Galaxy's axes (Y up), the model's mesh and bones in Blender's (Z up).
+    to_galaxy = to_galaxy_axes(np.eye(3)).T
+
     def turn(bone):
-        """World rotation of a bone from rest to the idle pose (the bones' own rolls do not matter)."""
+        """World rotation of a bone from rest to the idle pose (the bones' own rolls do not matter), in the
+        model's axes."""
         if bone in NEW_UNDER or bone not in abones:
             return np.eye(3)
-        return rig_pose(bone)[:3, :3] @ abones[bone]['mat'][:3, :3].T
+        return to_galaxy.T @ rig_pose(bone)[:3, :3] @ abones[bone]['mat'][:3, :3].T @ to_galaxy
 
     def joint_pos(bone):
         """Posed position of a bone's head in the model: its parent's turn carries it."""
