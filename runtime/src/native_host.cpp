@@ -13939,7 +13939,7 @@ bool GuestAddressSpace::write_device_register(
                 throw std::runtime_error(message.str());
             }
             if ((written & kPeTokenInterruptClear) != 0u) {
-                pe_token_pending_.store(false, std::memory_order_release);
+                clear_pe_token();
             }
             if ((written & kPeFinishInterruptClear) != 0u) {
                 pe_finish_pending_.store(false, std::memory_order_release);

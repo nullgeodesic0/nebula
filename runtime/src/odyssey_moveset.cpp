@@ -284,6 +284,62 @@ bool plausible_mario(std::uint32_t address) {
     return address >= 0x80000000u && address < 0x81800000u && (address & 3u) == 0u;
 }
 
+// GALAXY_TRACE_POINTER=1: on each Wii A press (player 1) the game's own pointer state, which Pull Stars,
+// Star Bits and other pointer targets test (StarPointerUtil isStarPointerPointingCore / StarPointerTarget).
+bool pointer_trace_enabled() {
+    static const bool enabled = [] {
+        char* value = nullptr;
+        std::size_t length = 0u;
+        const bool set = _dupenv_s(&value, &length, "GALAXY_TRACE_POINTER") == 0 && value != nullptr &&
+                         value[0] != '\0' && value[0] != '0';
+        std::free(value);
+        return set;
+    }();
+    return enabled;
+}
+
+constexpr std::uint32_t kGetStarPointerDirector = 0x80386000u;    // StarPointerFunction::getStarPointerDirector
+constexpr std::uint32_t kGetStarPointerController = 0x803858C0u;  // StarPointerDirector::getStarPointerController
+constexpr std::uint32_t kGetStarPointerLayout = 0x803858D0u;      // StarPointerDirector::getStarPointerLayout
+constexpr std::uint32_t kTestCorePadTriggerA = 0x803D25CCu;       // MR::testCorePadTriggerA(long)
+constexpr std::uint32_t kTestCorePadButtonA = 0x803D2244u;        // MR::testCorePadButtonA(long)
+constexpr std::uint32_t kIsCorePadPointInScreen = 0x803D2168u;    // MR::isCorePadPointInScreen(long)
+
+void trace_pointer(const Guest& guest, std::uint32_t self) {
+    static std::uint32_t s_held_frames = 0u;
+    static std::uint32_t s_frames = 0u;
+    const bool trigger = (guest.call(kTestCorePadTriggerA, 0u) & 0xFFu) != 0u;
+    const bool held = (guest.call(kTestCorePadButtonA, 0u) & 0xFFu) != 0u;
+    s_held_frames = held ? s_held_frames + 1u : 0u;
+    // Star Bits are taken by pointing alone: a line every 30 frames as well.
+    if (!trigger && !(held && s_held_frames % 20u == 0u) && ++s_frames % 30u != 0u) return;
+    const bool in_screen = (guest.call(kIsCorePadPointInScreen, 0u) & 0xFFu) != 0u;
+    const std::uint32_t director = guest.call(kGetStarPointerDirector);
+    if (!plausible_mario(director)) return;
+    const std::uint32_t controller = guest.call(kGetStarPointerController, director, 0u);
+    const std::uint32_t layout = guest.call(kGetStarPointerLayout, director, 0u);
+    if (!plausible_mario(controller)) return;
+    // StarPointerController: +0x04 mPastInfo, +0x18 mInfo (DpdInfo: pos, in-screen, draw-ready, z, view z).
+    const auto dpd = [&](std::uint32_t at) {
+        return std::array<double, 5>{guest.f32(at), guest.f32(at + 4u), static_cast<double>(guest.u8(at + 8u)),
+                                     static_cast<double>(guest.u32(at + 0x0Cu)), guest.f32(at + 0x10u)};
+    };
+    const auto past = dpd(controller + 0x04u);
+    const auto now = dpd(controller + 0x18u);
+    const bool valid = plausible_mario(layout) && guest.u8(layout + 0x6Eu) != 0u;
+    const double radius = plausible_mario(layout) ? guest.f32(layout + 0x38u) : -1.0;
+    const std::uint32_t kind = plausible_mario(layout) ? guest.u32(layout + 0x28u) : 0xFFFFFFFFu;
+    const std::uint32_t states = guest.u32(self + mario::kStates);
+    std::fprintf(stderr,
+                 "[pointer] %s held=%u core-in-screen=%d layout-valid=%d kind=%u radius=%.1f "
+                 "past=(%.1f,%.1f in=%d z=0x%06X view=%.1f) now=(%.1f,%.1f in=%d z=0x%06X view=%.1f) "
+                 "grounded=%d jumping=%d\n",
+                 trigger ? "A-trigger" : held ? "A-held" : "tick", s_held_frames, in_screen, valid, kind, radius, past[0], past[1],
+                 static_cast<int>(past[2]), static_cast<unsigned>(past[3]), past[4], now[0], now[1],
+                 static_cast<int>(now[2]), static_cast<unsigned>(now[3]), now[4],
+                 (states & mario::kGrounded) != 0u, (states & mario::kJumping) != 0u);
+}
+
 }  // namespace
 
 void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
@@ -302,7 +358,7 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
             s_moveset.reset();
             s_active = false;
         }
-        return;
+        if (!pointer_trace_enabled()) return;
     }
     const std::uint32_t self = context->gpr[3];
     if (!plausible_mario(self)) return;
@@ -313,6 +369,8 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
     const PpcContext saved = *context;
     Guest guest(context, memory, services, guest_pc);
     do {
+        if (pointer_trace_enabled()) trace_pointer(guest, self);
+        if (!settings.enabled) break;
         const std::uint32_t actor = guest.u32(self + mario::kActor);
         if (!plausible_mario(actor)) break;
         s_active = true;

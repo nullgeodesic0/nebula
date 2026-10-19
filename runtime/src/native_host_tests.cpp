@@ -15857,6 +15857,22 @@ int main(int argc, char** argv) {
         "fragmented WGPIPE BP 0x48 draw-sync raises PE token");
     galaxy::guest_store_u16(
         guest_memory, 0xCC00100Au, 0x0004u, nullptr, 0x80004000u);
+    // Two draw-sync tokens completing before the handler runs (Galaxy's StarPointerPeekZ token, then a
+    // later one): each reaches the handler in order. The first one's callback (the pointer's depth
+    // peek) used to be lost when the second overwrote the latch.
+    galaxy::guest_store_u64(guest_memory, 0xCC008000, 0x6148000003000000ull, nullptr, 0x80004000);
+    galaxy::guest_store_u64(guest_memory, 0xCC008000, 0x6148000005000000ull, nullptr, 0x80004000);
+    passed &= expect(
+        memory.pe_token_pending() && memory.pe_token_value() == 0x0003u,
+        "the first of two pending draw-sync tokens is delivered first");
+    galaxy::guest_store_u16(guest_memory, 0xCC00100Au, 0x0004u, nullptr, 0x80004000u);
+    passed &= expect(
+        memory.pe_token_pending() && memory.pe_token_value() == 0x0005u,
+        "clearing the token interrupt raises the next waiting token");
+    galaxy::guest_store_u16(guest_memory, 0xCC00100Au, 0x0004u, nullptr, 0x80004000u);
+    passed &= expect(
+        !memory.pe_token_pending(),
+        "the token interrupt stays clear once no token waits");
 
     {
         auto tail_memory_storage =
