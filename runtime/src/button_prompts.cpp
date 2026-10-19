@@ -118,6 +118,10 @@ public:
           w_(static_cast<int>(std::ceil(cell_w * scale))),
           h_(static_cast<int>(std::ceil(cell_h * scale))),
           px_(static_cast<std::size_t>(w_) * static_cast<std::size_t>(h_) * 4u, 0.0f) {}
+    // Button colours (the DualSense family is the pale one).
+    struct Palette {
+        Rgb body, rim, ink;
+    } pal{rgb8(0x2a, 0x2e, 0x35), rgb8(0xb9, 0xbf, 0xc8), rgb8(0xf4, 0xf6, 0xf8)};
     [[nodiscard]] int width() const { return w_; }
     [[nodiscard]] int height() const { return h_; }
 
@@ -254,18 +258,21 @@ constexpr Rgb kBody = rgb8(0x2a, 0x2e, 0x35);
 constexpr Rgb kRim = rgb8(0xb9, 0xbf, 0xc8);
 constexpr Rgb kInk = rgb8(0xf4, 0xf6, 0xf8);
 
+
+
+
 void draw_bars(Canvas& c, int count, float half_width, float pitch) {
     for (int i = 0; i < count; ++i) {
         const float y = kCy + (i - (count - 1) * 0.5f) * pitch;
-        c.fill([&](float px, float py) { return sd_rbox(px, py, kCx, y, half_width, 1.1f, 1.0f); }, kInk);
+        c.fill([&](float px, float py) { return sd_rbox(px, py, kCx, y, half_width, 1.1f, 1.0f); }, c.pal.ink);
     }
 }
 
 void draw_house(Canvas& c) {
     const float roof[3][2] = {{kCx - 8.5f, kCy - 0.5f}, {kCx, kCy - 8.5f}, {kCx + 8.5f, kCy - 0.5f}};
-    c.fill([&](float x, float y) { return sd_triangle(x, y, roof); }, kInk);
-    c.fill([&](float x, float y) { return sd_rbox(x, y, kCx, kCy + 4.0f, 5.6f, 4.4f, 0.6f); }, kInk);
-    c.fill([&](float x, float y) { return sd_rbox(x, y, kCx, kCy + 6.0f, 1.5f, 2.4f, 0.4f); }, kBody);
+    c.fill([&](float x, float y) { return sd_triangle(x, y, roof); }, c.pal.ink);
+    c.fill([&](float x, float y) { return sd_rbox(x, y, kCx, kCy + 4.0f, 5.6f, 4.4f, 0.6f); }, c.pal.ink);
+    c.fill([&](float x, float y) { return sd_rbox(x, y, kCx, kCy + 6.0f, 1.5f, 2.4f, 0.4f); }, c.pal.body);
 }
 
 void draw_dpad(Canvas& c) {
@@ -274,8 +281,8 @@ void draw_dpad(Canvas& c) {
                grow;
     };
     c.fill([&](float x, float y) { return cross(x, y, 1.6f); }, rgb8(8, 10, 14));
-    c.fill([&](float x, float y) { return cross(x, y, 0.3f); }, kRim);
-    c.fill([&](float x, float y) { return cross(x, y, -1.0f); }, kBody);
+    c.fill([&](float x, float y) { return cross(x, y, 0.3f); }, c.pal.rim);
+    c.fill([&](float x, float y) { return cross(x, y, -1.0f); }, c.pal.body);
     const float s = 2.6f;
     const struct { float x, y; int dir; } arrows[4] = {{kCx, kCy - 9.4f, 0}, {kCx, kCy + 9.4f, 1},
                                                       {kCx - 9.4f, kCy, 2}, {kCx + 9.4f, kCy, 3}};
@@ -285,7 +292,7 @@ void draw_dpad(Canvas& c) {
         else if (a.dir == 1) { t[0][0] = a.x - s; t[0][1] = a.y - s * 0.8f; t[1][0] = a.x; t[1][1] = a.y + s * 0.8f; t[2][0] = a.x + s; t[2][1] = a.y - s * 0.8f; }
         else if (a.dir == 2) { t[0][0] = a.x + s * 0.8f; t[0][1] = a.y - s; t[1][0] = a.x - s * 0.8f; t[1][1] = a.y; t[2][0] = a.x + s * 0.8f; t[2][1] = a.y + s; }
         else { t[0][0] = a.x - s * 0.8f; t[0][1] = a.y - s; t[1][0] = a.x - s * 0.8f; t[1][1] = a.y + s; t[2][0] = a.x + s * 0.8f; t[2][1] = a.y; }
-        c.fill([&](float x, float y) { return sd_triangle(x, y, t); }, kInk);
+        c.fill([&](float x, float y) { return sd_triangle(x, y, t); }, c.pal.ink);
     }
 }
 
@@ -295,12 +302,12 @@ void draw_controller(Canvas& c) {
                          sd_rbox(x, y, kCx - 9.0f, kCy + 5.0f, 4.4f, 7.0f, 3.8f),
                          sd_rbox(x, y, kCx + 9.0f, kCy + 5.0f, 4.4f, 7.0f, 3.8f)});
     };
-    c.badge(body, kBody, kRim);
-    c.fill([&](float x, float y) { return sd_circle(x, y, kCx - 6.5f, kCy - 3.0f, 2.6f); }, kInk, 0.9f);
-    c.fill([&](float x, float y) { return sd_circle(x, y, kCx + 3.0f, kCy + 2.0f, 2.6f); }, kInk, 0.9f);
+    c.badge(body, c.pal.body, c.pal.rim);
+    c.fill([&](float x, float y) { return sd_circle(x, y, kCx - 6.5f, kCy - 3.0f, 2.6f); }, c.pal.ink, 0.9f);
+    c.fill([&](float x, float y) { return sd_circle(x, y, kCx + 3.0f, kCy + 2.0f, 2.6f); }, c.pal.ink, 0.9f);
     c.fill([&](float x, float y) {
         return std::min(sd_rbox(x, y, kCx - 3.0f, kCy + 2.0f, 2.4f, 0.8f, 0.4f), sd_rbox(x, y, kCx - 3.0f, kCy + 2.0f, 0.8f, 2.4f, 0.4f));
-    }, kInk, 0.9f);
+    }, c.pal.ink, 0.9f);
     const Rgb dots[4] = {rgb8(0x6d, 0xc3, 0x31), rgb8(0xf0, 0x45, 0x3b), rgb8(0x3d, 0x9b, 0xe9), rgb8(0xf8, 0xc2, 0x1c)};
     const float dx[4] = {0.0f, 2.8f, -2.8f, 0.0f}, dy[4] = {2.8f, 0.0f, 0.0f, -2.8f};
     for (int i = 0; i < 4; ++i) {
@@ -309,14 +316,14 @@ void draw_controller(Canvas& c) {
 }
 
 void draw_stick_icon(Canvas& c, const wchar_t* letter) {
-    c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, kBody, kRim);
+    c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, c.pal.body, c.pal.rim);
     c.fill([](float x, float y) { return sd_circle(x, y, kCx, kCy, 8.6f); }, rgb8(0x14, 0x17, 0x1b));
     c.fill([](float x, float y) { return sd_circle(x, y, kCx, kCy, 7.6f); }, rgb8(0xc9, 0xce, 0xd6));
     c.text(letter, 12, kCx, kCy, rgb8(0x20, 0x24, 0x2a));
 }
 
 void draw_face(Canvas& c, Family family, Label label) {
-    c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, kBody, kRim);
+    c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, c.pal.body, c.pal.rim);
     if (family == Family::Xbox) {
         const wchar_t* letter = label == Label::South ? L"A" : label == Label::East ? L"B"
                               : label == Label::West ? L"X" : L"Y";
@@ -328,7 +335,7 @@ void draw_face(Canvas& c, Family family, Label label) {
     constexpr float w = 2.5f;
     switch (label) {
     case Label::South: {
-        const Rgb color = rgb8(0x7f, 0xa9, 0xea);
+        const Rgb color = rgb8(0x3d, 0x6f, 0xd6);
         c.fill([&](float x, float y) {
             return std::min(sd_segment(x, y, kCx - 5.0f, kCy - 5.0f, kCx + 5.0f, kCy + 5.0f),
                             sd_segment(x, y, kCx - 5.0f, kCy + 5.0f, kCx + 5.0f, kCy - 5.0f)) - w * 0.5f;
@@ -336,32 +343,32 @@ void draw_face(Canvas& c, Family family, Label label) {
         break;
     }
     case Label::East:
-        c.fill([&](float x, float y) { return ring(sd_circle(x, y, kCx, kCy, 5.8f), w); }, rgb8(0xff, 0x6f, 0x7d));
+        c.fill([&](float x, float y) { return ring(sd_circle(x, y, kCx, kCy, 5.8f), w); }, rgb8(0xe0, 0x41, 0x4f));
         break;
     case Label::West:
-        c.fill([&](float x, float y) { return ring(sd_rbox(x, y, kCx, kCy, 5.2f, 5.2f, 0.6f), w); }, rgb8(0xf2, 0x8e, 0xd8));
+        c.fill([&](float x, float y) { return ring(sd_rbox(x, y, kCx, kCy, 5.2f, 5.2f, 0.6f), w); }, rgb8(0xd4, 0x50, 0x9f));
         break;
     default: {
         const float t[3][2] = {{kCx - 6.4f, kCy + 4.6f}, {kCx + 6.4f, kCy + 4.6f}, {kCx, kCy - 6.6f}};
-        c.fill([&](float x, float y) { return ring(sd_triangle(x, y, t), w); }, rgb8(0x57, 0xd8, 0xa4));
+        c.fill([&](float x, float y) { return ring(sd_triangle(x, y, t), w); }, rgb8(0x1f, 0xae, 0x7e));
         break;
     }
     }
 }
 
 void draw_shoulder(Canvas& c, const wchar_t* text) {
-    c.badge([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 13.0f, 7.6f, 6.0f); }, kBody, kRim);
-    c.text(text, 12, kCx, kCy, kInk);
+    c.badge([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 13.0f, 7.6f, 6.0f); }, c.pal.body, c.pal.rim);
+    c.text(text, 12, kCx, kCy, c.pal.ink);
 }
 
 void draw_trigger(Canvas& c, const wchar_t* text) {
-    c.badge([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 11.2f, 12.4f, 6.0f); }, kBody, kRim);
-    c.text(text, 12, kCx, kCy + 1.0f, kInk);
+    c.badge([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 11.2f, 12.4f, 6.0f); }, c.pal.body, c.pal.rim);
+    c.text(text, 12, kCx, kCy + 1.0f, c.pal.ink);
 }
 
 void draw_round_text(Canvas& c, const wchar_t* text, int size) {
-    c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, kBody, kRim);
-    c.text(text, size, kCx, kCy, kInk);
+    c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, c.pal.body, c.pal.rim);
+    c.text(text, size, kCx, kCy, c.pal.ink);
 }
 
 // ------------------------------------------------------------ guidance art
@@ -456,10 +463,10 @@ void draw_controller_art(Canvas& c, Family family, float cx, float cy, float s, 
         disc(3.4f, 2.8f, 1.6f, rgb8(0x3b, 0x3f, 0x47));
         bar(-8.4f, -2.2f, 2.2f, 0.8f, 0.3f, rgb8(0x17, 0x19, 0x1d));  // d-pad
         bar(-8.4f, -2.2f, 0.8f, 2.2f, 0.3f, rgb8(0x17, 0x19, 0x1d));
-        disc(8.4f, -4.0f, 1.0f, rgb8(0x57, 0xd8, 0xa4));              // triangle
+        disc(8.4f, -4.0f, 1.0f, rgb8(0x1f, 0xae, 0x7e));              // triangle
         disc(8.4f, -0.4f, 1.0f, rgb8(0x7f, 0xa9, 0xea));              // cross
-        disc(6.6f, -2.2f, 1.0f, rgb8(0xf2, 0x8e, 0xd8));              // square
-        disc(10.2f, -2.2f, 1.0f, rgb8(0xff, 0x6f, 0x7d));             // circle
+        disc(6.6f, -2.2f, 1.0f, rgb8(0xd4, 0x50, 0x9f));              // square
+        disc(10.2f, -2.2f, 1.0f, rgb8(0xe0, 0x41, 0x4f));             // circle
     }
 }
 
@@ -512,6 +519,7 @@ void render_glyph_scaled(Family family, Label label, float scale, int& width, in
                          std::vector<std::uint8_t>& rgba) {
     Canvas c(scale);
     const bool xbox = family == Family::Xbox;
+    if (!xbox) c.pal = {rgb8(0xf2, 0xf4, 0xf8), rgb8(0x7d, 0x85, 0x91), rgb8(0x1f, 0x23, 0x29)};
     switch (label) {
     case Label::South: case Label::East: case Label::West: case Label::North:
         draw_face(c, family, label);
@@ -523,31 +531,31 @@ void render_glyph_scaled(Family family, Label label, float scale, int& width, in
     case Label::L3: draw_round_text(c, xbox ? L"LS" : L"L3", 12); break;
     case Label::R3: draw_round_text(c, xbox ? L"RS" : L"R3", 12); break;
     case Label::Start:
-        if (xbox) c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, kBody, kRim);
-        else c.badge([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 13.0f, 9.2f, 9.2f); }, kBody, kRim);
+        if (xbox) c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, c.pal.body, c.pal.rim);
+        else c.badge([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 13.0f, 9.2f, 9.2f); }, c.pal.body, c.pal.rim);
         draw_bars(c, 3, 6.4f, 4.4f);
         break;
     case Label::Back:
         if (xbox) {
-            c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, kBody, kRim);
-            c.fill([](float x, float y) { return ring(sd_rbox(x, y, kCx - 2.2f, kCy - 2.2f, 4.6f, 4.6f, 1.0f), 1.9f); }, kInk);
-            c.fill([](float x, float y) { return ring(sd_rbox(x, y, kCx + 2.2f, kCy + 2.2f, 4.6f, 4.6f, 1.0f), 1.9f); }, kInk);
+            c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, c.pal.body, c.pal.rim);
+            c.fill([](float x, float y) { return ring(sd_rbox(x, y, kCx - 2.2f, kCy - 2.2f, 4.6f, 4.6f, 1.0f), 1.9f); }, c.pal.ink);
+            c.fill([](float x, float y) { return ring(sd_rbox(x, y, kCx + 2.2f, kCy + 2.2f, 4.6f, 4.6f, 1.0f), 1.9f); }, c.pal.ink);
         } else {
-            c.badge([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 13.0f, 9.2f, 9.2f); }, kBody, kRim);
+            c.badge([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 13.0f, 9.2f, 9.2f); }, c.pal.body, c.pal.rim);
             draw_bars(c, 2, 6.4f, 5.4f);
         }
         break;
     case Label::Home:
         if (xbox) {
-            c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, kBody, kRim);
+            c.badge([](float x, float y) { return sd_circle(x, y, kCx, kCy, 13.0f); }, c.pal.body, c.pal.rim);
             draw_house(c);
         } else {
             draw_round_text(c, L"PS", 13);
         }
         break;
     case Label::Capture:
-        c.badge([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 13.4f, 9.4f, 3.4f); }, kBody, kRim);
-        c.fill([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 7.0f, 1.0f, 1.0f); }, kInk, 0.8f);
+        c.badge([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 13.4f, 9.4f, 3.4f); }, c.pal.body, c.pal.rim);
+        c.fill([](float x, float y) { return sd_rbox(x, y, kCx, kCy, 7.0f, 1.0f, 1.0f); }, c.pal.ink, 0.8f);
         break;
     case Label::Dpad: draw_dpad(c); break;
     case Label::LeftStick: draw_stick_icon(c, L"L"); break;
@@ -1074,12 +1082,20 @@ const std::optional<Family>& forced_family() {
 
 void publish(const PromptSet& requested) noexcept {
     PromptSet set = requested;
+    static const bool debug = [] {
+        char value[8]{};
+        std::size_t length = 0;
+        return getenv_s(&length, value, sizeof(value), "NEBULA_PROMPTS_DEBUG") == 0 && length > 1;
+    }();
     if (const auto& forced = forced_family()) {
         set = make_prompt_set(*forced, input::default_binding_table(
             *forced == Family::Xbox ? input::ControlScheme::Xbox : input::ControlScheme::DualSense));
     }
     std::lock_guard lock(g_publish_mutex);
     if (set == g_published) return;
+    if (debug) std::fprintf(stderr, "[prompts] now showing family %d (A=%s B=%s)\n", static_cast<int>(set.family),
+                            label_name(set.family, set.labels[static_cast<std::size_t>(Slot::A)]),
+                            label_name(set.family, set.labels[static_cast<std::size_t>(Slot::B)]));
     g_published = set;
     g_revision.fetch_add(1, std::memory_order_release);
 }
@@ -1248,15 +1264,55 @@ void upscale_rgb5a3(const std::uint8_t* source, int size, int k, std::vector<std
 
 }  // namespace
 
+static bool hd_replacement_impl(std::uint32_t guest_address, std::uint32_t width, std::uint32_t height,
+                               std::uint8_t gx_format, const std::uint8_t* source, std::uint32_t source_bytes,
+                               HdImage& out);
+
 bool hd_replacement(std::uint32_t guest_address, std::uint32_t width, std::uint32_t height, std::uint8_t gx_format,
                     const std::uint8_t* source, std::uint32_t source_bytes, HdImage& out) {
+    const bool hit = hd_replacement_impl(guest_address, width, height, gx_format, source, source_bytes, out);
+    static const bool debug = [] {
+        char value[8]{};
+        std::size_t length = 0;
+        return getenv_s(&length, value, sizeof(value), "NEBULA_PROMPTS_DEBUG") == 0 && length > 1;
+    }();
+    if (hit && debug) {
+        static std::mutex seen_mutex;
+        static std::map<std::string, int> seen;
+        std::lock_guard lock(seen_mutex);
+        if (seen.emplace(out.key, 1).second) std::fprintf(stderr, "[prompts] HD texture %s (%ux%u)\n", out.key.c_str(), out.width, out.height);
+    }
+    return hit;
+}
+
+static bool hd_replacement_impl(std::uint32_t guest_address, std::uint32_t width, std::uint32_t height,
+                                std::uint8_t gx_format, const std::uint8_t* source, std::uint32_t source_bytes,
+                                HdImage& out) {
     try {
         HdRegion region;
         {
             std::lock_guard lock(g_region_mutex);
             const auto it = std::find_if(g_regions.begin(), g_regions.end(),
-                                         [&](const HdRegion& r) { return r.address == guest_address; });
-            if (it == g_regions.end()) return false;
+                                         [&](const HdRegion& r) {
+                                             // The texture cache holds physical addresses (0x11EA8EC0), the scan virtual ones.
+                                             return (r.address & 0x1FFFFFFFu) == (guest_address & 0x1FFFFFFFu);
+                                         });
+            if (it == g_regions.end()) {
+                static const bool debug = [] {
+                    char value[8]{};
+                    std::size_t length = 0;
+                    return getenv_s(&length, value, sizeof(value), "NEBULA_PROMPTS_DEBUG") == 0 && length > 1;
+                }();
+                if (debug && width == 128u && height == 128u && gx_format == 5u) {
+                    static std::map<std::uint32_t, int> seen;
+                    if (seen.emplace(guest_address, 1).second && seen.size() < 40) {
+                        std::fprintf(stderr, "[prompts] 128x128 RGB5A3 texture at 0x%08X not a prompt sheet (regions:", guest_address);
+                        for (const HdRegion& r : g_regions) std::fprintf(stderr, " 0x%08X", r.address);
+                        std::fprintf(stderr, ")\n");
+                    }
+                }
+                return false;
+            }
             region = *it;
         }
         const PromptSet set = published();
