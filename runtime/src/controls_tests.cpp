@@ -1290,14 +1290,13 @@ void test_defaults_and_migration() {
     expect(only(sw[WiiTarget::JumpBack], {SourceKind::Button, pad::kSouthBit}), "Switch: B is jump/back");
     expect(only(sw[WiiTarget::B], {SourceKind::Button, pad::kLeftShoulderBit}), "Switch: only L shoots Star Bits (Wii B)");
     expect(only(sw[WiiTarget::Z], zl), "Switch: ZL crouches (Wii Z)");
-    expect(only(sw[WiiTarget::C], {SourceKind::Button, pad::kRightStickBit}), "Switch: right-stick click resets the camera");
-    expect(only(sw[WiiTarget::One], {SourceKind::Button, pad::kLeftStickBit}),
-           "Switch: left-stick click is Wii 1, the moveset's cap button");
+    expect(only(sw[WiiTarget::C], {SourceKind::Button, pad::kLeftStickBit}), "Switch: left-stick click resets the camera");
+    expect(only(sw[WiiTarget::One], {SourceKind::Button, pad::kWestBit}),
+           "Switch: Y (west) is Wii 1, the moveset's cap button");
     expect(only(sw[WiiTarget::PointerRecenter], {SourceKind::Button, pad::kRightShoulderBit}), "Switch: R recenters");
-    expect(sw[WiiTarget::Shake][0] == InputSource{SourceKind::Button, pad::kWestBit} &&
-               sw[WiiTarget::Shake][1] == InputSource{SourceKind::Button, pad::kNorthBit} &&
-               sw[WiiTarget::Shake][2] == zr && sw[WiiTarget::Shake][3].empty(),
-           "Switch: Y, X and ZR spin (with motion), not R");
+    expect(sw[WiiTarget::Shake][0] == InputSource{SourceKind::Button, pad::kNorthBit} &&
+               sw[WiiTarget::Shake][1] == zr && sw[WiiTarget::Shake][2].empty(),
+           "Switch: X and ZR spin (with motion), not Y or R");
     expect(sw[WiiTarget::DpadLeft][1] == InputSource{SourceKind::AxisNegative, static_cast<std::uint8_t>(PadAxis::RightX)},
            "Switch: right stick left is D-pad left (camera)");
     expect(config.tune(ControlScheme::SwitchPro).gyro_pointer && config.tune(ControlScheme::SwitchPro2).gyro_pointer,
@@ -1305,23 +1304,41 @@ void test_defaults_and_migration() {
     expect(only(xb[WiiTarget::JumpBack], {SourceKind::Button, pad::kEastBit}), "Xbox: B is jump/back");
     expect(only(xb[WiiTarget::B], {SourceKind::Button, pad::kLeftShoulderBit}), "Xbox: only LB shoots Star Bits");
     expect(only(xb[WiiTarget::Z], zl), "Xbox: LT crouches");
-    expect(only(xb[WiiTarget::C], {SourceKind::Button, pad::kRightStickBit}), "Xbox: RS click resets the camera");
-    expect(only(xb[WiiTarget::One], {SourceKind::Button, pad::kLeftStickBit}), "Xbox: LS click is Wii 1");
+    expect(only(xb[WiiTarget::C], {SourceKind::Button, pad::kLeftStickBit}), "Xbox: LS click resets the camera");
+    expect(only(xb[WiiTarget::One], {SourceKind::Button, pad::kWestBit}), "Xbox: X is Wii 1");
     {
         const BindingTable& ds = config.table(ControlScheme::DualSense);
         const BindingTable& sw2 = config.table(ControlScheme::SwitchPro2);
-        expect(only(ds[WiiTarget::One], {SourceKind::Button, pad::kLeftStickBit}) &&
-                   only(ds[WiiTarget::C], {SourceKind::Button, pad::kRightStickBit}) &&
-                   only(sw2[WiiTarget::One], {SourceKind::Button, pad::kLeftStickBit}) &&
-                   only(sw2[WiiTarget::C], {SourceKind::Button, pad::kRightStickBit}),
-               "DualSense and Pro Controller 2: L3 is Wii 1, R3 the camera reset");
+        expect(only(ds[WiiTarget::One], {SourceKind::Button, pad::kWestBit}) &&
+                   only(ds[WiiTarget::C], {SourceKind::Button, pad::kLeftStickBit}) &&
+                   only(sw2[WiiTarget::One], {SourceKind::Button, pad::kWestBit}) &&
+                   only(sw2[WiiTarget::C], {SourceKind::Button, pad::kLeftStickBit}),
+               "DualSense and Pro Controller 2: square / Y is Wii 1, L3 the camera reset");
+        expect(ds[WiiTarget::Shake][0] == InputSource{SourceKind::Button, pad::kNorthBit} &&
+                   ds[WiiTarget::Shake][1] == zr && ds[WiiTarget::Shake][2].empty(),
+               "DualSense: triangle and R2 spin, not square");
         expect(config.table(ControlScheme::Keyboard)[WiiTarget::C] ==
-                   legacy_binding_table(ControlScheme::Keyboard)[WiiTarget::C],
-               "the keyboard keeps C on Wii C");
+                       legacy_binding_table(ControlScheme::Keyboard)[WiiTarget::C] &&
+                   config.table(ControlScheme::Keyboard)[WiiTarget::Shake] ==
+                       legacy_binding_table(ControlScheme::Keyboard)[WiiTarget::Shake],
+               "the keyboard keeps C on Wii C and its spin keys");
+        // No pad button both spins and presses the cap button.
+        for (const auto scheme : {ControlScheme::Xbox, ControlScheme::SwitchPro, ControlScheme::SwitchPro2,
+                                  ControlScheme::DualSense}) {
+            const BindingTable& table = config.table(scheme);
+            bool shared = false;
+            for (const InputSource& source : table[WiiTarget::Shake]) {
+                for (const InputSource& one : table[WiiTarget::One]) {
+                    shared = shared || (!source.empty() && source == one);
+                }
+            }
+            expect(!shared, "Wii 1 and the spin share no button");
+        }
     }
-    expect(xb[WiiTarget::Shake][2] == InputSource{SourceKind::Button, pad::kRightShoulderBit} &&
-               xb[WiiTarget::Shake][3] == zr,
-           "Xbox: RB and RT spin");
+    expect(xb[WiiTarget::Shake][0] == InputSource{SourceKind::Button, pad::kNorthBit} &&
+               xb[WiiTarget::Shake][1] == InputSource{SourceKind::Button, pad::kRightShoulderBit} &&
+               xb[WiiTarget::Shake][2] == zr && xb[WiiTarget::Shake][3].empty(),
+           "Xbox: Y, RB and RT spin, not X");
     // A trigger bound to a level target presses at the trigger threshold.
     {
         PadSample pad_sample{};
@@ -1435,10 +1452,33 @@ void test_defaults_and_migration() {
         add_binding(v5.table(ControlScheme::Xbox)[WiiTarget::C], {SourceKind::Button, pad::kBackBit});
         expect(migrate_legacy_controls(v5, 5u) > 0u, "version-5 defaults migrate");
         expect(v5.table(ControlScheme::DualSense) == default_binding_table(ControlScheme::DualSense),
-               "an untouched version-5 table becomes the version-6 defaults");
+               "an untouched version-5 table becomes the current defaults");
         expect(v5.table(ControlScheme::Xbox)[WiiTarget::C][0] == InputSource{SourceKind::Button, pad::kBackBit} &&
                    v5.table(ControlScheme::Xbox)[WiiTarget::One] == default_binding_table(ControlScheme::Xbox)[WiiTarget::One],
-               "a changed camera reset stays; Wii 1 still moves to the left-stick click");
+               "a changed camera reset stays; Wii 1 still moves to the west face button");
+    }
+    // A version-6 file: the left-stick click on Wii 1, the right-stick click on the camera reset and
+    // the west face button spinning move to the version-7 defaults; a player's own choice stays.
+    {
+        ControlsConfig v6 = default_controls_config();
+        for (std::size_t i = 0; i < kControlSchemeCount; ++i) {
+            v6.tables[i] = version6_binding_table(static_cast<ControlScheme>(i));
+        }
+        v6.table(ControlScheme::SwitchPro)[WiiTarget::One] = {};
+        add_binding(v6.table(ControlScheme::SwitchPro)[WiiTarget::One], {SourceKind::Button, pad::kBackBit});
+        expect(migrate_legacy_controls(v6, 6u) > 0u, "version-6 defaults migrate");
+        expect(v6.table(ControlScheme::Xbox) == default_binding_table(ControlScheme::Xbox) &&
+                   v6.table(ControlScheme::DualSense) == default_binding_table(ControlScheme::DualSense) &&
+                   v6.table(ControlScheme::SwitchPro2) == default_binding_table(ControlScheme::SwitchPro2),
+               "untouched version-6 tables become the version-7 defaults");
+        const BindingTable& sw6 = v6.table(ControlScheme::SwitchPro);
+        expect(sw6[WiiTarget::One][0] == InputSource{SourceKind::Button, pad::kBackBit} &&
+                   sw6[WiiTarget::C] == default_binding_table(ControlScheme::SwitchPro)[WiiTarget::C] &&
+                   sw6[WiiTarget::Shake] == default_binding_table(ControlScheme::SwitchPro)[WiiTarget::Shake],
+               "a changed cap button stays; the camera reset and the spin still move");
+        ControlsConfig v6_again = v6;
+        expect(migrate_legacy_controls(v6_again, kControlsVersion) == 0u && v6_again == v6,
+               "a migrated version-6 file is current");
     }
     // A version-4 file: a 2 s still pointer and 100% vibration move to 4 s and 50%. Values the player
     // changed stay.

@@ -41,7 +41,8 @@ void defaults() {
     check(at(x, Slot::Z) == Label::L2, "xbox Z is the left trigger");
     check(at(x, Slot::Plus) == Label::Start, "xbox + is Menu");
     check(at(x, Slot::Minus) == Label::Back, "xbox - is View");
-    check(at(x, Slot::One) == Label::Digit1 && at(x, Slot::Two) == Label::Digit2, "unbound 1/2 draw digits");
+    check(at(x, Slot::One) == Label::West, "xbox 1 is X, the moveset's cap button");
+    check(at(x, Slot::Two) == Label::Digit2, "unbound 2 draws its digit");
     check(at(x, Slot::Home) == Label::Home, "unbound Home draws the home icon");
     check(at(x, Slot::Nunchuk) == Label::LeftStick, "nunchuk is the left stick");
     check(at(x, Slot::Dpad) == Label::Dpad && at(x, Slot::Remote) == Label::Controller, "dpad and controller");

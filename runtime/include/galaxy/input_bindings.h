@@ -221,15 +221,17 @@ struct ControlsConfig {
 }
 
 [[nodiscard]] BindingTable default_binding_table(ControlScheme scheme);
-// The defaults of controls versions 1, 2, 3 and 5 (4's tables are 5's), kept for migration.
+// The defaults of controls versions 1, 2, 3, 5 (4's tables are 5's) and 6, kept for migration.
 [[nodiscard]] BindingTable legacy_binding_table(ControlScheme scheme);
 [[nodiscard]] BindingTable version2_binding_table(ControlScheme scheme);
 [[nodiscard]] BindingTable version3_binding_table(ControlScheme scheme);
 [[nodiscard]] BindingTable version5_binding_table(ControlScheme scheme);
+[[nodiscard]] BindingTable version6_binding_table(ControlScheme scheme);
 [[nodiscard]] SchemeTuning legacy_scheme_tuning(ControlScheme scheme);
 // runtime_settings.ini `controls_version`; files without it are version 1. Version 6: the left-stick click
 // is Wii 1 (the Odyssey moveset's cap button) and the right-stick click resets the camera (Wii C).
-inline constexpr unsigned kControlsVersion = 6;
+// Version 7: the west face button is Wii 1 and no longer spins; the left-stick click resets the camera.
+inline constexpr unsigned kControlsVersion = 7;
 // Version 3 still-pointer defaults (pads), replaced in version 4.
 inline constexpr float kVersion3PointerHideSeconds = 4.0f;
 inline constexpr float kVersion3PointerHideRadius = 0.03f;

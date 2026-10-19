@@ -16,9 +16,9 @@ F1 > General > ODYSSEY MOVES, or `odyssey_moveset=on` in `runtime_settings.ini`
 ## Buttons
 
 Odyssey's cap button (Y) is the Wii Remote's 1 button, which Galaxy does not use in play. On
-controllers it is the left stick click (Xbox LS, Switch Pro and Pro Controller 2 left stick, DualSense
-L3) and the camera reset (Wii C) is the right stick click; on the keyboard it is `1`. F1 > Controls > 1
-rebinds it. Z is Odyssey's crouch and ground pound, A jumps, the spin is Galaxy's.
+controllers it is the west face button, where Odyssey has it (Xbox X, DualSense Square, Switch Pro and
+Pro Controller 2 Y), which no longer spins; the camera reset (Wii C) is the left stick click. On the
+keyboard it is `1`. F1 > Controls > 1 rebinds it. Z is Odyssey's crouch and ground pound, A jumps, the spin is Galaxy's.
 
 ## Moves
 
