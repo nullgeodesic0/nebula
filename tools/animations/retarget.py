@@ -181,14 +181,15 @@ def _pose_at(act, u, loop, period):
     return {n: {k: mix(k, a) for k, a in b.items()} for n, b in act['bones'].items()}
 
 
-def sample(rig, act, dur, loop, translation_scale=1.0, hold=None, scale_root=False):
+def sample(rig, act, dur, loop, translation_scale=1.0, hold=None, scale_root=False, fill=None):
     """Galaxy Euler angles and translation offsets per frame 0..dur for one action.
 
     Loops map one source cycle onto the game's cycle of dur frames, so the game's own playback rate
     (which follows Mario's speed) keeps the feet in step. One-shots keep the source timing and stop at
-    the game's length; a shorter source is stretched to fill it."""
+    the game's length; a shorter source is stretched to fill it, or with fill 'hold' plays at its own
+    speed and holds its last frame, or with fill 'repeat' plays its cycle over and over."""
     nf = act['nf']
-    period = _cycle_period(act) if loop else nf - 1
+    period = _cycle_period(act) if loop or fill == 'repeat' else nf - 1
     eul = np.zeros((dur + 1, rig.nj, 3))
     tr = np.zeros((dur + 1, rig.nj, 3))
     # A game loop far shorter than the source cycle is a held pose (the wall slide): the source's
@@ -200,8 +201,10 @@ def sample(rig, act, dur, loop, translation_scale=1.0, hold=None, scale_root=Fal
             u = float(hold if hold is not None and hold >= 0 else (nf - 1 if hold is not None else 0))
         elif loop:
             u = (f / dur) * period if f < dur else 0.0
-        elif nf - 1 >= dur:
-            u = float(f)
+        elif nf - 1 >= dur or fill == 'hold':
+            u = float(min(f, nf - 1))
+        elif fill == 'repeat':
+            u = float(f % period)
         else:
             u = (f / dur) * (nf - 1)
         us.append(u)
@@ -240,6 +243,15 @@ def _world_positions(rig, eul, tr, f):
         world.append(pw @ rot)
         pos.append(pp + pw @ local_t)
     return world, pos
+
+
+def shift_body(rig, eul, tr, offset):
+    """Moves the whole body by offset (model space) on every frame, through the root's translation."""
+    root = rig.names.index('JointRoot')
+    parent = rig.par[root]
+    for f in range(len(eul)):
+        world, _ = _world_positions(rig, eul, tr, f)
+        tr[f, root] += world[parent].T @ np.asarray(offset, dtype=float)
 
 
 def _scale_body_motion(rig, eul, tr, scale):

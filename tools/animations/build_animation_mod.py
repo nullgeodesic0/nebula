@@ -81,7 +81,74 @@ MAP = {
     # The dive's landing without Z (引き戻し着地, the landing after a Pull Star): Odyssey's roll-out, which
     # picks up from the belly slide's pose and tumbles forward onto the feet.
     'pullbackland': ('RollingStandUp', 1.0),
+    # Round poles (Galaxy's trees) and square poles.
+    'treeclimbstart': ('PoleCatch', 1.0),
+    'treeclimb': ('PoleClimb', 1.0),
+    'treewait': ('PoleWait', 1.0),
+    'climbturn': ('PoleTurn', 1.0),
+    'treefall': ('PoleFall', 1.0),
+    'treehandstandstart': ('PoleHandStandStart', 1.0),
+    'treehandstandwait': ('PoleHandStandWait', 1.0),
+    'treehandstandturn': ('PoleHandStandTurn', 1.0),
+    'treehandstandjump': ('PoleHandStandJump', 1.0),
+    'treehandstandend': ('PoleHandStandEnd', 1.0),
+    'squarepolestart': ('PoleCatch', 1.0),
+    'squarepoleclimb': ('PoleClimb', 1.0),
+    'squarepolewait': ('PoleWait', 1.0),
+    'squarepoleturnl': ('PoleTurn', 1.0),
+    'squarepoleturnr': ('PoleTurn', 1.0),
+    'squarepolefall': ('PoleFall', 1.0),
+    # Ledge hang.
+    'hangstart': ('WallCatchStart', 1.0),
+    'hangwait': ('WallCatch', 1.0),
+    'hangup': ('WallCatchEnd', 1.0),
+    # Swimming.
+    'swimdive': ('SwimDive', 1.0),
+    'landwaterdive': ('DiveInWater', 1.0),
+    'swimdamagesmall': ('DamageSwim', 1.0),
+    'swimdamagemiddle': ('DamageSwim', 1.0),
+    'swimdamagemiddlesurface': ('DamageSwimSurface', 1.0),
+    'swimdamagemiddlesurfaceland': ('DamageSwimSurfaceLand', 1.0),
+    'swimdie': ('SwimDieOver', 1.0),
+    # Ground.
+    'brake': ('Brake', 1.0),
+    'turn': ('Turn', 1.0),
+    'jumpturn': ('JumpTurn', 0.6),
+    'jumpturnland': ('LandTurn', 1.0),
+    'landstiffen': ('LandStiffen calambre', 1.0),
+    'push': ('Push empujar', 1.0),
+    'sleep': ('Sleep', 1.0),
+    'firerun': ('FireRun', 1.0),
+    'firerunstart': ('FireRunStart', 1.0),
+    'jumprollland': ('LandJump3 Yeah', 1.0),
+    # Carrying.
+    'carrystart': ('CarryUpStart', 1.0),
+    'carrywait': ('CarryUp', 1.0),
+    'throw': ('CarryUpThrow', 1.0),
+    # Damage and death.
+    'damagewait': ('DamageWait', 1.0),
+    'diefall': ('DeadFall', 1.0),
+    'diefire': ('DeadFire', 1.0),
+    # Pipes and stars.
+    'earthenpipein': ('Dokan entrar', 1.0),
+    'earthenpipeout': ('Dokan Salir', 1.0),
+    'powerstarget': ('GetShine', 1.0),
+    'grandstarget': ('GetShineGrand', 1.0),
 }
+# One-shots whose source is far shorter than the game's animation: 'hold' plays the source at its own speed
+# and holds its last frame (a grab, a pose), 'repeat' plays its cycle over and over (sleeping), instead of
+# stretching it into slow motion.
+FILL = {'treeclimbstart': 'hold', 'squarepolestart': 'hold', 'carrystart': 'hold', 'turn': 'hold',
+        'powerstarget': 'hold', 'grandstarget': 'hold', 'sleep': 'repeat'}
+# Body offsets (model units: x right, y up, z forward) moving Odyssey's grip onto where Galaxy puts the pole
+# or ledge relative to Mario: Odyssey holds a pole further forward and hangs lower from a ledge.
+_TREE, _HANDSTAND, _SQUARE, _HANG = (0.0, 7.0, -14.0), (0.0, 25.0, -6.0), (0.0, 0.0, -33.0), (0.0, 32.0, 0.0)
+OFFSET = {**{n: _TREE for n in ('treeclimbstart', 'treeclimb', 'treewait', 'climbturn', 'treefall')},
+          **{n: _HANDSTAND for n in ('treehandstandstart', 'treehandstandwait', 'treehandstandturn',
+                                     'treehandstandjump', 'treehandstandend')},
+          **{n: _SQUARE for n in ('squarepolestart', 'squarepoleclimb', 'squarepolewait', 'squarepoleturnl',
+                                  'squarepoleturnr', 'squarepolefall')},
+          **{n: _HANG for n in ('hangstart', 'hangwait', 'hangup')}}
 
 # Expressions from the source's face animation. Galaxy picks Mario's face itself (the face model, which
 # hangs from FacePosition); where a converted animation's source animates the mouth, the converted
@@ -98,7 +165,9 @@ NEUTRAL_ACTION = 'Wait oddysey idle'
 FRAMES = {'aircontrol': (9, True),'swimdashringstart': (6, False), 'slidestomachrecover': (28, False),
           'icejumpland': (20, False), 'surfland': (12, False), 'icejumpstopland': (6, False),
           'rolling': (30, False), 'dive': (48, False), 'divewait': (20, True),
-          'pullbackland': (18, False)}
+          'pullbackland': (18, False),
+          # Loops at Odyssey's own speed rather than squeezed or stretched onto the game's cycle.
+          'carrywait': (59, True), 'damagewait': (120, True), 'diefall': (180, True), 'diefire': (190, True)}
 # The custom model's joints without geometry (build_odyssey_model_mod.py UNSKINNED).
 UNSKINNED = ('IndexFinger', 'MiddleFinger', 'ThirdFinger', 'LittleFinger', 'Thumb')
 HIDDEN = 0.001
@@ -193,13 +262,15 @@ def hide_extra_faces(rig, original):
     return j3d.write_bck(original, ob['loop'], ob['dur'], tracks, ob['shift'])
 
 
-def convert(rig, act, original, faces=False, defaults=None, face=None, frames=None):
+def convert(rig, act, original, faces=False, defaults=None, face=None, frames=None, fill=None, offset=None):
     ob = j3d.parse_bck(original)
     loop_mode = (2 if frames[1] else 0) if frames else ob['loop']
     loop = loop_mode == 2
     dur = frames[0] if frames else ob['dur']
     eul, tr, period = retarget.sample(rig, act[0], dur, loop, act[1], act[2] if len(act) > 2 else None,
-                                      scale_root=len(act) > 3 and act[3] == 'root')
+                                      scale_root=len(act) > 3 and act[3] == 'root', fill=fill)
+    if offset is not None:
+        retarget.shift_body(rig, eul, tr, offset)
     if face is not None:
         # The face joints follow Odyssey's face animation for the same action, on the body's timing.
         driver, anim = face
@@ -328,7 +399,7 @@ def main():
             data, dur, loop, period, kept = convert(frig, (actions[action],) + tuple(entry[1:]),
                                                     bcks[name + '.bck'], faces,
                                                     defaults if frig is rig_model else None, face,
-                                                    FRAMES.get(name))
+                                                    FRAMES.get(name), FILL.get(name), OFFSET.get(name))
             label = action
             if face is not None:
                 kept = [i for i in kept if i not in driver.joints]
@@ -338,6 +409,10 @@ def main():
                 timing = 'held pose (source frame %s), game loop of %d' % ('last' if entry[2] < 0 else entry[2], dur)
             elif loop:
                 timing = 'loop: one %d-frame cycle onto the game\'s %d' % (period, dur)
+            elif name in FILL:
+                timing = 'one-shot: %d source frames, game length %d (%s)' % (actions[action]['nf'], dur,
+                                                                          'last frame held' if FILL[name] == 'hold'
+                                                                          else 'cycle of %d repeated' % period)
             else:
                 timing = 'one-shot: %d source frames, game length %d' % (actions[action]['nf'], dur)
             notes.append('%-20s <- %-20s %s%s' % (name, label, timing,
