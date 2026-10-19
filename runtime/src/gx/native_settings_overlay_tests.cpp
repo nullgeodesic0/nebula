@@ -1,4 +1,4 @@
-﻿#include "galaxy/gx_d3d12.h"
+#include "galaxy/gx_d3d12.h"
 #include "galaxy/gx/render_config.h"
 #include "galaxy/gx/temporal_upscaler.h"
 #include "galaxy/input_bindings.h"
@@ -235,7 +235,7 @@ int main() {
     passed &= expect(key(VK_TAB), "Tab enters the graphics page");
     snapshot = galaxy::gx::native_settings_overlay_snapshot();
     const bool fsr3 = galaxy::gx::fsr3_available();
-    passed &= expect(snapshot.tab == 1u && snapshot.row_count == (fsr3 ? 9u : 8u),
+    passed &= expect(snapshot.tab == 1u && snapshot.row_count == (fsr3 ? 19u : 18u),
                      "graphics page has AA, AA quality, upscaler, FSR 3 quality (only with FSR 3), "
                      "sharpening, textures, mipmaps, lighting and 2D layer");
     passed &= expect(key(VK_LEFT), "left lowers the anti-aliasing mode");
@@ -404,6 +404,8 @@ int main() {
     passed &= expect(key(VK_LEFT) && key(VK_LEFT) && galaxy::get_runtime_settings().language == galaxy::GameLanguage::English,
                      "left returns to English");
     passed &= expect(key(VK_DOWN) && galaxy::gx::native_settings_overlay_snapshot().row == 2u,
+                     "down selects the button prompts");
+    passed &= expect(key(VK_DOWN) && galaxy::gx::native_settings_overlay_snapshot().row == 3u,
                      "down selects the motion style");
     passed &= expect(galaxy::get_runtime_settings().motion_style == galaxy::MotionStyle::Original,
                      "the motion style starts as the game's");
