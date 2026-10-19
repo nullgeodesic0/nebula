@@ -2340,6 +2340,9 @@ struct RuntimeState {
     // animations cover its 30 joints only; reading past their tables threw the model's extra joints anywhere.
     std::vector<std::array<std::byte, 0x20>> anim_neutral_joints;
     std::vector<std::uint8_t> anim_neutral_joint_set;
+    // Custom model: its own face and hands replace Galaxy's face and hand part models on Mario's normal body
+    // (the power-up suits still use them); see hide_mario_parts.
+    bool hide_mario_parts_on_normal_body{};
     // Cutscene volume applied to the movie player's attenuation table.
     std::array<std::uint16_t, 128> movie_volume_original{};
     float movie_volume_gain{1.0f};
@@ -15997,6 +16000,9 @@ bool needs_call_guest_intercept(
         // J3DAnmTransformKey / Full / FullWithLerp::getTransform (custom model)
         return !state.anim_neutral_joints.empty();
     }
+    if (guest_address == 0x802B6CFCu) {
+        return state.hide_mario_parts_on_normal_body;  // MarioActor::draw (custom model's face and hands)
+    }
     switch (guest_address >> 16) {
         case 0x0000u:
         case 0x8017u:
@@ -23810,11 +23816,42 @@ bool anim_neutral_joint(RuntimeState& state, const galaxy::PpcContext* context, 
     return true;
 }
 
+// Galaxy draws Mario's face and hands as part models (MarioFace, MarioHandL/R) on his normal body and on the
+// Bee and Hopper suits; MarioActor::draw draws them unless hidden. The custom model has its own, so on the
+// normal body (MarioActor::mCurrModel, u8 at +0xA0A, is 0) they are hidden for the draw: the hands through
+// MarioActor's hands-hidden flag (+0xA58), the face through its ModelHolder's (at +0xA5C) LiveActorFlag
+// mIsHiddenModel (+0x6C). updateHand and updateFace set both again each frame, before the draw.
+void hide_mario_parts(RuntimeState& state, const galaxy::PpcContext* context) {
+    auto& space = *state.address_space;
+    const std::uint32_t mario = context->gpr[3];
+    const std::byte* model = space.pointer_or_null(mario + 0xA0Au, 1u);
+    if (model == nullptr || *model != std::byte{0}) {
+        return;
+    }
+    if (std::byte* hands_hidden = space.pointer_or_null(mario + 0xA58u, 1u)) {
+        *hands_hidden = std::byte{1};
+    }
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        std::cerr << "[model] Galaxy's face and hand parts hidden on the normal body\n";
+    }
+    if (const std::byte* face = space.pointer_or_null(mario + 0xA5Cu, 4u)) {
+        const std::uint32_t holder = (std::to_integer<std::uint32_t>(face[0]) << 24u) |
+                                     (std::to_integer<std::uint32_t>(face[1]) << 16u) |
+                                     (std::to_integer<std::uint32_t>(face[2]) << 8u) | std::to_integer<std::uint32_t>(face[3]);
+        if (std::byte* hidden = holder != 0u ? space.pointer_or_null(holder + 0x6Cu, 1u) : nullptr) {
+            *hidden = std::byte{1};
+        }
+    }
+}
+
 void load_anim_neutral_joints(RuntimeState& state, const std::filesystem::path& content_root) {
     bool model = false;
     if (!galaxy::running_custom_model(model) || !model) {
         return;
     }
+    state.hide_mario_parts_on_normal_body = true;
     std::ifstream file(content_root / L"mods" / L"model" / L"neutral_joints.txt");
     std::string line;
     const auto put32 = [](std::byte* at, std::uint32_t v) {
@@ -24168,6 +24205,9 @@ void call_guest_impl_body(
         state.jaudio_host_mixer && state.address_space != nullptr) {
         run_jaudio_host_command(state, context, memory, guest_address);
         return;
+    }
+    if (guest_address == 0x802B6CFCu && state.hide_mario_parts_on_normal_body) {
+        hide_mario_parts(state, context);
     }
     if ((guest_address == 0x80440CDCu || guest_address == 0x80432A0Cu || guest_address == 0x80432D6Cu) &&
         anim_neutral_joint(state, context, guest_address)) {
