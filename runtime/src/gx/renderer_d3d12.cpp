@@ -8286,8 +8286,22 @@ bool RendererD3D12::copy_efb_to_texture(
     }();
     static bool comparison_enabled = native_bloom_workspace || native_effect_copies;
     static ULONGLONG comparison_last_poll = 0u;
+    // Mario's cast shadow is a silhouette captured into a 160x160 texture and
+    // projected onto the ground. Unlike the blur sources it has no kernel that
+    // depends on the low resolution, and at the scaled EFB a 160x160 capture
+    // shows as big square steps along the shadow's edge, so it is captured at
+    // the scaled resolution. GALAXY_NATIVE_SHADOW_CAPTURE=1 restores the
+    // game-resolution capture.
+    static const bool native_shadow_capture = [] {
+        char value[8]{};
+        std::size_t length = 0u;
+        return getenv_s(&length, value, sizeof(value), "GALAXY_NATIVE_SHADOW_CAPTURE") == 0 &&
+            length == 2u && value[0] == '1';
+    }();
+    const bool shadow_capture = !native_shadow_capture && !is_depth_copy &&
+        dw_unscaled == 160u && dh_unscaled == 160u;
     const bool effect_copy = native_effect_copies
-        ? dw_unscaled <= 320u && dh_unscaled <= 228u
+        ? dw_unscaled <= 320u && dh_unscaled <= 228u && !shadow_capture
         : is_galaxy_bloom_workspace_copy(params, is_depth_copy);
     const bool bloom_copy =
         (native_bloom_workspace || native_effect_copies || !bloom_comparison_file.empty()) &&
