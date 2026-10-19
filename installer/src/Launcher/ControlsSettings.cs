@@ -44,7 +44,7 @@ namespace Nebula.Launcher
         public const int SchemeCount = 5, TargetCount = 25, Slots = 4;
         public const int JumpBack = 24;
         // runtime_settings.ini controls_version (input_bindings.h kControlsVersion).
-        public const int ControlsVersion = 5;
+        public const int ControlsVersion = 6;
         // Version 3 still-pointer defaults (pads), replaced in version 4.
         public const float Version3PointerHideSeconds = 4.0f, Version3PointerHideRadius = 0.03f;
         // Version 4 still-pointer time and vibration strength, replaced in version 5.
@@ -217,14 +217,8 @@ namespace Nebula.Launcher
             return t;
         }
 
-        /// <summary>
-        /// Super Mario Galaxy on Switch with the player's choices: A or B jump
-        /// (B backs out of menus), L/LB Star Bits, ZL/LT crouch, X/Y/ZR (Xbox
-        /// X/Y/RB/RT) or shake spin, left-stick click camera, R / right-stick
-        /// click recenters (held: pinned at the centre), gyro points, right
-        /// stick turns the camera (pointer when the gyro is off; Xbox: pointer).
-        /// </summary>
-        public static InputSource[][] DefaultTable(int scheme)
+        /// <summary>The defaults of controls version 5 (left-stick click camera), kept for migration.</summary>
+        public static InputSource[][] Version5Table(int scheme)
         {
             var t = Version3Table(scheme);
             if (scheme == Keyboard) return t;
@@ -232,6 +226,23 @@ namespace Nebula.Launcher
             t[17] = scheme == Xbox
                 ? new[] { Button(West), Button(North), Button(RightShoulder), Pos(RightTrigger) }
                 : new[] { Button(West), Button(North), Pos(RightTrigger) };
+            return t;
+        }
+
+        /// <summary>
+        /// Super Mario Galaxy on Switch with the player's choices: A or B jump
+        /// (B backs out of menus), L/LB Star Bits, ZL/LT crouch, X/Y/ZR (Xbox
+        /// X/Y/RB/RT) or shake spin, left-stick click Wii 1 (the Odyssey
+        /// moveset's cap button), right-stick click camera (Wii C), R / right-stick
+        /// click recenters (held: pinned at the centre), gyro points, right
+        /// stick turns the camera (pointer when the gyro is off; Xbox: pointer).
+        /// </summary>
+        public static InputSource[][] DefaultTable(int scheme)
+        {
+            var t = Version5Table(scheme);
+            if (scheme == Keyboard) return t;
+            t[2] = new[] { Button(LeftStick) };
+            t[15] = new[] { Button(RightStick) };
             return t;
         }
 
@@ -283,11 +294,12 @@ namespace Nebula.Launcher
                 var legacy = LegacyTable(s);
                 var version2 = Version2Table(s);
                 var version3 = Version3Table(s);
+                var version5 = Version5Table(s);
                 var current = DefaultTable(s);
                 for (int t = 0; t < TargetCount; t++)
                 {
                     bool old = SameBindings(Bindings[s][t], legacy[t]) || SameBindings(Bindings[s][t], version2[t]) ||
-                               SameBindings(Bindings[s][t], version3[t]);
+                               SameBindings(Bindings[s][t], version3[t]) || SameBindings(Bindings[s][t], version5[t]);
                     if (old && !SameBindings(Bindings[s][t], current[t])) Bindings[s][t] = current[t];
                 }
                 if (version < 2 && Tuning[s].GyroPointer == LegacyTuning(s).GyroPointer) Tuning[s].GyroPointer = DefaultTuning(s).GyroPointer;

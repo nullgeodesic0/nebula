@@ -17,7 +17,7 @@ ZR/RT as a spin button and ZL/LT as crouch.
 | Jump in play, back in menus | - | B | B |
 | Star Bits, back (B) | `Left Shift`, `Right Shift`, right mouse button | LB | L |
 | Crouch, ground pound (Z) | `Z`, `Left Ctrl`, `Right Ctrl` | LT | ZL |
-| Camera reset (C) | `C` | Left stick click | Left stick click |
+| Camera reset (C) | `C` | Right stick click | Right stick click |
 | Spin (Wii Remote shake) | `Q`, `E` | X, Y, RB, RT | X, Y, ZR, shake the controller |
 | Move (Nunchuk stick) | `W` `A` `S` `D` | Left stick | Left stick |
 | Camera, first person (D-pad) | Arrow keys | D-pad | D-pad; right stick while the gyro points |
@@ -26,7 +26,8 @@ ZR/RT as a spin button and ZL/LT as crouch.
 | Pause (Plus) | `=`, `P` | Menu | Plus |
 | Minus | `-`, `M` | View | Minus |
 | Home | `H` | - | Home |
-| 1, 2 | `1`, `2` (and numpad) | - | - |
+| 1 (the Odyssey moveset's cap button: dive, roll, roll boost) | `1` (and numpad) | Left stick click | Left stick click |
+| 2 | `2` (and numpad) | - | - |
 | Shake (Nunchuk) | - | - | - |
 
 B (controllers) never shoots Star Bits: it is Wii B (back) only while a

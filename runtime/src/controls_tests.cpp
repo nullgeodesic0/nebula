@@ -1290,7 +1290,9 @@ void test_defaults_and_migration() {
     expect(only(sw[WiiTarget::JumpBack], {SourceKind::Button, pad::kSouthBit}), "Switch: B is jump/back");
     expect(only(sw[WiiTarget::B], {SourceKind::Button, pad::kLeftShoulderBit}), "Switch: only L shoots Star Bits (Wii B)");
     expect(only(sw[WiiTarget::Z], zl), "Switch: ZL crouches (Wii Z)");
-    expect(only(sw[WiiTarget::C], {SourceKind::Button, pad::kLeftStickBit}), "Switch: left-stick click resets the camera");
+    expect(only(sw[WiiTarget::C], {SourceKind::Button, pad::kRightStickBit}), "Switch: right-stick click resets the camera");
+    expect(only(sw[WiiTarget::One], {SourceKind::Button, pad::kLeftStickBit}),
+           "Switch: left-stick click is Wii 1, the moveset's cap button");
     expect(only(sw[WiiTarget::PointerRecenter], {SourceKind::Button, pad::kRightShoulderBit}), "Switch: R recenters");
     expect(sw[WiiTarget::Shake][0] == InputSource{SourceKind::Button, pad::kWestBit} &&
                sw[WiiTarget::Shake][1] == InputSource{SourceKind::Button, pad::kNorthBit} &&
@@ -1303,7 +1305,20 @@ void test_defaults_and_migration() {
     expect(only(xb[WiiTarget::JumpBack], {SourceKind::Button, pad::kEastBit}), "Xbox: B is jump/back");
     expect(only(xb[WiiTarget::B], {SourceKind::Button, pad::kLeftShoulderBit}), "Xbox: only LB shoots Star Bits");
     expect(only(xb[WiiTarget::Z], zl), "Xbox: LT crouches");
-    expect(only(xb[WiiTarget::C], {SourceKind::Button, pad::kLeftStickBit}), "Xbox: LS click resets the camera");
+    expect(only(xb[WiiTarget::C], {SourceKind::Button, pad::kRightStickBit}), "Xbox: RS click resets the camera");
+    expect(only(xb[WiiTarget::One], {SourceKind::Button, pad::kLeftStickBit}), "Xbox: LS click is Wii 1");
+    {
+        const BindingTable& ds = config.table(ControlScheme::DualSense);
+        const BindingTable& sw2 = config.table(ControlScheme::SwitchPro2);
+        expect(only(ds[WiiTarget::One], {SourceKind::Button, pad::kLeftStickBit}) &&
+                   only(ds[WiiTarget::C], {SourceKind::Button, pad::kRightStickBit}) &&
+                   only(sw2[WiiTarget::One], {SourceKind::Button, pad::kLeftStickBit}) &&
+                   only(sw2[WiiTarget::C], {SourceKind::Button, pad::kRightStickBit}),
+               "DualSense and Pro Controller 2: L3 is Wii 1, R3 the camera reset");
+        expect(config.table(ControlScheme::Keyboard)[WiiTarget::C] ==
+                   legacy_binding_table(ControlScheme::Keyboard)[WiiTarget::C],
+               "the keyboard keeps C on Wii C");
+    }
     expect(xb[WiiTarget::Shake][2] == InputSource{SourceKind::Button, pad::kRightShoulderBit} &&
                xb[WiiTarget::Shake][3] == zr,
            "Xbox: RB and RT spin");
@@ -1408,6 +1423,22 @@ void test_defaults_and_migration() {
         expect(v3.tune(ControlScheme::Xbox).pointer_hide_seconds == 7.0f &&
                    v3.tune(ControlScheme::Xbox).pointer_hide_radius == kDefaultPointerHideRadius,
                "a changed hide time stays");
+    }
+    // A version-5 file: the left-stick click on the camera reset and Wii 1 unbound move to the
+    // version-6 defaults; a player's own choice stays.
+    {
+        ControlsConfig v5 = default_controls_config();
+        for (std::size_t i = 0; i < kControlSchemeCount; ++i) {
+            v5.tables[i] = version5_binding_table(static_cast<ControlScheme>(i));
+        }
+        v5.table(ControlScheme::Xbox)[WiiTarget::C] = {};
+        add_binding(v5.table(ControlScheme::Xbox)[WiiTarget::C], {SourceKind::Button, pad::kBackBit});
+        expect(migrate_legacy_controls(v5, 5u) > 0u, "version-5 defaults migrate");
+        expect(v5.table(ControlScheme::DualSense) == default_binding_table(ControlScheme::DualSense),
+               "an untouched version-5 table becomes the version-6 defaults");
+        expect(v5.table(ControlScheme::Xbox)[WiiTarget::C][0] == InputSource{SourceKind::Button, pad::kBackBit} &&
+                   v5.table(ControlScheme::Xbox)[WiiTarget::One] == default_binding_table(ControlScheme::Xbox)[WiiTarget::One],
+               "a changed camera reset stays; Wii 1 still moves to the left-stick click");
     }
     // A version-4 file: a 2 s still pointer and 100% vibration move to 4 s and 50%. Values the player
     // changed stay.

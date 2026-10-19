@@ -336,13 +336,9 @@ BindingTable version3_binding_table(ControlScheme scheme) {
     return table;
 }
 
-// The Super Mario Galaxy on Switch shape with the player's choices: A or B
-// jump (B backs out of menus), L/LB Star Bits, ZL/LT crouch, X/Y/ZR (Xbox
-// X/Y/RB/RT) or a shake spin, left-stick click resets the camera, R /
-// right-stick click recenters (held: pinned at the centre), the gyro points
-// and the right stick turns the camera (the pointer when the gyro is off;
-// Xbox: the pointer).
-BindingTable default_binding_table(ControlScheme scheme) {
+// Default bindings of controls version 5 (the left-stick click on Wii C), kept for migration: the
+// Super Mario Galaxy on Switch shape with the player's choices.
+BindingTable version5_binding_table(ControlScheme scheme) {
     BindingTable table = version3_binding_table(scheme);
     if (scheme == ControlScheme::Keyboard) {
         return table;
@@ -356,6 +352,24 @@ BindingTable default_binding_table(ControlScheme scheme) {
         set(table, T::Shake, {button(pad::kWestBit), button(pad::kNorthBit),
                               axis_pos(PadAxis::RightTrigger)});
     }
+    return table;
+}
+
+// The Super Mario Galaxy on Switch shape with the player's choices: A or B
+// jump (B backs out of menus), L/LB Star Bits, ZL/LT crouch, X/Y/ZR (Xbox
+// X/Y/RB/RT) or a shake spin, R / right-stick click recenters (held: pinned at
+// the centre), the gyro points and the right stick turns the camera (the
+// pointer when the gyro is off; Xbox: the pointer). The left-stick click is
+// Wii 1, the Odyssey moveset's cap button (dive, roll, roll boost), and the
+// right-stick click resets the camera (Wii C; on Xbox it also recenters).
+BindingTable default_binding_table(ControlScheme scheme) {
+    BindingTable table = version5_binding_table(scheme);
+    if (scheme == ControlScheme::Keyboard) {
+        return table;
+    }
+    using T = WiiTarget;
+    set(table, T::One, {button(pad::kLeftStickBit)});
+    set(table, T::C, {button(pad::kRightStickBit)});
     return table;
 }
 
@@ -406,11 +420,12 @@ unsigned migrate_legacy_controls(ControlsConfig& config, unsigned version) noexc
         const BindingTable legacy = legacy_binding_table(scheme);
         const BindingTable version2 = version2_binding_table(scheme);
         const BindingTable version3 = version3_binding_table(scheme);
+        const BindingTable version5 = version5_binding_table(scheme);
         const BindingTable current = default_binding_table(scheme);
         for (std::size_t t = 0; t < kWiiTargetCount; ++t) {
             TargetBindings& bindings = config.tables[s].targets[t];
             const bool old_default = bindings == legacy.targets[t] || bindings == version2.targets[t] ||
-                                     bindings == version3.targets[t];
+                                     bindings == version3.targets[t] || bindings == version5.targets[t];
             if (old_default && bindings != current.targets[t]) {
                 bindings = current.targets[t];
                 ++changed;
