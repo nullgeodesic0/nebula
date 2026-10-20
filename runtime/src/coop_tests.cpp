@@ -301,6 +301,9 @@ bool test_split_screen() {
                       clip_level_distance(9u, 80000.0f) == 80000.0f, "clipping levels: the judge's distances");
     ok &= expect(!sphere_in_view(camera.view, {0.0f, 0.0f, -70000.0f}, 100.0f, 45.0f, 1.0f, clip_level_distance(1u, 100000.0f)),
                   "past the clipping level's distance: not seen");
+    ok &= expect(!scene_heap_overflows(1000u, 5000u, 40u, 4u) && scene_heap_overflows(40u, 5000u, 40u, 4u) &&
+                     !scene_heap_overflows(40u, 40u, 40u, 4u) && scene_heap_overflows(90u, 5000u, 64u, 32u),
+                 "stage heap: MEM2 only for what MEM1 cannot hold");
     ok &= expect(sphere_in_view(camera.view, {50.0f, 0.0f, 0.0f}, 60.0f, 45.0f, 1.0f, 1000.0f), "a big sphere reaching in: seen");
 
     FollowCamera follow;

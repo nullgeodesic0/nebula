@@ -8005,6 +8005,9 @@ fn coop_call_id(target: u32) -> Option<u32> {
         0x802C_42C0 => Some(14), // MarioActor::setPlayerMode(u16, bool): no power-up without its model
         0x8026_B9F4 => Some(15), // NameObjHolder::NameObjHolder(int): room for the second player's objects
         0x8026_BA50 => Some(16), // NameObjHolder::add(NameObj*): counted for the trace
+        // JKRSolidHeap::allocFromHead/allocFromTail(u32 size, int align): a full stage heap in MEM1 borrows from MEM2.
+        0x8040_B9A0 => Some(17),
+        0x8040_BA64 => Some(18),
         _ => None,
     }
 }

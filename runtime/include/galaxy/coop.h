@@ -707,6 +707,16 @@ inline constexpr float kSteerDeadZone = 0.2f;
     return level >= 1u && level < 8u ? kDistances[level] : far_z;
 }
 
+// Whether an allocation of `size` bytes aligned to `align` from the stage's full MEM1 heap (JKRSolidHeap,
+// `mem1_free` bytes left) goes to its MEM2 heap (`mem2_free` left) instead: only when MEM1 cannot hold it and MEM2
+// can, so it changes nothing but an allocation that would have stopped the game (HeapMemoryWatcher's error
+// handler panics). The second player and their split screen take MEM1 the Wii's 24 MB did not leave room for.
+[[nodiscard]] inline bool scene_heap_overflows(std::uint32_t mem1_free, std::uint32_t mem2_free, std::uint32_t size,
+                                               std::uint32_t align) noexcept {
+    const std::uint64_t need = static_cast<std::uint64_t>(size) + (align > 4u ? align : 4u);
+    return mem1_free < need && mem2_free >= need;
+}
+
 // Camera collision: where the camera goes when the map is in the way between the point it looks at and the
 // eye (`hit`, the first wall on that line): `margin` short of the wall, towards the player.
 [[nodiscard]] inline Vec3 camera_before_wall(Vec3 look, Vec3 hit, float margin) noexcept {

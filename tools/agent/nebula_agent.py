@@ -258,9 +258,17 @@ class Instance:
             and not s.get('event_camera') and len(players) >= 1 and players[0] is not None \
             and not players[0].get('input_disabled')
 
-    def boot(self, timeout=180.0):
-        """From the strap screen through the title and file 1 into its first scene (the Comet Observatory);
-        waits until the player can move. The pointer positions are the file select's at 16:9."""
+    def boot(self, file=1, timeout=180.0):
+        """Loads a save file straight from the logo (the `file` command: no menus) and waits until the player can
+        move in its first scene (the Comet Observatory)."""
+        self.wait_for(lambda s: s.get('frame', 0) > 0, timeout=60.0, what='the game to start')
+        r = self.command('file %d' % file, timeout=timeout)
+        if not r.get('ok'):
+            raise GameError('file %d: %s' % (file, r.get('error')))
+        return self.wait_for(self.playable, timeout=timeout, what='the first scene')
+
+    def boot_through_menus(self, timeout=180.0):
+        """The same through the title and file select with the pointer (file 1; positions at 16:9)."""
         deadline = time.time() + timeout
         self.wait_for(lambda s: s.get('frame', 0) > 0, timeout=60.0, what='the game to start')
         while time.time() < deadline:
@@ -396,7 +404,8 @@ def main(argv=None):
     p.add_argument('--audio', action='store_true')
     p.add_argument('--fresh-saves', action='store_true')
     sub.add_parser('stop', help='quit the game')
-    sub.add_parser('boot', help='through the title and file 1 until the player can move')
+    p = sub.add_parser('boot', help='load a save file (no menus) and wait until the player can move')
+    p.add_argument('--file', type=int, default=1)
     sub.add_parser('status', help='the latest status.json')
     p = sub.add_parser('cmd', help='send one command and print the reply')
     p.add_argument('text', nargs='+')
@@ -416,7 +425,7 @@ def main(argv=None):
         if args.action == 'launch':
             print('pid', game.launch(coop=not args.solo, audio=args.audio, fresh_saves=args.fresh_saves))
         elif args.action == 'boot':
-            print(json.dumps(game.boot()))
+            print(json.dumps(game.boot(args.file)))
         elif args.action == 'stop':
             print(game.stop())
         elif args.action == 'status':

@@ -40,9 +40,20 @@ constexpr std::uint32_t kIsDemoActive = 0x803C9E84u;     // MR::isDemoActive()
 constexpr std::uint32_t kIsInputDisable = 0x802E98B8u;   // MarioModule::isInputDisable() const (on a Mario)
 constexpr std::uint32_t kIsPlayerDead = 0x803F1EA4u;     // MR::isPlayerDead()
 constexpr std::uint32_t kIsEventCameraActive = 0x803C799Cu;  // MR::isEventCameraActive(): intros, cutscenes
+constexpr std::uint32_t kGetFreeSize = 0x80409794u;      // JKRHeap::getFreeSize()
 // MR::requestChangeStageInGameMoving(const char* stage, s32 scenario): the game copies the name
 // (SceneControlInfo::setStage), so a string on the guest stack will do.
 constexpr std::uint32_t kRequestChangeStage = 0x803F8328u;
+// A save file as the file select starts it: the save files read from NAND (startPreLoadSaveDataSequence, which the
+// file select runs after the title; before it every file is empty and loading one starts a new game), then
+// GameSequenceFunction::startGameDataLoadSequence(int file, bool mario),
+// then, once isActiveSaveDataHandleSequence() is over and isSuccessSaveDataHandleSequence(),
+// MR::requestChangeStageInGameAfterLoadingGameData().
+constexpr std::uint32_t kStartPreLoadSaveData = 0x803B4D3Cu;  // GameSequenceFunction::startPreLoadSaveDataSequence()
+constexpr std::uint32_t kStartGameDataLoad = 0x803B4D84u;
+constexpr std::uint32_t kIsSaveSequenceActive = 0x803B4F84u;
+constexpr std::uint32_t kIsSaveSequenceSuccess = 0x803B4FA8u;
+constexpr std::uint32_t kChangeStageAfterLoading = 0x803F81E8u;
 // MR::onGameEventFlag*MarioAtFirst() for modes 1-7 (rainbow, fire, ice, bee, spring, boo, fly): a power-up the save
 // has not had yet plays its first-time demo, which turns the player to the item they touched (MarioActor::_4A4,
 // a HitSensor); a power-up given without an item had none and crashed there.
@@ -50,6 +61,9 @@ constexpr std::array<std::uint32_t, 8> kPowerUpSeen = {0u,          0x803CC5FCu,
                                                       0x803CC5B4u, 0x803CC5CCu, 0x803CC5C0u, 0x803CC5F0u};
 }  // namespace fn
 
+// SingletonHolder<HeapMemoryWatcher>::sInstance: its heaps, stationed (+0, +4), game (+8, +0xC) and the stage's
+// (+0x14, +0x18), each MEM1 then MEM2.
+constexpr std::uint32_t kHeapMemoryWatcher = 0x806A245Cu;
 constexpr std::uint32_t kGameSystem = 0x806A1228u;  // SingletonHolder<GameSystem>::sInstance
 constexpr std::uint32_t kGameSystemSceneController = 0x24u;
 // GameSystemSceneController: mCurrSceneControlInfo (mScene[32], mStage[32], mScenarioNo) and the scene's
@@ -103,6 +117,15 @@ struct Agent {
     std::uint64_t blocked_until = 0u;
     std::uint64_t blocked_id = 0u;
     std::array<PadTimer, 2> pads{};
+    // A `file` command in progress: waiting for the file select (phase 0), the save files to be read (1), the
+    // file to load (2).
+    bool file_pending = false;
+    std::uint64_t file_id = 0u;
+    std::uint32_t file_index = 0u;
+    bool file_mario = true;
+    int file_phase = 0;
+    std::uint64_t file_started = 0u;
+    std::uint64_t file_settle = 0u;
     std::uint64_t last_status_ms = 0u;
 };
 
@@ -214,6 +237,14 @@ std::string player_json(const Player& player) {
            ",\"input_disabled\":" + (player.input_disabled ? "true" : "false") + "}";
 }
 
+// Free space in one of HeapMemoryWatcher's heaps (`field`: its offset there), in KB; -1 without one.
+std::string heap_free_kb(const Guest& guest, std::uint32_t field) {
+    const std::uint32_t watcher = guest.u32(kHeapMemoryWatcher);
+    const std::uint32_t heap = plausible(watcher) ? guest.u32(watcher + field) : 0u;
+    if (heap == 0u || !(plausible(heap) || (heap >= 0x90000000u && heap < 0x94000000u))) return "-1";
+    return std::to_string(guest.call(fn::kGetFreeSize, heap) / 1024u);
+}
+
 // The scene and, in a game scene, the players: the `state` reply and status.json.
 std::string state_json(const Guest& guest) {
     const Scene scene = read_scene(guest);
@@ -230,6 +261,10 @@ std::string state_json(const Guest& guest) {
     const bool event_camera = (guest.call(fn::kIsEventCameraActive) & 0xFFu) != 0u;
     out += ",\"demo\":" + std::string(demo ? "true" : "false") + ",\"dead\":" + (dead ? "true" : "false") +
            ",\"event_camera\":" + (event_camera ? "true" : "false") +
+           ",\"heap_free_kb\":{\"stationed_mem1\":" + heap_free_kb(guest, 0x00u) + ",\"stationed_mem2\":" +
+           heap_free_kb(guest, 0x04u) + ",\"game_mem1\":" + heap_free_kb(guest, 0x08u) + ",\"game_mem2\":" +
+           heap_free_kb(guest, 0x0Cu) + ",\"scene_mem1\":" + heap_free_kb(guest, 0x14u) + ",\"scene_mem2\":" +
+           heap_free_kb(guest, 0x18u) + "}" +
            ",\"players\":[" + player_json(first) + "," + player_json(second) + "]";
     return out;
 }
@@ -337,6 +372,23 @@ void run(Agent& a, const Guest& guest, const agent::Command& command) {
         reply(a, command.id, true, "");
         return;
     }
+    case Verb::File: {
+        const auto file = !args.empty() ? agent::parse_int(args[0]) : std::nullopt;
+        if (!file || *file < 1 || *file > 6 || args.size() > 2u || (args.size() == 2u && args[1] != "luigi")) {
+            return fail(a, command, "file <1-6> [luigi]");
+        }
+        a.file_pending = true;
+        a.file_id = command.id;
+        a.file_index = static_cast<std::uint32_t>(*file);  // 1-based, as FileSelector passes it
+        a.file_mario = args.size() < 2u;
+        a.file_phase = 0;
+        a.file_started = a.frame;
+        a.file_settle = 0u;
+        a.blocked = true;  // answered by update_file
+        a.blocked_until = ~std::uint64_t{0};
+        a.blocked_id = 0u;
+        return;
+    }
     case Verb::Stage: {
         if (args.size() != 2u) return fail(a, command, "stage <StageName> <mission>");
         const std::string& stage = args[0];
@@ -437,6 +489,54 @@ void update_pads(Agent& a) {
     }
 }
 
+// The `file` command: the wrist-strap screen tapped through, the file select waited for, then the save loaded
+// and its first stage requested; answered once the request is made (or on failure).
+void update_file(Agent& a, const Guest& guest) {
+    if (!a.file_pending) return;
+    const auto finish = [&](bool ok, const char* error) {
+        a.file_pending = false;
+        a.blocked = false;
+        a.pads[0] = PadTimer{};  // the A taps' controller back
+        agent_set_pad(0u, agent::Pad{});
+        reply(a, a.file_id, ok, ok ? std::string{} : std::string("\"error\":\"") + error + "\"");
+    };
+    if (a.frame - a.file_started > 60u * 120u) return finish(false, "timed out");
+    const Scene scene = read_scene(guest);
+    SavedContext saved(guest.context());
+    if (a.file_phase == 0) {
+        if (scene.scene == "Logo" && (a.frame % 40u) == 0u) {
+            PadTimer& timer = a.pads[0];
+            timer.pad.active = true;
+            timer.pad.buttons = coop::button::kA;
+            timer.buttons_until = a.frame + 4u;
+            agent_set_pad(0u, timer.pad);
+        }
+        // The file select up for a second, with no save data handling under way (it preloads the files).
+        const bool ready = scene.in_game && scene.stage == "FileSelect" &&
+                           (guest.call(fn::kIsSaveSequenceActive) & 0xFFu) == 0u;
+        a.file_settle = ready ? a.file_settle + 1u : 0u;
+        if (a.file_settle >= 60u) {
+            guest.call(fn::kStartPreLoadSaveData);
+            a.file_phase = 1;
+            a.file_settle = 0u;
+        }
+        return;
+    }
+    if (a.file_phase == 1) {
+        if (++a.file_settle < 2u || (guest.call(fn::kIsSaveSequenceActive) & 0xFFu) != 0u) return;
+        if ((guest.call(fn::kIsSaveSequenceSuccess) & 0xFFu) == 0u) return finish(false, "the save files could not be read");
+        guest.call(fn::kStartGameDataLoad, a.file_index, a.file_mario ? 1u : 0u);
+        std::fprintf(stderr, "[agent] loading save file %u\n", a.file_index);
+        a.file_phase = 2;
+        a.file_settle = 0u;
+        return;
+    }
+    if (++a.file_settle < 2u || (guest.call(fn::kIsSaveSequenceActive) & 0xFFu) != 0u) return;
+    if ((guest.call(fn::kIsSaveSequenceSuccess) & 0xFFu) == 0u) return finish(false, "the save file did not load");
+    guest.call(fn::kChangeStageAfterLoading);
+    finish(true, nullptr);
+}
+
 }  // namespace
 
 void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc) {
@@ -445,7 +545,8 @@ void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeService
     ++a.frame;
     const Guest guest(context, memory, services, guest_pc);
     update_pads(a);
-    if (a.blocked && a.frame >= a.blocked_until) {
+    update_file(a, guest);
+    if (a.blocked && !a.file_pending && a.blocked_id != 0u && a.frame >= a.blocked_until) {
         a.blocked = false;
         reply(a, a.blocked_id, true, "");
     }

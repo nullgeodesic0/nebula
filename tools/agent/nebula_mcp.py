@@ -40,7 +40,7 @@ def tool_launch(args):
                       audio=args.get('audio', False), fresh_saves=args.get('fresh_saves', False))
     if not args.get('boot', True):
         return text('launched, pid %d' % pid)
-    return text({'pid': pid, 'status': game.boot()})
+    return text({'pid': pid, 'status': game.boot(int(args.get('file', 1)))})
 
 
 def tool_stop(args):
@@ -148,12 +148,13 @@ def schema(properties, required=()):
 PLAYER = {'type': 'integer', 'enum': [1, 2], 'description': '1 Mario (first player), 2 Luigi (second player)'}
 TOOLS = [
     ('game_launch', tool_launch, 'Start a test copy of the game in its own folder (copied saves, no audio, window '
-     'opens without focus) and, by default, boot through the title and file 1 until the player can move.',
+     'opens without focus) and, by default, load save file 1 straight away (no menus) until the player can move.',
      schema({'solo': {'type': 'boolean', 'description': 'One player (co-op off)'},
              'split': {'type': 'boolean', 'description': 'Split screen (default true)'},
              'audio': {'type': 'boolean'},
              'fresh_saves': {'type': 'boolean', 'description': 'Recopy the saves from the run folder'},
-             'boot': {'type': 'boolean', 'description': 'Boot to the first scene (default true)'}})),
+             'boot': {'type': 'boolean', 'description': 'Load a save file to its first scene (default true)'},
+             'file': {'type': 'integer', 'minimum': 1, 'maximum': 6, 'description': 'Save file (default 1)'}})),
     ('game_stop', tool_stop, 'Quit the test copy (ends only its own process).', schema({})),
     ('game_status', tool_status, 'Whether it runs, and its frame, scene, stage, mission, cutscene state and players '
      '(position, power-up, health).', schema({})),
@@ -173,7 +174,7 @@ TOOLS = [
      'return the status. Buttons: A B 1 2 PLUS MINUS UP DOWN LEFT RIGHT C Z joined with +; stick -1..1, y up.',
      schema({'player': PLAYER, 'buttons': {'type': 'string'}, 'stick_x': {'type': 'number'},
              'stick_y': {'type': 'number'}, 'frames': {'type': 'integer', 'minimum': 1}})),
-    ('game_command', tool_command, 'Send a raw command (runtime/include/galaxy/agent.h): ping, state, stage, wait, '
+    ('game_command', tool_command, 'Send a raw command (runtime/include/galaxy/agent.h): ping, state, file, stage, wait, '
      'press, stick, pointer, release, powerup, teleport, screenshot, quit.',
      schema({'text': {'type': 'string'}, 'timeout': {'type': 'number'}}, ['text'])),
     ('game_log', tool_log, 'The last lines of the game log, optionally only those containing a text.',

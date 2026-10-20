@@ -22,6 +22,7 @@ enum class Verb {
     Unknown,
     Ping,        // ping: answered at once
     State,       // state: scene, stage, mission, players
+    File,        // file <1-6> [luigi]: loads that save file and starts it, from the logo or file select (no menus)
     Stage,       // stage <StageName> <mission>: into that galaxy and mission (MR::requestChangeStageInGameMoving)
     Wait,        // wait <frames>: answered after that many frames
     Press,       // press <player 1|2> <buttons A+B+Z..> <frames>: held, then released; answered when released
@@ -56,6 +57,7 @@ struct Pad {
 [[nodiscard]] inline Verb verb_of(std::string_view name) noexcept {
     if (name == "ping") return Verb::Ping;
     if (name == "state") return Verb::State;
+    if (name == "file") return Verb::File;
     if (name == "stage") return Verb::Stage;
     if (name == "wait") return Verb::Wait;
     if (name == "press") return Verb::Press;

@@ -51,6 +51,8 @@ constexpr std::uint32_t kShadowFarClipping = 13u;
 constexpr std::uint32_t kSetPlayerMode = 14u;
 constexpr std::uint32_t kNameObjHolderCtor = 15u;
 constexpr std::uint32_t kNameObjHolderAdd = 16u;
+constexpr std::uint32_t kSolidHeapAllocHead = 17u;  // JKRSolidHeap::allocFromHead(u32 size, int align)
+constexpr std::uint32_t kSolidHeapAllocTail = 18u;  // JKRSolidHeap::allocFromTail(u32 size, int align)
 }  // namespace call
 
 namespace fn {
@@ -107,6 +109,11 @@ constexpr std::uint32_t kMovementTypePlayer = 0x25u;          // MR::MovementTyp
 constexpr std::uint32_t kPlayerHeapSize = 0x500000u;          // PlayerHeapHolder's heaps, one character's set
 // Room for the second character's model, face and shadow archives next to the first's.
 constexpr std::uint32_t kPartnerHeapExtra = 0x200000u;
+// SingletonHolder<HeapMemoryWatcher>::sInstance; HeapMemoryWatcher::mSceneHeapGDDR (the stage's MEM2 heap).
+constexpr std::uint32_t kHeapMemoryWatcher = 0x806A245Cu;
+constexpr std::uint32_t kSceneHeapNapa = 0x14u;
+constexpr std::uint32_t kSceneHeapGddr = 0x18u;
+constexpr std::uint32_t kSolidHeapFreeSize = 0x6Cu;  // JKRSolidHeap::mFreeSize
 
 namespace actor {
 constexpr std::uint32_t kPosition = 0x00Cu;     // LiveActor::mPosition
@@ -415,6 +422,14 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     ensure_archive_names(guest, s);
     const std::uint32_t name = s.names.of(coop::partner_of(s.own))[0];
     s.creating_second = true;
+    // The stage heaps' room before and after (a second player takes about 600 KB of MEM1).
+    const std::uint32_t watcher = guest.u32(kHeapMemoryWatcher);
+    const auto free_kb = [&](std::uint32_t field) {
+        const std::uint32_t heap = plausible(watcher) ? guest.u32(watcher + field) : 0u;
+        return heap != 0u ? guest.u32(heap + kSolidHeapFreeSize) / 1024u : 0u;
+    };
+    trace("stage heaps before the second player: MEM1 %u KB free, MEM2 %u KB free", free_kb(kSceneHeapNapa),
+          free_kb(kSceneHeapGddr));
     const std::uint32_t second = guest.call(fn::kCreateMarioActor, name);
     if (plausible(second)) {
         Guest::Frame frame(guest);
@@ -422,6 +437,8 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
         guest.call(fn::kMarioActorInit2, second, frame.vec(0, beside), frame.vec(1, rotation), 1u);  // 1: 基本
         s.answer_partner = false;
     }
+    trace("stage heaps after the second player: MEM1 %u KB free, MEM2 %u KB free", free_kb(kSceneHeapNapa),
+          free_kb(kSceneHeapGddr));
     s.creating_second = false;
     // init2 made the new actor the scene's player and set gIsLuigi to its character: back to the first.
     guest.set_u8(kIsLuigi, character_byte(s.own));
@@ -962,8 +979,36 @@ void fill_partner_kpad(const Guest& guest, State& s) {
 
 }  // namespace
 
+// JKRSolidHeap::allocFromHead/allocFromTail(this, size, align): an allocation the stage's MEM1 heap cannot hold
+// comes from its MEM2 heap (coop::scene_heap_overflows). Solid heaps are freed whole with the stage, so the
+// borrowed block goes when the MEM2 heap does. With or without co-op: it only replaces a crash.
+void borrow_from_mem2(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
+                      std::uint32_t guest_pc) {
+    const Guest guest(context, memory, services, guest_pc);
+    const std::uint32_t heap = context->gpr[3];
+    const std::uint32_t watcher = guest.u32(kHeapMemoryWatcher);
+    if (heap == 0u || !plausible(watcher) || heap != guest.u32(watcher + kSceneHeapNapa)) return;
+    const std::uint32_t mem2 = guest.u32(watcher + kSceneHeapGddr);
+    if (mem2 < 0x90000000u || mem2 >= 0x94000000u) return;
+    const std::uint32_t size = context->gpr[4];
+    const auto align = static_cast<std::uint32_t>(std::abs(static_cast<std::int32_t>(context->gpr[5])));
+    const std::uint32_t mem1_free = guest.u32(heap + kSolidHeapFreeSize);
+    const std::uint32_t mem2_free = guest.u32(mem2 + kSolidHeapFreeSize);
+    if (!coop::scene_heap_overflows(mem1_free, mem2_free, size, align)) return;
+    context->gpr[3] = mem2;
+    static unsigned logged = 0u;
+    if (logged++ < 8u) {
+        std::fprintf(stderr, "[heap] the stage's MEM1 heap is full (%u bytes left): %u bytes from its MEM2 heap (%u KB left)\n",
+                     mem1_free, size, mem2_free / 1024u);
+    }
+}
+
 void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
                       std::uint32_t guest_pc) {
+    if (id == call::kSolidHeapAllocHead || id == call::kSolidHeapAllocTail) {
+        if (services != nullptr) borrow_from_mem2(context, memory, services, guest_pc);
+        return;
+    }
     // KPADRead(chan, ...): the agent's frame, at the first player's controller read.
     if (id == call::kKpadRead && context->gpr[3] == 0u && services != nullptr && services->call_guest != nullptr) {
         agent_frame(context, memory, services, guest_pc);

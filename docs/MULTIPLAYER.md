@@ -102,6 +102,9 @@ These come from a game written for one player and are what the playtest should l
   camera areas (the game's fixed and rail cameras are the first player's); an event the second player starts
   through an object (not their own move) plays in the first player's half; the temporal upscaler and motion blur assume one camera a
   frame, so turn them off while playing split. The 3D scene costs twice as much to draw while split.
+- Memory: the Wii's 24 MB of MEM1 has no room for a second player on the fullest stages. When the stage's MEM1
+  heap is full, the runtime takes the allocation from the stage's MEM2 heap instead (`[heap]` in the log); a
+  stage that fills both still stops.
 
 ## Playtest
 

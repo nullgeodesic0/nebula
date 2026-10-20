@@ -27,7 +27,7 @@ The run folder's `NebulaRuntime.exe` and RMGE01 modules are the build under test
 
 ```
 py -3 tools/agent/nebula_agent.py launch            # --solo for co-op off, --audio, --fresh-saves
-py -3 tools/agent/nebula_agent.py boot              # title and file 1 until the player can move
+py -3 tools/agent/nebula_agent.py boot              # opens save file 1 (--file N) with no menus, about 15 s
 py -3 tools/agent/nebula_agent.py goto "space junk" 1
 py -3 tools/agent/nebula_agent.py cmd powerup 2 fire
 py -3 tools/agent/nebula_agent.py shot out.png
@@ -50,12 +50,14 @@ Claude Code offers the server from `.mcp.json` when a session starts in this fol
 With `GALAXY_AGENT_DIR` set, the game reads `commands.txt` in that folder (the driver appends
 `<id> <verb> <arguments>` lines) and answers each command in `replies.jsonl` (`{"id":..,"ok":..,"frame":..}`),
 once a frame on the game thread at the first player's controller read. `status.json` is rewritten twice a second
-with the frame, scene, stage, mission and, in a stage, `demo`, `event_camera`, `dead` and each player's position,
-power-up, health and whether their input is held.
+with the frame, scene, stage, mission and, in a stage, `demo`, `event_camera`, `dead`, the free space of the
+game's heaps (`heap_free_kb`: stationed, game and stage, MEM1 and MEM2) and each player's position, power-up,
+health and whether their input is held.
 
 | Command | Effect |
 |---|---|
 | `ping`, `state` | Answered at once; `state` as status.json |
+| `file <1-6> [luigi]` | From the logo or title, reads the saves and starts that file as the file select would (`FileSelector::exeDemo`), no menus; answered when its first stage is requested |
 | `stage <StageName> <mission>` | Into that galaxy mission (`MR::requestChangeStageInGameMoving`); needs a stage, not the title |
 | `wait <frames>` | Answered after that many frames; later commands wait for it |
 | `press <1\|2> <A+B..> <frames> [nowait]` | Buttons held, then released (A B 1 2 PLUS MINUS UP DOWN LEFT RIGHT C Z HOME) |
@@ -74,4 +76,7 @@ without an item it crashed.
 ## Found with it
 
 - Space Junk mission 1 in co-op: fixed (the second player's view unclipped the arena's web coins).
-- Honeyhive mission 1 in co-op, loaded with `goto`: a heap allocation fails while the stage is built (solo loads).
+- Honeyhive mission 1 in co-op: the stage's MEM1 heap ran out (solo leaves it 1.2 MB; the second player takes
+  about 600 KB and co-op's other additions the rest). Fixed by letting a full MEM1 stage heap borrow from the
+  MEM2 one (`[heap]` lines in the log).
+- A power-up given without its item crashed in the first-time demo (handled by the `powerup` command).
