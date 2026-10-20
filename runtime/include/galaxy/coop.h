@@ -502,6 +502,11 @@ public:
     void release() noexcept {
         if (active_) returning_ = true;
     }
+    // Still not the first player's camera: hold on (and wait afresh once released again).
+    void rearm() noexcept {
+        returning_ = false;
+        frames_ = 0u;
+    }
     [[nodiscard]] bool returning() const noexcept { return active_ && returning_; }
     // While returning, once a frame with the game camera: true when it is back (near the held view) or has
     // taken too long; the hold then ends.
@@ -734,10 +739,42 @@ struct BodyTuning {
     return event_camera_active && second != 0u && (current == second || (second_special && !first_special));
 }
 
+// Whether the game camera is about the second player rather than the first: its eye nearer the second, and
+// well away from the first (a warp or launch star camera the game sets up at the second player's warp while
+// still aiming at the first player, its player).
+inline constexpr float kOtherPlayerCameraDistance = 2000.0f;
+[[nodiscard]] inline bool camera_is_second_players(Vec3 eye, Vec3 first, Vec3 second) noexcept {
+    const float to_first = length(eye - first);
+    const float to_second = length(eye - second);
+    return std::isfinite(to_first) && std::isfinite(to_second) && to_second < to_first &&
+           to_first > kOtherPlayerCameraDistance;
+}
+
 // Doors and domes (the Observatory's AstroChangeStageCube areas) test the game's player, the first: the
 // second player at one the first is not at swaps places with them, so the game takes them through.
 [[nodiscard]] constexpr bool swap_for_entrance(bool second_in_entrance, bool first_in_entrance) noexcept {
     return second_in_entrance && !first_in_entrance;
+}
+
+// The second player waits (does not move) while the game has the first player's controls (a Pull Star, a
+// launch into a galaxy) or a cutscene plays: those sequences change the map around the first player.
+[[nodiscard]] constexpr bool second_player_waits(bool first_player_controls_held, bool cutscene) noexcept {
+    return first_player_controls_held || cutscene;
+}
+
+// The MarioActor::mModels slot of a power-up form's model (MarioActorDraw.cpp init*Mario), kTeresaParts
+// for the Boo form (its own parts), -1 for forms drawn with the normal model (fire, flying).
+inline constexpr int kTeresaParts = -2;
+[[nodiscard]] constexpr int power_up_model_slot(std::uint16_t mode) noexcept {
+    switch (mode) {
+    case 1: return 4;  // rainbow (invincible)
+    case 3: return 3;  // ice
+    case 4: return 2;  // bee
+    case 5: return 5;  // spring (hopper)
+    case 6: return kTeresaParts;  // boo
+    case 9: return 1;  // bone
+    default: return -1;
+    }
 }
 
 // Counts frames out of range; true on the frame the second player should be brought back.

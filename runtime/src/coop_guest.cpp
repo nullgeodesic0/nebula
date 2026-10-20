@@ -42,6 +42,7 @@ constexpr std::uint32_t kGxSetViewport = 10u;  // hooked but left alone: viewpor
 constexpr std::uint32_t kGxSetScissor = 11u;   // likewise: the renderer keeps each half (SplitClip)
 constexpr std::uint32_t kClipFrustum = 12u;
 constexpr std::uint32_t kShadowFarClipping = 13u;
+constexpr std::uint32_t kSetPlayerMode = 14u;
 }  // namespace call
 
 namespace fn {
@@ -75,6 +76,8 @@ constexpr std::uint32_t kGetFrameBufferHeight = 0x8034AFB0u;  // MR::getFrameBuf
 constexpr std::uint32_t kFirstPolyOnLineToMap = 0x803E0874u;
 constexpr std::uint32_t kShadowGetDropPos = 0x8016C1B4u;  // ShadowController::getDropPos(TVec3f*) const
 constexpr std::uint32_t kIsInAreaObj = 0x803FEA64u;  // MR::isInAreaObj(const char* name, const TVec3f& position)
+constexpr std::uint32_t kIsDemoActive = 0x803C9E84u;     // MR::isDemoActive()
+constexpr std::uint32_t kIsInputDisable = 0x802E98B8u;   // MarioModule::isInputDisable() const (on a Mario)
 }  // namespace fn
 
 // CameraContext (scene object 0x17), reached as MR::getCameraViewMtx does: *(r13 - 0x3A78) -> +0x24 -> +0xAC ->
@@ -105,6 +108,10 @@ constexpr std::uint32_t kMarioSideVec = 0x310u;  // Mario::mSideVec
 constexpr std::uint32_t kMarioUpVec = 0x1FCu;    // Mario::_1FC, Mario::getUpVec()
 constexpr std::uint32_t kMarioFrontVec = 0x208u;  // Mario::mFrontVec
 constexpr std::uint32_t kMarioState = 0x97Cu;     // Mario: MarioState* of a special state, 0 in ordinary play
+// MarioActor::mModels[6] (J3DModelX*): the power-up models, created when their archive is loaded
+// (MarioActorDraw.cpp init*Mario).
+constexpr std::uint32_t kActorModels = 0xA28u;
+constexpr std::uint32_t kActorTeresaParts = 0x9A4u;  // MarioActor::_9A4: the Boo form's parts
 // ShadowController::_67 (u8): the shadow is past the far clip from the camera (updateFarClipping).
 constexpr std::uint32_t kShadowFarClipped = 0x67u;
 
@@ -293,6 +300,8 @@ struct State {
     // The Observatory's doors and domes (AstroChangeStageCube areas) test the game's player, the first: when
     // the second player walks into one the players swap places, so the game's own check takes them through.
     // `entrance_name` is the area class's name in the game's data; `entrance_wait` frames between swaps.
+    bool second_waiting_input = false;
+    bool second_waiting_demo = false;
     std::uint32_t entrance_name = 0u;
     bool entrance_searched = false;
     unsigned entrance_wait = 0u;
@@ -323,7 +332,13 @@ struct State {
     // not seen.
     coop::CameraHandover handover;
     coop::CameraHold hold;
+    // The game camera's last view that was the first player's, and where they were then.
     coop::CameraMatrices last_camera1;
+    coop::Vec3 last_origin{};
+    // The second player's half, eased from the event's camera into their own when their event ends;
+    // `second_view` is what their half drew last frame.
+    coop::CameraHandover second_handover;
+    coop::CameraMatrices second_view;
     std::uint32_t shadow_controller = 0u;
     float shadow_clip = 0.0f;
     std::uint32_t draw_scene = 0u;
@@ -565,7 +580,10 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
             // Their half blends from their own camera into the event's; the first player's half holds the
             // game camera's view from before the event.
             s.handover.start(s.camera2, true);
-            s.hold.start(s.last_camera1, guest.vec(s.first + actor::kPosition));
+            s.hold.start(s.last_camera1, s.last_origin);
+        } else if (!s.event_second && s.split.amount() > 0.0f) {
+            // Their half eases from the event's camera back into their own.
+            s.second_handover.start(s.second_view, true);
         }
     }
     // The first player's half holds on past the event while the second player is still in flight (a launch
@@ -648,15 +666,10 @@ float shared_extent(const Guest& guest, const State& s, coop::Vec3 first_positio
     return coop::shared_view_extent(camera, first_position, second_position, depth, fovy, aspect);
 }
 
-// The game camera's view while it is the first player's (no camera event of the second player's, and not
-// travelling back from one), for CameraHold.
+// One screen again: nothing held.
 void remember_first_camera(const Guest& guest, State& s) {
+    (void)guest;
     if (s.split.amount() == 0.0f) s.hold.reset();
-    if (s.event_second || s.hold.active()) return;
-    const std::uint32_t context = camera_context(guest);
-    if (context == 0u) return;
-    const coop::CameraMatrices camera = read_camera(guest, context);
-    if (finite(camera.view) && finite(camera.inverse)) s.last_camera1 = camera;
 }
 
 // After the game moves its players, the second player: one MarioActor::movement with the game's player,
@@ -675,6 +688,20 @@ void move_second_player(const Guest& guest, State& s) {
     }
     const std::uint32_t pad_holder = guest.call(fn::kGetWPadHolder);
     const bool pads = plausible(pad_holder) && plausible(guest.u32(pad_holder)) && plausible(guest.u32(pad_holder + 4u));
+
+    // While the game has the first player's controls (a Pull Star, a launch into a galaxy) or a cutscene
+    // plays, the second player waits where they are: those sequences change the map (collision, gravity)
+    // around the first player and dropped the second through the floor.
+    const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
+    const bool first_held = plausible(first_mario) && (guest.call(fn::kIsInputDisable, first_mario) & 0xFFu) != 0u;
+    const bool demo = (guest.call(fn::kIsDemoActive) & 0xFFu) != 0u;
+    if (first_held != s.second_waiting_input || demo != s.second_waiting_demo) {
+        trace("second player %s (first player's controls held %d, cutscene %d)",
+              first_held || demo ? "waits" : "moves again", first_held ? 1 : 0, demo ? 1 : 0);
+        s.second_waiting_input = first_held;
+        s.second_waiting_demo = demo;
+    }
+    if (coop::second_player_waits(first_held, demo)) return;
 
     const coop::Character partner = coop::partner_of(s.own);
     s.moving_second = true;
@@ -814,9 +841,29 @@ void begin_split_draw(const Guest& guest, State& s) {
         if (height >= 240.0f && height <= 640.0f) s.screen_height = height;
     }
     const coop::Vec3 first_position = guest.vec(s.first + actor::kPosition);
+    const coop::Vec3 second_position = guest.vec(s.second + actor::kPosition);
+    if (!events_swapped(s)) {
+        // A game camera set up at the second player's warp while aiming at the first player is not the first
+        // player's: their half holds its last good view until the game camera is back with them.
+        if (coop::camera_is_second_players(coop::pose_of(s.camera1.inverse).eye, first_position, second_position)) {
+            if (!s.hold.active()) {
+                s.hold.start(s.last_camera1, s.last_origin);
+                trace("the game camera is at the second player: the first player's half holds");
+            } else {
+                s.hold.rearm();
+            }
+        } else if (!s.hold.active()) {
+            s.last_camera1 = s.camera1;
+            s.last_origin = first_position;
+        }
+    }
     // Pans from the first player's view at the split to the second player's own.
     s.camera2 = events_swapped(s) ? s.hold.view(first_position)
                                   : coop::blend_cameras(s.camera1, s.follow_view, s.split.eased());
+    if (!events_swapped(s) && s.second_handover.active()) {
+        s.camera2 = s.second_handover.camera(s.camera2, true);
+        s.second_handover.advance();
+    }
 
     s.pass = 1u;
     s.draw_scene = guest.context()->gpr[3];
@@ -844,6 +891,7 @@ void begin_split_draw(const Guest& guest, State& s) {
         guest.call(fn::kLoadViewMtx);
         guest.call(fn::kCalcViewAndEntry);
     }
+    s.second_view = second_half(s) ? game_half : s.camera2;
     write_floats(guest, context + camera::kProjection, half_projection(s, second_half(s)));
     send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), 1u);
 }
@@ -946,6 +994,23 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         // ClippingJudge::isJudgedToClipFrustum(this, const TVec3f& position, f32 radius, s32 level).
         s.clip_position = s.split.amount() > 0.0f && s.follow.started() ? context->gpr[4] : 0u;
         s.clip_radius = static_cast<float>(fpr(context, 1));
+        return;
+    case call::kSetPlayerMode:
+        // MarioActor::setPlayerMode(this, u16 mode, bool): the second player stays as they are rather than
+        // take a power-up whose model was not loaded for their character (the game loads only the first
+        // player's character's power-up archives; the empty model crashed).
+        if (plausible(s.second) && context->gpr[3] == s.second) {
+            const auto mode = static_cast<std::uint16_t>(context->gpr[4] & 0xFFFFu);
+            const int slot = coop::power_up_model_slot(mode);
+            const Guest guest(context, memory, services, guest_pc);
+            const bool missing = slot == coop::kTeresaParts ? guest.u32(s.second + kActorTeresaParts) == 0u
+                                 : slot >= 0 ? guest.u32(s.second + kActorModels + 4u * static_cast<std::uint32_t>(slot)) == 0u
+                                             : false;
+            if (missing) {
+                trace("second player's power-up %u has no model: not taken", mode);
+                context->gpr[4] = 0u;
+            }
+        }
         return;
     case call::kShadowFarClipping:
         // ShadowController::updateFarClipping(this, f32 clip).

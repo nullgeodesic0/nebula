@@ -351,6 +351,17 @@ bool test_camera_player() {
                  "a launch star started for the second player (only they are flying) is theirs");
     ok &= expect(!camera_event_is_second(first, second, true, true, true), "both in special states: the first player's");
     ok &= expect(!camera_event_is_second(0u, 0u, true, true, false), "no second player: no swap");
+    ok &= expect(second_player_waits(true, false) && second_player_waits(false, true) && !second_player_waits(false, false),
+                 "the second player waits while the first player's controls are held or a cutscene plays");
+    ok &= expect(power_up_model_slot(4) == 2 && power_up_model_slot(5) == 5 && power_up_model_slot(3) == 3 &&
+                     power_up_model_slot(9) == 1 && power_up_model_slot(6) == kTeresaParts && power_up_model_slot(2) == -1,
+                 "power-up forms and their model slots");
+    ok &= expect(camera_is_second_players({5000.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {5500.0f, 0.0f, 0.0f}),
+                 "a camera at the second player's warp, far from the first: the second player's");
+    ok &= expect(!camera_is_second_players({800.0f, 300.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {1200.0f, 0.0f, 0.0f}),
+                 "a camera near the first player: theirs, even if the second is near too");
+    ok &= expect(!camera_is_second_players({0.0f, 3000.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {9000.0f, 0.0f, 0.0f}),
+                 "a far zoomed-out camera nearer the first player: theirs");
     ok &= expect(swap_for_entrance(true, false), "the second player at a door: swap places");
     ok &= expect(!swap_for_entrance(true, true) && !swap_for_entrance(false, true) && !swap_for_entrance(false, false),
                  "the first player there too, or nobody: no swap");
