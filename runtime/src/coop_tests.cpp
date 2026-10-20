@@ -351,6 +351,9 @@ bool test_camera_player() {
                  "a launch star started for the second player (only they are flying) is theirs");
     ok &= expect(!camera_event_is_second(first, second, true, true, true), "both in special states: the first player's");
     ok &= expect(!camera_event_is_second(0u, 0u, true, true, false), "no second player: no swap");
+    ok &= expect(swap_for_entrance(true, false), "the second player at a door: swap places");
+    ok &= expect(!swap_for_entrance(true, true) && !swap_for_entrance(false, true) && !swap_for_entrance(false, false),
+                 "the first player there too, or nobody: no swap");
     return ok;
 }
 

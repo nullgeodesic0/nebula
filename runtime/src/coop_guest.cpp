@@ -74,6 +74,7 @@ constexpr std::uint32_t kGetFrameBufferHeight = 0x8034AFB0u;  // MR::getFrameBuf
 // second player's camera collision.
 constexpr std::uint32_t kFirstPolyOnLineToMap = 0x803E0874u;
 constexpr std::uint32_t kShadowGetDropPos = 0x8016C1B4u;  // ShadowController::getDropPos(TVec3f*) const
+constexpr std::uint32_t kIsInAreaObj = 0x803FEA64u;  // MR::isInAreaObj(const char* name, const TVec3f& position)
 }  // namespace fn
 
 // CameraContext (scene object 0x17), reached as MR::getCameraViewMtx does: *(r13 - 0x3A78) -> +0x24 -> +0xAC ->
@@ -289,6 +290,12 @@ struct State {
     bool answer_partner = false;
 
     ArchiveNames names;
+    // The Observatory's doors and domes (AstroChangeStageCube areas) test the game's player, the first: when
+    // the second player walks into one the players swap places, so the game's own check takes them through.
+    // `entrance_name` is the area class's name in the game's data; `entrance_wait` frames between swaps.
+    std::uint32_t entrance_name = 0u;
+    bool entrance_searched = false;
+    unsigned entrance_wait = 0u;
     coop::KpadSynth kpad;
     coop::LeashTimer leash;
     unsigned frames = 0u;
@@ -706,7 +713,31 @@ void move_second_player(const Guest& guest, State& s) {
         share = coop::shared_camera(first_position, second_position);
         too_far = share.out_of_range;
     }
-    if (s.leash.update(too_far, coop::CameraTuning{}.warp_frames)) {
+    // The second player at a door or dome the first player is not at: swap places (MR::setPlayerPos moves the
+    // scene's player, the second now and the first below).
+    bool swap_places = false;
+    if (s.entrance_wait > 0u) {
+        --s.entrance_wait;
+    } else {
+        if (!s.entrance_searched) {
+            s.entrance_searched = true;
+            s.entrance_name = guest.find_string("AstroChangeStageCube");
+            trace("entrance area name at %08X", s.entrance_name);
+        }
+        if (s.entrance_name != 0u) {
+            Guest::Frame frame(guest);
+            const bool second_in = (guest.call(fn::kIsInAreaObj, s.entrance_name, frame.vec(0, second_position)) & 0xFFu) != 0u;
+            const bool first_in = second_in &&
+                (guest.call(fn::kIsInAreaObj, s.entrance_name, frame.vec(1, first_position)) & 0xFFu) != 0u;
+            swap_places = coop::swap_for_entrance(second_in, first_in);
+        }
+    }
+    if (swap_places) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, first_position));
+        s.entrance_wait = 120u;
+        trace("second player at an entrance: the players swap places");
+    } else if (s.leash.update(too_far, coop::CameraTuning{}.warp_frames)) {
         // Still the second player's turn: MR::setPlayerPos moves the scene's player.
         Guest::Frame frame(guest);
         guest.call(fn::kSetPlayerPos, frame.vec(0, first_position));
@@ -717,6 +748,10 @@ void move_second_player(const Guest& guest, State& s) {
     guest.call(fn::kSetMarioActor, holder, s.first);
     guest.set_u8(kIsLuigi, character_byte(s.own));
     s.moving_second = false;
+    if (swap_places) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, second_position));
+    }
 
     keep_camera_on_first_player(guest, s);
     bump_players(guest, s, first_position, second_position);

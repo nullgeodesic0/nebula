@@ -734,6 +734,12 @@ struct BodyTuning {
     return event_camera_active && second != 0u && (current == second || (second_special && !first_special));
 }
 
+// Doors and domes (the Observatory's AstroChangeStageCube areas) test the game's player, the first: the
+// second player at one the first is not at swaps places with them, so the game takes them through.
+[[nodiscard]] constexpr bool swap_for_entrance(bool second_in_entrance, bool first_in_entrance) noexcept {
+    return second_in_entrance && !first_in_entrance;
+}
+
 // Counts frames out of range; true on the frame the second player should be brought back.
 class LeashTimer {
 public:

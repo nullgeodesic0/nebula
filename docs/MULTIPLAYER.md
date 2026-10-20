@@ -89,7 +89,10 @@ These come from a game written for one player and are what the playtest should l
 - Enemies, doors, stars and the HUD act on the first player. The second player can stomp and spin, but
   pickups, health and deaths may count for the first player or be ignored.
 - Rumble goes to the first player's controller.
-- Domes, warps and cutscenes move the first player only; the second rejoins them at the next level start.
+- The Observatory's doors and domes (AstroChangeStageCube areas) test the game's player, the first: when the
+  second player walks into one the first is not in, the players swap places, so the game takes them through
+  (and both arrive in the next scene). Warps, launch stars and cutscenes the game starts for the first player
+  move the first player only; the second rejoins them at the next level start.
 - The Odyssey moves are the first player's only.
 - Split screen: mirror reflections follow the first player's camera only; the second player's camera has no
   camera areas (the game's fixed and rail cameras are the first player's); an event the second player starts
