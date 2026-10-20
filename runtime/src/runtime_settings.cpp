@@ -338,7 +338,8 @@ void apply_env_overrides(RuntimeSettings& settings) {
     apply_env(settings, "GALAXY_BUTTON_PROMPTS", "button_prompts");
     apply_env(settings, "GALAXY_MOTION_STYLE", "motion_style");
     apply_env(settings, "GALAXY_ODYSSEY_MOVESET", "odyssey_moveset");
-    apply_env(settings, "GALAXY_COOP", "coop");
+    // Not GALAXY_COOP: that is the cooperative thread scheduler (native_runtime.cpp), which must stay on.
+    apply_env(settings, "GALAXY_TWO_PLAYERS", "coop");
     apply_env(settings, "GALAXY_CUSTOM_ANIMATIONS", "custom_animations");
     apply_env(settings, "GALAXY_CUSTOM_MODEL", "custom_model");
     apply_env(settings, "GALAXY_CUSTOM_VOICE", "custom_voice");

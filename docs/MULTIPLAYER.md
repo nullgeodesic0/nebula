@@ -18,7 +18,7 @@ There are three steps:
 ## Switching it on
 
 Nebula Settings > General > "Two players: Mario and Luigi", or `coop=on` in `runtime_settings.ini`
-(`GALAXY_COOP=1`). It is read when the game starts.
+(`GALAXY_TWO_PLAYERS=1`; not `GALAXY_COOP`, which is the cooperative thread scheduler). It is read when the`r`ngame starts.
 
 ## Controllers
 
