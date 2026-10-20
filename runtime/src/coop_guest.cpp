@@ -692,19 +692,19 @@ void move_second_player(const Guest& guest, State& s) {
     const std::uint32_t pad_holder = guest.call(fn::kGetWPadHolder);
     const bool pads = plausible(pad_holder) && plausible(guest.u32(pad_holder)) && plausible(guest.u32(pad_holder + 4u));
 
-    // While the game has the first player's controls (a Pull Star, a launch into a galaxy) or a cutscene
-    // plays, the second player waits where they are: those sequences change the map (collision, gravity)
-    // around the first player and dropped the second through the floor.
+    // While the game has the first player's controls (a dome's Pull Star, the flight into a galaxy) or a
+    // cutscene plays, the second player goes with them, beside them: those sequences change the map
+    // (collision, gravity) around the first player and dropped the second through the floor.
     const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
     const bool first_held = plausible(first_mario) && (guest.call(fn::kIsInputDisable, first_mario) & 0xFFu) != 0u;
     const bool demo = (guest.call(fn::kIsDemoActive) & 0xFFu) != 0u;
     if (first_held != s.second_waiting_input || demo != s.second_waiting_demo) {
         trace("second player %s (first player's controls held %d, cutscene %d)",
-              first_held || demo ? "waits" : "moves again", first_held ? 1 : 0, demo ? 1 : 0);
+              first_held || demo ? "goes beside the first" : "is free again", first_held ? 1 : 0, demo ? 1 : 0);
         s.second_waiting_input = first_held;
         s.second_waiting_demo = demo;
     }
-    if (coop::second_player_waits(first_held, demo)) return;
+    const bool beside_first = coop::second_player_waits(first_held, demo);
 
     const coop::Character partner = coop::partner_of(s.own);
     s.moving_second = true;
@@ -719,6 +719,12 @@ void move_second_player(const Guest& guest, State& s) {
     if (camera_ctx != 0u) write_camera(guest, camera_ctx, s.camera2);
     guest.call(fn::kMarioActorMovement, s.second);
     if (camera_ctx != 0u) write_camera(guest, camera_ctx, first_camera);
+    if (beside_first && plausible(first_mario)) {
+        // Still the second player's turn: MR::setPlayerPos moves the scene's player.
+        const coop::Vec3 beside = coop::beside(guest.vec(s.first + actor::kPosition), guest.vec(first_mario + kMarioSideVec));
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, beside));
+    }
 
     const coop::Vec3 first_position = guest.vec(s.first + actor::kPosition);
     const coop::Vec3 second_position = guest.vec(s.second + actor::kPosition);

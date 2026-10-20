@@ -790,6 +790,13 @@ inline constexpr float kOtherPlayerCameraDistance = 2000.0f;
     return first_player_controls_held || cutscene;
 }
 
+// Where the second player goes while they travel with the first (second_player_waits): `kBesideDistance`
+// to the first player's side (`side`, Mario::mSideVec).
+inline constexpr float kBesideDistance = 150.0f;
+[[nodiscard]] inline Vec3 beside(Vec3 first, Vec3 side) noexcept {
+    return first + normalized(side, {1.0f, 0.0f, 0.0f}) * kBesideDistance;
+}
+
 // The MarioActor::mModels slot of a power-up form's model (MarioActorDraw.cpp init*Mario), kTeresaParts
 // for the Boo form (its own parts), -1 for forms drawn with the normal model (fire, flying).
 inline constexpr int kTeresaParts = -2;

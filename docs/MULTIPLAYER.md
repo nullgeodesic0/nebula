@@ -94,8 +94,8 @@ These come from a game written for one player and are what the playtest should l
   (and both arrive in the next scene). Warps, launch stars and cutscenes the game starts for the first player
   move the first player only; the second rejoins them at the next level start.
 - The Odyssey moves are the first player's only.
-- While the game has the first player's controls (a Pull Star, a launch into a galaxy) or a cutscene plays,
-  the second player waits where they are. The second player cannot take a power-up whose model the game did
+- While the game has the first player's controls (a dome's Pull Star, the flight into a galaxy) or a
+  cutscene plays, the second player travels beside the first; otherwise they are free. The second player cannot take a power-up whose model the game did
   not load for their character (it loads only the first player's character's power-up archives): they stay
   as they are.
 - Split screen: mirror reflections follow the first player's camera only; the second player's camera has no

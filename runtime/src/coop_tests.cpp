@@ -372,6 +372,9 @@ bool test_camera_player() {
                  "a camera near the first player: theirs, even if the second is near too");
     ok &= expect(!camera_is_second_players({0.0f, 3000.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {9000.0f, 0.0f, 0.0f}),
                  "a far zoomed-out camera nearer the first player: theirs");
+    const Vec3 flying_beside = beside({100.0f, 200.0f, 300.0f}, {0.0f, 0.0f, 2.0f});
+    ok &= expect(near(flying_beside.z, 300.0f + kBesideDistance) && near(flying_beside.x, 100.0f),
+                 "travelling with the first player: beside them");
     ok &= expect(swap_for_entrance(true, false), "the second player at a door: swap places");
     ok &= expect(!swap_for_entrance(true, true) && !swap_for_entrance(false, true) && !swap_for_entrance(false, false),
                  "the first player there too, or nobody: no swap");
