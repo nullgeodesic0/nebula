@@ -519,6 +519,10 @@ enum class SiteHookKind : std::uint32_t {
     // Before Mario::actionMain, Mario::update's one call to it (r3 the Mario); the runtime's Odyssey
     // moveset reads his state and adjusts his movement for the frame.
     MarioActionMain = 40,
+    // Mario and Luigi co-op (coop_guest.h): before and after a direct call of one of the game functions it
+    // watches; the argument names the function (translate.rs coop_call_id).
+    CoopBeforeCall = 41,
+    CoopAfterCall = 42,
 };
 
 inline void site_hook(
