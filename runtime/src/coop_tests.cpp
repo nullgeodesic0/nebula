@@ -183,6 +183,25 @@ bool test_split_screen() {
     unusable.start(CameraMatrices{}, true);
     ok &= expect(!unusable.active(), "no camera to start from: no handover");
 
+    // The first player's half during the second player's event: the view from before, moved with them; after
+    // the event, held until the game camera is back.
+    CameraHold hold;
+    hold.start(own, {0.0f, 0.0f, 0.0f});
+    ok &= expect(hold.active() && !hold.returning(), "held while the event plays");
+    ok &= expect(near(pose_of(hold.view({100.0f, 0.0f, 0.0f}).inverse).eye.x, 100.0f, 0.5f) &&
+                     near(pose_of(hold.view({100.0f, 0.0f, 0.0f}).inverse).forward.z, -1.0f, 0.001f),
+                 "moved with the player, turned the same");
+    ok &= expect(!hold.back(game, {}), "not returning yet: nothing to check");
+    hold.release();
+    ok &= expect(hold.returning() && !hold.back(game, {}), "the game camera far away: still held");
+    ok &= expect(hold.back(own, {}) && !hold.active(), "the game camera back at the held view: the hold ends");
+    CameraHold slow;
+    slow.start(own, {});
+    slow.release();
+    bool released = false;
+    for (unsigned frame = 0; frame < CameraHold::kReturnFrames && !released; ++frame) released = slow.back(game, {});
+    ok &= expect(released && !slow.active(), "or after the longest wait");
+
     // How far towards the edge of a shared picture: players across the screen of a camera looking down -z.
     const CameraMatrices shared = look_at({0.0f, 0.0f, 1000.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
     const float tan_half = std::tan(45.0f * 0.5f * 3.14159265f / 180.0f);

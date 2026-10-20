@@ -64,7 +64,9 @@ and right orbit it around them, up and down raise or lower it; C puts it behind 
 walls between it and the player (the game's `MR::getFirstPolyOnLineToMap`).
 
 A camera event the second player sets off (a warp, launch star or pipe) plays in their half with the game's
-own camera, and the first player's half follows them meanwhile; after it the halves go back to normal.
+own camera (easing in from the second player's), and the first player's half keeps its view from before,
+moving with them; after it, the first player's half holds that view until the game camera is back with them,
+then eases into it.
 Each half's EFB copies (the bloom, blur and final scene captures) are its own, so neither half's effects
 show the other's picture. While split, the second player's stick is relative to their own camera, things only the second player can
 see are not clipped (they move and are drawn), their side keeps its shadows (`ShadowController`'s far clip is

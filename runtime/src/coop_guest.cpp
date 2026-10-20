@@ -67,7 +67,7 @@ constexpr std::uint32_t kLoadViewMtx = 0x803C7394u;         // MR::loadViewMtx()
 constexpr std::uint32_t kSetDefaultViewportAndScissor = 0x803CA5F4u;  // MR::setDefaultViewportAndScissor()
 constexpr std::uint32_t kGetCameraDirector = 0x8009B08Cu;   // MR::getCameraDirector()
 constexpr std::uint32_t kIsEventCameraActive = 0x803C799Cu;  // MR::isEventCameraActive()
-constexpr std::uint32_t kResetCameraMan = 0x803C7860u;       // MR::resetCameraMan(): reset at the next camera move
+
 constexpr std::uint32_t kGetFrameBufferWidth = 0x802B5140u;   // MR::getFrameBufferWidth()
 constexpr std::uint32_t kGetFrameBufferHeight = 0x8034AFB0u;  // MR::getFrameBufferHeight()
 // MR::getFirstPolyOnLineToMap(TVec3f* hit, Triangle*, const TVec3f& start, const TVec3f& direction): the
@@ -307,16 +307,15 @@ struct State {
     float screen_height = 456.0f;
     unsigned pass = 0u;
     // A camera event the second player set off (a warp, launch star, pipe): the game camera is theirs while
-    // it plays, so their half shows it, and the first player's half follows them with `follow_first`,
-    // starting from `last_camera1` (the game camera before the event).
+    // it plays, so their half shows it, and the first player's half holds `last_camera1` (the game camera
+    // before the event), moved with them, until the game camera is back after it (CameraHold).
     bool event_second = false;
     unsigned event_inputs = 0u;  // for the trace: what camera_event_is_second last saw
     // When the game camera changes hands (a second player's event begins or ends), the half it moves to
     // blends from that half's own camera into it, so the game camera's swing over from the other player is
     // not seen.
     coop::CameraHandover handover;
-    coop::FollowCamera follow_first;
-    coop::CameraMatrices first_view;
+    coop::CameraHold hold;
     coop::CameraMatrices last_camera1;
     std::uint32_t shadow_controller = 0u;
     float shadow_clip = 0.0f;
@@ -555,9 +554,16 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     }
     if (s.event_second != was) {
         trace("second player's camera event %s", s.event_second ? "begins" : "ends");
-        // The half the game camera moves to starts from its own camera: the second player's as it was, or the
-        // first player's follow camera.
-        if (s.split.amount() > 0.0f) s.handover.start(s.event_second ? s.camera2 : s.first_view, s.event_second);
+        if (s.event_second && s.split.amount() > 0.0f) {
+            // Their half blends from their own camera into the event's; the first player's half holds the
+            // game camera's view from before the event.
+            s.handover.start(s.camera2, true);
+            s.hold.start(s.last_camera1, guest.vec(s.first + actor::kPosition));
+        } else if (!s.event_second) {
+            // The game camera travels back from the second player: the first player's half holds on until
+            // it is back.
+            s.hold.release();
+        }
     }
     if (s.event_second) {
         // The event's camera follows the second player while it plays.
@@ -567,10 +573,7 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     const std::uint32_t kept = coop::camera_player(actor, s.first, s.second);
     if (kept == actor) return;
     guest.set_u32(target + 0x10u, kept);
-    // The game camera was following the second player (and their camera area): set it up behind the first
-    // player at once rather than travelling back across the level (CameraHandover eases the half into it).
-    guest.call(fn::kResetCameraMan);
-    trace("camera target was the second player (%08X): back to the first (%08X), camera reset", actor, kept);
+    trace("camera target was the second player (%08X): back to the first (%08X)", actor, kept);
 }
 
 // While split, after both players moved: the second player's own camera (it trails them, turned and raised
@@ -635,24 +638,15 @@ float shared_extent(const Guest& guest, const State& s, coop::Vec3 first_positio
     return coop::shared_view_extent(camera, first_position, second_position, depth, fovy, aspect);
 }
 
-// While the second player's camera event plays (split), the first player's half follows them from where
-// the game camera was before the event; otherwise remember that camera.
-void update_first_camera_during_event(const Guest& guest, State& s, coop::Vec3 first_position) {
+// The game camera's view while it is the first player's (no camera event of the second player's, and not
+// travelling back from one), for CameraHold.
+void remember_first_camera(const Guest& guest, State& s) {
+    if (s.split.amount() == 0.0f) s.hold.reset();
+    if (s.event_second || s.hold.active()) return;
     const std::uint32_t context = camera_context(guest);
     if (context == 0u) return;
-    if (!s.event_second || s.split.amount() == 0.0f) {
-        s.follow_first.reset();
-        const coop::CameraMatrices camera = read_camera(guest, context);
-        if (finite(camera.view) && finite(camera.inverse)) s.last_camera1 = camera;
-        return;
-    }
-    const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
-    const coop::Vec3 up = plausible(first_mario) ? player_up(guest, first_mario) : coop::Vec3{0.0f, 1.0f, 0.0f};
-    const coop::SplitTuning tuning{};
-    if (!s.follow_first.started()) {
-        s.follow_first.start(coop::pose_of(s.last_camera1.inverse).eye, first_position, first_position, up, tuning);
-    }
-    s.first_view = s.follow_first.update(first_position, up, tuning);
+    const coop::CameraMatrices camera = read_camera(guest, context);
+    if (finite(camera.view) && finite(camera.inverse)) s.last_camera1 = camera;
 }
 
 // After the game moves its players, the second player: one MarioActor::movement with the game's player,
@@ -724,7 +718,7 @@ void move_second_player(const Guest& guest, State& s) {
     keep_camera_on_first_player(guest, s);
     bump_players(guest, s, first_position, second_position);
     if (s.split.amount() > 0.0f) update_second_camera(guest, s, first_position, second_position);
-    update_first_camera_during_event(guest, s, first_position);
+    remember_first_camera(guest, s);
 
     // The game camera looks at the first player's camera point; move it towards the second player.
     const coop::Vec3 look = guest.vec(s.first + actor::kCameraTrans);
@@ -749,8 +743,8 @@ std::array<float, 16> half_projection(const State& s, bool second) {
 }
 
 // While the second player's camera event plays, the halves swap cameras: the game camera (theirs) draws
-// first, in their half, and the first player's follow camera second.
-bool events_swapped(const State& s) { return s.event_second && s.follow_first.started(); }
+// first, in their half, and the first player's held view second.
+bool events_swapped(const State& s) { return s.event_second && s.hold.active(); }
 // Whether the pass being drawn is the second player's half.
 bool second_half(const State& s) { return (s.pass == 2u) != events_swapped(s); }
 
@@ -781,21 +775,35 @@ void begin_split_draw(const Guest& guest, State& s) {
         if (width >= 320.0f && width <= 1024.0f) s.screen_width = width;
         if (height >= 240.0f && height <= 640.0f) s.screen_height = height;
     }
+    const coop::Vec3 first_position = guest.vec(s.first + actor::kPosition);
     // Pans from the first player's view at the split to the second player's own.
-    s.camera2 = events_swapped(s) ? s.first_view : coop::blend_cameras(s.camera1, s.follow_view, s.split.eased());
+    s.camera2 = events_swapped(s) ? s.hold.view(first_position)
+                                  : coop::blend_cameras(s.camera1, s.follow_view, s.split.eased());
 
     s.pass = 1u;
     s.draw_scene = guest.context()->gpr[3];
-    if (s.handover.active()) {
-        // The game camera has just changed hands: this half blends from its own camera into it.
-        const coop::CameraMatrices handed = s.handover.camera(s.camera1, second_half(s));
-        if (handed.view != s.camera1.view) {
-            SavedContext saved(guest.context());
-            write_camera(guest, context, handed);
-            guest.call(fn::kLoadViewMtx);
-            guest.call(fn::kCalcViewAndEntry);
+    // The game camera's half draws with it, except while it changes hands: after the second player's event
+    // the first player's half holds its view until the game camera is back, then eases into it; at the start
+    // of the event the second player's half eases from its own camera into the event's.
+    coop::CameraMatrices game_half = s.camera1;
+    if (s.hold.returning()) {
+        const coop::CameraMatrices held = s.hold.view(first_position);
+        if (s.hold.back(s.camera1, first_position)) {
+            s.handover.start(held, false);
+            trace("the game camera is back with the first player");
+        } else {
+            game_half = held;
         }
+    }
+    if (s.handover.active()) {
+        game_half = s.handover.camera(game_half, second_half(s));
         s.handover.advance();
+    }
+    if (game_half.view != s.camera1.view) {
+        SavedContext saved(guest.context());
+        write_camera(guest, context, game_half);
+        guest.call(fn::kLoadViewMtx);
+        guest.call(fn::kCalcViewAndEntry);
     }
     write_floats(guest, context + camera::kProjection, half_projection(s, second_half(s)));
     send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), 1u);

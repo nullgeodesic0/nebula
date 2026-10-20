@@ -470,6 +470,62 @@ private:
     bool active_ = false;
 };
 
+// The first player's view while the second player's camera event has the game camera: their half keeps the
+// game camera's last view from before the event, moved with them as they walk. After the event it holds on
+// until the game camera is back near that view (it travels back from the second player first), at most
+// `kReturnFrames`, and then hands over (CameraHandover).
+class CameraHold {
+public:
+    static constexpr unsigned kReturnFrames = 150u;  // 2.5 s
+    static constexpr float kCloseDistance = 150.0f;
+    static constexpr float kCloseCosine = 0.995f;    // about 6 degrees
+
+    void start(const CameraMatrices& camera, Vec3 player) noexcept {
+        for (const float value : camera.inverse) {
+            if (!std::isfinite(value)) return;
+        }
+        camera_ = camera;
+        origin_ = player;
+        returning_ = false;
+        frames_ = 0u;
+        active_ = true;
+    }
+    [[nodiscard]] bool active() const noexcept { return active_; }
+    // The held view, moved with the player.
+    [[nodiscard]] CameraMatrices view(Vec3 player) const noexcept {
+        const CameraPose pose = pose_of(camera_.inverse);
+        Vec3 moved = player - origin_;
+        if (!std::isfinite(length(moved))) moved = {};
+        return look_at(pose.eye + moved, pose.up, pose.eye + moved + pose.forward * 1000.0f);
+    }
+    // The event is over: hold until the game camera is back.
+    void release() noexcept {
+        if (active_) returning_ = true;
+    }
+    [[nodiscard]] bool returning() const noexcept { return active_ && returning_; }
+    // While returning, once a frame with the game camera: true when it is back (near the held view) or has
+    // taken too long; the hold then ends.
+    bool back(const CameraMatrices& game, Vec3 player) noexcept {
+        if (!returning()) return false;
+        const CameraPose held = pose_of(view(player).inverse);
+        const CameraPose now = pose_of(game.inverse);
+        const bool close = length(held.eye - now.eye) <= kCloseDistance && dot(held.forward, now.forward) >= kCloseCosine;
+        if (close || ++frames_ >= kReturnFrames) {
+            active_ = false;
+            return true;
+        }
+        return false;
+    }
+    void reset() noexcept { *this = CameraHold{}; }
+
+private:
+    CameraMatrices camera_{};
+    Vec3 origin_{};
+    bool returning_ = false;
+    unsigned frames_ = 0u;
+    bool active_ = false;
+};
+
 [[nodiscard]] inline Vec3 transform_point(const std::array<float, 12>& m, Vec3 p) noexcept {
     return {m[0] * p.x + m[1] * p.y + m[2] * p.z + m[3], m[4] * p.x + m[5] * p.y + m[6] * p.z + m[7],
             m[8] * p.x + m[9] * p.y + m[10] * p.z + m[11]};
