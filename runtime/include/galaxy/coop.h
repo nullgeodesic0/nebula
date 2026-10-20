@@ -229,6 +229,37 @@ struct CameraShare {
     return {apart * (0.5f * weight), false};
 }
 
+// The players bump into each other: each is a cylinder `radius` wide and `height` tall along the up vector
+// (gravity's opposite). When they overlap, each is pushed half the overlap apart, across the up vector, at
+// most `max_push` a frame, so walking into the other shoves them along rather than passing through.
+struct BodyTuning {
+    float radius = 50.0f;
+    float height = 150.0f;
+    float max_push = 12.0f;
+};
+
+[[nodiscard]] inline float dot(Vec3 a, Vec3 b) noexcept { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+// The push for the second player (the first gets its opposite), or zero when they do not touch. `up` is a
+// unit vector.
+[[nodiscard]] inline Vec3 body_push(Vec3 first, Vec3 second, Vec3 up, const BodyTuning& tuning = {}) noexcept {
+    const Vec3 apart = second - first;
+    const float along_up = dot(apart, up);
+    if (!std::isfinite(along_up) || std::fabs(along_up) >= tuning.height) return {};
+    Vec3 across = apart - up * along_up;
+    float distance = length(across);
+    const float touching = tuning.radius * 2.0f;
+    if (!std::isfinite(distance) || distance >= touching) return {};
+    if (distance < 0.01f) {
+        // On top of each other: any direction across the up vector.
+        across = std::fabs(up.x) < 0.9f ? Vec3{1.0f, 0.0f, 0.0f} : Vec3{0.0f, 0.0f, 1.0f};
+        across = across - up * dot(across, up);
+        distance = length(across);
+    }
+    const float amount = std::min((touching - length(apart - up * along_up)) * 0.5f, tuning.max_push);
+    return across * (amount / distance);
+}
+
 // Counts frames out of range; true on the frame the second player should be brought back.
 class LeashTimer {
 public:

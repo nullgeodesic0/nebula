@@ -123,6 +123,27 @@ bool test_shared_camera() {
     return ok;
 }
 
+bool test_body_push() {
+    bool ok = true;
+    const Vec3 up{0.0f, 1.0f, 0.0f};
+    const BodyTuning tuning{};
+    Vec3 push = body_push({0.0f, 0.0f, 0.0f}, {80.0f, 0.0f, 0.0f}, up);
+    ok &= expect(near(push.x, 10.0f) && near(push.y, 0.0f), "overlapping by 20: each moves 10 apart");
+    push = body_push({0.0f, 0.0f, 0.0f}, {20.0f, 30.0f, 0.0f}, up);
+    ok &= expect(near(push.x, tuning.max_push) && near(push.y, 0.0f), "capped, and only across the up vector");
+    push = body_push({0.0f, 0.0f, 0.0f}, {120.0f, 0.0f, 0.0f}, up);
+    ok &= expect(near(push.x, 0.0f), "not touching: no push");
+    push = body_push({0.0f, 0.0f, 0.0f}, {10.0f, tuning.height + 1.0f, 0.0f}, up);
+    ok &= expect(near(push.x, 0.0f), "one above the other's head: no push");
+    push = body_push({0.0f, 0.0f, 0.0f}, {0.0f, 40.0f, 0.0f}, up);
+    ok &= expect(length(push) > 1.0f && near(push.y, 0.0f), "exactly on top: pushed sideways");
+    push = body_push({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 80.0f}, {1.0f, 0.0f, 0.0f});
+    ok &= expect(near(push.z, 10.0f) && near(push.x, 0.0f), "follows the up vector of other gravity");
+    push = body_push({0.0f, 0.0f, 0.0f}, {NAN, 0.0f, 0.0f}, up);
+    ok &= expect(near(push.x, 0.0f), "a bad position changes nothing");
+    return ok;
+}
+
 bool test_leash() {
     bool ok = true;
     LeashTimer leash;
@@ -147,6 +168,7 @@ int main() {
     passed &= test_shake_is_twelve_frames_per_press();
     passed &= test_partner_input_from_bindings();
     passed &= test_shared_camera();
+    passed &= test_body_push();
     passed &= test_leash();
     if (!passed) {
         return 1;

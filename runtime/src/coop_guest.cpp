@@ -52,6 +52,9 @@ constexpr std::uint32_t kGetWPadHolder = 0x803AB558u;        // (WPadHolder.cpp)
 constexpr std::uint32_t kSetPlayerPos = 0x803F1F80u;         // MR::setPlayerPos(const TVec3f&)
 constexpr std::uint32_t kMountArchive = 0x803CDDD4u;         // MR::mountArchive(const char*, JKRHeap*)
 constexpr std::uint32_t kCreateAndAddStationed = 0x803A6A70u;  // ResourceHolderManager::createAndAddStationed(const char*)
+// Mario::push(const TVec3f&): added to the velocity on Mario's next move (Mario::tryPushToVelocity), which
+// keeps walls and the ground in charge, as when objects shove the player.
+constexpr std::uint32_t kMarioPush = 0x8030C330u;
 }  // namespace fn
 
 constexpr std::uint32_t kIsLuigi = 0x806A18C8u;               // gIsLuigi (bool)
@@ -68,6 +71,7 @@ constexpr std::uint32_t kMario = 0x230u;        // MarioActor::mMario
 constexpr std::uint32_t kCameraTrans = 0x2F4u;  // MarioActor::mCameraTrans: what the game camera looks at
 }  // namespace actor
 constexpr std::uint32_t kMarioSideVec = 0x310u;  // Mario::mSideVec
+constexpr std::uint32_t kMarioUpVec = 0x1FCu;    // Mario::_1FC, Mario::getUpVec()
 
 bool plausible(std::uint32_t address) {
     return address >= 0x80000000u && address < 0x81800000u && (address & 3u) == 0u;
@@ -359,6 +363,21 @@ void swap_pads(const Guest& guest, std::uint32_t pad_holder) {
     guest.set_u32(pad_holder + 4u, pad0);
 }
 
+// The players do not pass through each other: when they overlap, each is pushed half the way apart.
+void bump_players(const Guest& guest, const State& s, coop::Vec3 first_position, coop::Vec3 second_position) {
+    const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
+    if (!plausible(first_mario) || !plausible(s.second_mario)) return;
+    coop::Vec3 up = guest.vec(first_mario + kMarioUpVec);
+    const float up_length = coop::length(up);
+    if (!std::isfinite(up_length) || up_length < 0.5f) return;
+    up = up * (1.0f / up_length);
+    const coop::Vec3 push = coop::body_push(first_position, second_position, up);
+    if (push.x == 0.0f && push.y == 0.0f && push.z == 0.0f) return;
+    Guest::Frame frame(guest);
+    guest.call(fn::kMarioPush, s.second_mario, frame.vec(0, push));
+    guest.call(fn::kMarioPush, first_mario, frame.vec(1, push * -1.0f));
+}
+
 // After the game moves its players, the second player: one MarioActor::movement with the game's player,
 // character and controller switched to it. Then the shared camera, and the warp back to the first player.
 void move_second_player(const Guest& guest, State& s) {
@@ -395,6 +414,8 @@ void move_second_player(const Guest& guest, State& s) {
     guest.call(fn::kSetMarioActor, holder, s.first);
     guest.set_u8(kIsLuigi, character_byte(s.own));
     s.moving_second = false;
+
+    bump_players(guest, s, first_position, second_position);
 
     // The game camera looks at the first player's camera point; move it towards the second player.
     const coop::Vec3 look = guest.vec(s.first + actor::kCameraTrans);
