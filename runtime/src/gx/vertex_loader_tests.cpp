@@ -1198,6 +1198,42 @@ bool upload_ring_rejected_requests_preserve_state(ID3D12Device* device) {
         "successful replacement refreshes upload addresses and cursors") && ok;
 }
 
+// A frame over its budget goes on in the segment's headroom (same buffer, so addresses stay
+// base-relative), asks for growth, and only exhausting the headroom too fails.
+bool upload_ring_headroom_absorbs_overflow_and_requests_growth(ID3D12Device* device) {
+    using galaxy::gx::UploadRing;
+    UploadRing ring;
+    if (!expect(ring.initialize(device, "headroom-test", 64u, 2u, 64u),
+        "headroom ring initialization failed")) return false;
+    const auto gpu_base = ring.resource()->GetGPUVirtualAddress();
+    ring.begin_frame(0u);
+    bool ok = expect(ring.allocate(48u, 1u).offset == 0u && !ring.growth_requested(),
+        "within budget: no growth");
+    const auto over = ring.allocate(48u, 1u);
+    ok = expect(over.offset == 48u && over.gpu == gpu_base + 48u && ring.growth_requested(),
+        "over budget: allocated in the headroom, contiguous, and growth requested") && ok;
+    bool threw = false;
+    try {
+        (void)ring.allocate(64u, 1u);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    ok = expect(threw, "past the headroom too: exhausted") && ok;
+    ring.begin_frame(1u);
+    ok = expect(ring.allocate(16u, 1u).offset == 128u,
+        "the next frame segment starts after the previous one's headroom") && ok;
+    const std::size_t grown = ring.grown_bytes_per_frame();
+    ok = expect(grown >= 2u * 64u && grown % (std::size_t{1} << 20) == 0u &&
+                    grown <= UploadRing::kMaxBytesPerFrame,
+        "growth doubles the budget at least, in whole MiB") && ok;
+    if (!expect(ring.initialize(device, "headroom-test", grown, 2u, grown),
+        "grown ring initialization failed")) return false;
+    ring.begin_frame(0u);
+    ok = expect(!ring.growth_requested() && ring.allocate(96u, 1u).offset == 0u && !ring.growth_requested(),
+        "the grown ring holds the frame that overflowed, with no new request") && ok;
+    return ok;
+}
+
 bool immutable_upload_reuse_preserves_bytes(ID3D12Device* device) {
     galaxy::gx::UploadRing ring;
     if (!expect(ring.initialize(device, "immutable-test", 4096, 2),
@@ -1365,6 +1401,7 @@ int main() {
     ok = generated_index_boundaries_preserve_topology(device.Get()) && ok;
     ok = immutable_upload_reuse_preserves_bytes(device.Get()) && ok;
     ok = upload_ring_rejected_requests_preserve_state(device.Get()) && ok;
+    ok = upload_ring_headroom_absorbs_overflow_and_requests_growth(device.Get()) && ok;
     ok = byte_dequant_and_nbt3_match_cached_decode(vertex_ring, index_ring) && ok;
     ok = load_position_only_clears_reused_upload_memory(
              vertex_ring, index_ring) && ok;

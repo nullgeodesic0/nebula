@@ -213,18 +213,35 @@ public:
         std::size_t offset = 0;     // within the whole resource
     };
 
+    // `headroom_bytes_per_frame` extends every frame segment past `bytes_per_frame`: a frame that needs
+    // more than its budget (split screen draws the scene twice) goes on in the same buffer, so its
+    // addresses stay base-relative like every other allocation, and asks for the ring to grow
+    // (growth_requested) before the next frame. Untouched upload pages are never backed.
     bool initialize(
         ID3D12Device* device,
         const char* name,
         std::size_t bytes_per_frame,
-        unsigned frames_in_flight);
+        unsigned frames_in_flight,
+        std::size_t headroom_bytes_per_frame = 0u);
     void begin_frame(unsigned frame_slot);
 
-    // Bump-allocates within the current frame segment. Exhaustion is a GxFatalError:
-    // geometry is never dropped silently.
+    // Bump-allocates within the current frame segment, its headroom included. Exhausting the
+    // headroom too is a GxFatalError: geometry is never dropped silently.
     // Alignment must be a nonzero power of two. Rejected requests do not
     // consume bytes or advance the segment's content generation.
     Allocation allocate(std::size_t size, std::size_t alignment);
+
+    // A frame used more than bytes_per_frame (its headroom): the renderer recreates the ring with
+    // grown_bytes_per_frame() at the next frame boundary, after the GPU is idle.
+    [[nodiscard]] bool growth_requested() const { return growth_requested_; }
+    // Twice the budget, or half again the peak if that is more, in whole MiB, at most
+    // kMaxBytesPerFrame.
+    [[nodiscard]] std::size_t grown_bytes_per_frame() const;
+    static constexpr std::size_t kMaxBytesPerFrame = std::size_t{1} << 30;
+    [[nodiscard]] unsigned frames_in_flight() const { return frames_in_flight_; }
+    [[nodiscard]] std::size_t headroom_bytes_per_frame() const {
+        return segment_stride_ - bytes_per_frame_;
+    }
 
     Allocation upload_immutable(
         const void* source, std::size_t size, std::size_t alignment,
@@ -265,11 +282,14 @@ private:
     // This committed buffer keeps its address until it is replaced by initialize.
     D3D12_GPU_VIRTUAL_ADDRESS gpu_base_ = 0;
     std::size_t bytes_per_frame_ = 0;
+    // bytes_per_frame_ plus the headroom: the distance between frame segments and their hard limit.
+    std::size_t segment_stride_ = 0;
     std::size_t segment_base_ = 0;
     std::size_t cursor_ = 0;
     unsigned frames_in_flight_ = 0;
     unsigned active_slot_ = 0;
     bool frame_ready_ = false;
+    bool growth_requested_ = false;
     bool segment_allocation_pending_ = true;
     std::uint64_t resource_identity_ = 0;
     std::vector<std::uint64_t> slot_generations_;
@@ -951,6 +971,14 @@ private:
     // and the sampler heap advance once per game frame.
     enum class RingMode : std::uint8_t { Normal, Temporal, Interp };
     RingMode ring_mode_ = RingMode::Normal;
+    // Upload-ring budgets per frame (the constant ring's before the Interp multiplier). They start at
+    // the configured sizes and grow when a frame runs into a ring's headroom (UploadRing::growth_requested).
+    std::size_t vertex_ring_bytes_ = 0;
+    std::size_t index_ring_bytes_ = 0;
+    std::size_t constant_ring_bytes_ = 0;
+    std::size_t matrix_ring_bytes_ = 0;
+    // Recreates the upload rings for `mode` with the budgets above (GPU idle first).
+    void recreate_upload_rings(RingMode mode);
     unsigned ring_segment_ = 0;
     std::array<std::uint64_t, kRingSegments> ring_segment_fence_{};
     bool ring_advance_pending_ = true;

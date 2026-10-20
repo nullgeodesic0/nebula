@@ -3041,13 +3041,16 @@ void UploadRing::reset() noexcept {
 
 bool UploadRing::initialize(
     ID3D12Device* device, const char* name, std::size_t bytes_per_frame,
-    unsigned frames_in_flight) {
+    unsigned frames_in_flight, std::size_t headroom_bytes_per_frame) {
     if (device == nullptr || bytes_per_frame == 0u || frames_in_flight == 0u ||
-        bytes_per_frame > std::numeric_limits<std::size_t>::max() / frames_in_flight) {
+        headroom_bytes_per_frame > std::numeric_limits<std::size_t>::max() - bytes_per_frame ||
+        bytes_per_frame + headroom_bytes_per_frame >
+            std::numeric_limits<std::size_t>::max() / frames_in_flight) {
         return false;
     }
     // Prepare all fallible state before replacing the retained mapped buffer.
-    const std::size_t total = bytes_per_frame * frames_in_flight;
+    const std::size_t stride = bytes_per_frame + headroom_bytes_per_frame;
+    const std::size_t total = stride * frames_in_flight;
     D3D12_HEAP_PROPERTIES hp{};
     hp.Type = D3D12_HEAP_TYPE_UPLOAD;
     D3D12_RESOURCE_DESC rd{};
@@ -3078,6 +3081,8 @@ bool UploadRing::initialize(
     gpu_base_ = gpu_base;
     name_ = name != nullptr ? name : "";
     bytes_per_frame_ = bytes_per_frame;
+    segment_stride_ = stride;
+    growth_requested_ = false;
     frames_in_flight_ = frames_in_flight;
     static std::atomic<std::uint64_t> next_identity{1};
     resource_identity_ = next_identity.fetch_add(1, std::memory_order_relaxed);
@@ -3101,9 +3106,19 @@ void UploadRing::begin_frame(unsigned frame_slot) {
     reused_bytes_ = 0;
     copied_bytes_ = 0;
     immutable_upload_calls_ = 0;
-    segment_base_ = static_cast<std::size_t>(frame_slot) * bytes_per_frame_;
+    segment_base_ = static_cast<std::size_t>(frame_slot) * segment_stride_;
     cursor_       = segment_base_;
     frame_ready_ = true;
+}
+
+std::size_t UploadRing::grown_bytes_per_frame() const {
+    constexpr std::size_t kMegabyte = std::size_t{1} << 20;
+    std::size_t grown = bytes_per_frame_ <= kMaxBytesPerFrame / 2u ? bytes_per_frame_ * 2u : kMaxBytesPerFrame;
+    const std::size_t from_peak = peak_bytes_per_frame_ <= kMaxBytesPerFrame / 3u * 2u
+        ? peak_bytes_per_frame_ + peak_bytes_per_frame_ / 2u : kMaxBytesPerFrame;
+    grown = std::max(grown, from_peak);
+    grown = std::min(kMaxBytesPerFrame, (grown + kMegabyte - 1u) / kMegabyte * kMegabyte);
+    return std::max(grown, bytes_per_frame_);
 }
 
 UploadRing::Allocation UploadRing::allocate(std::size_t size, std::size_t alignment) {
@@ -3116,15 +3131,21 @@ UploadRing::Allocation UploadRing::allocate(std::size_t size, std::size_t alignm
     // Unsigned negation gives the exact padding without cursor+alignment
     // overflow. Prove both padding and payload fit before forming addresses.
     const std::size_t padding = (std::size_t{0} - cursor_) & (alignment - 1u);
-    const std::size_t remaining = bytes_per_frame_ - (cursor_ - segment_base_);
+    const std::size_t remaining = segment_stride_ - (cursor_ - segment_base_);
     if (padding > remaining || size > remaining - padding)
         throw std::runtime_error(
             std::string("UploadRing '") + name_ + "' exhausted: request " +
             std::to_string(size) + " B at frame-used " +
             std::to_string(cursor_ - segment_base_) + "/" +
-            std::to_string(bytes_per_frame_) + " B");
+            std::to_string(bytes_per_frame_) + " B (+" +
+            std::to_string(segment_stride_ - bytes_per_frame_) + " B headroom)");
     const std::size_t aligned = cursor_ + padding;
     cursor_ = aligned + size;
+    if (cursor_ - segment_base_ > bytes_per_frame_ && !growth_requested_) {
+        growth_requested_ = true;
+        std::cerr << "[ring] name=" << name_ << " over budget: " << (cursor_ - segment_base_)
+                  << "/" << bytes_per_frame_ << " B this frame; growing at the next frame\n";
+    }
     // Peak within the segment, i.e. the bytes of this frame's segment that were
     // actually handed out. This is the only sound floor for shrinking
     // `bytes_per_frame_`, and it is what separates the ring's reserved size from
@@ -3419,12 +3440,44 @@ static std::size_t mtx_per_frame_bytes() {
 // 32 MiB default. A busy frame re-loads the XF palette many times (per-object and skinned
 // matrices via LOAD_INDX), so the headroom is needed. peak_bytes_per_frame() reports actual use,
 // so this figure can be tightened against measurements.
-static constexpr unsigned    kSrvPerFrame = 32768u;
+// Doubled for split screen, which draws the 3D scene twice a frame: 65536 x kRingSegments plus the
+// persistent prefix is about 262k descriptors, well inside the 1M shader-visible heap limit.
+static constexpr unsigned    kSrvPerFrame = 65536u;
 // Color and depth EFB sources never change during a renderer lifetime. Keep
 // their two views outside the rewound frame segments instead of copying a
 // descriptor into the frame ring for every EFB conversion. TextureCache's own
 // SRV indices are independent of this prefix.
 static constexpr unsigned    kPersistentSrvDescriptors = 6u;  // EFB, output EFB and sub-frame EFB conversion sources
+
+void RendererD3D12::recreate_upload_rings(RingMode mode) {
+    wait_for_gpu();
+    const unsigned segments = mode == RingMode::Interp ? kRingSegments : kFramesInFlight;
+    const unsigned matrix_segments = mode == RingMode::Normal ? kFramesInFlight : kRingSegments;
+    vertex_ring_.reset();
+    index_ring_.reset();
+    constant_ring_.reset();
+    matrix_ring_.reset();
+    // Interpolated sub-frames add one VS constant block per scene
+    // record each; the constant segment holds a whole game frame.
+    const std::size_t constant_bytes = constant_ring_bytes_ * (mode == RingMode::Interp ? 4u : 1u);
+    if (!vertex_ring_.initialize(device_.Get(), "vertex", vertex_ring_bytes_, segments, vertex_ring_bytes_) ||
+        !index_ring_.initialize(device_.Get(), "index", index_ring_bytes_, segments, index_ring_bytes_) ||
+        !constant_ring_.initialize(device_.Get(), "constant", constant_bytes, segments, constant_bytes) ||
+        !matrix_ring_.initialize(device_.Get(), "matrix", matrix_ring_bytes_, matrix_segments, matrix_ring_bytes_)) {
+        throw std::runtime_error("ring resize failed");
+    }
+    matrix_segments_ = matrix_segments;
+    matrix_segment_ = 0u;
+    matrix_segment_fence_.fill(0u);
+    matrix_segment_used_ = false;
+    matrix_segment_started_ = false;
+    ring_segment_ = 0u;
+    ring_segment_fence_.fill(0u);
+    ring_advance_pending_ = true;
+    replay_valid_ = false;
+    replay_recording_ = false;
+    ring_mode_ = mode;
+}
 
 void RendererD3D12::wait_for_gpu() {
     const std::uint64_t val = ++next_fence_value_;
@@ -4899,10 +4952,15 @@ bool RendererD3D12::initialize(int window_width, int window_height, unsigned efb
         if (!create_sampler_heap()) return false;
 
         // Upload + descriptor rings.
-        if (!vertex_ring_  .initialize(device_.Get(), "vertex",   vb_per_frame_bytes(),  kFramesInFlight)) return false;
-        if (!index_ring_   .initialize(device_.Get(), "index",    ib_per_frame_bytes(),  kFramesInFlight)) return false;
-        if (!constant_ring_.initialize(device_.Get(), "constant", cb_per_frame_bytes(),  kFramesInFlight)) return false;
-        if (!matrix_ring_  .initialize(device_.Get(), "matrix",   mtx_per_frame_bytes(), kFramesInFlight)) return false;
+        vertex_ring_bytes_ = vb_per_frame_bytes();
+        index_ring_bytes_ = ib_per_frame_bytes();
+        constant_ring_bytes_ = cb_per_frame_bytes();
+        matrix_ring_bytes_ = mtx_per_frame_bytes();
+        // Each segment has as much again as headroom: a frame over budget goes on and the ring grows.
+        if (!vertex_ring_  .initialize(device_.Get(), "vertex",   vertex_ring_bytes_,   kFramesInFlight, vertex_ring_bytes_)) return false;
+        if (!index_ring_   .initialize(device_.Get(), "index",    index_ring_bytes_,    kFramesInFlight, index_ring_bytes_)) return false;
+        if (!constant_ring_.initialize(device_.Get(), "constant", constant_ring_bytes_, kFramesInFlight, constant_ring_bytes_)) return false;
+        if (!matrix_ring_  .initialize(device_.Get(), "matrix",   matrix_ring_bytes_,   kFramesInFlight, matrix_ring_bytes_)) return false;
         if (!srv_ring_.initialize(device_.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvPerFrame, kRingSegments, kPersistentSrvDescriptors)) return false;
 
         // Conversion sources occupy the descriptor ring's immutable prefix.
@@ -4916,8 +4974,9 @@ bool RendererD3D12::initialize(int window_width, int window_height, unsigned efb
         // bytes_per_frame * frames_in_flight. The peak is reported per ring below and at shutdown; the
         // pairing is what makes the 240 MiB default checkable against a real workload.
         {
+            // Budget plus as much again of headroom, per frame in flight.
             const auto ring_reserved_mb = [](std::size_t bytes) {
-                return (bytes * kFramesInFlight) / (1024u * 1024u);
+                return (bytes * 2u * kFramesInFlight) / (1024u * 1024u);
             };
             std::cerr << "[gpu-rings]"
                       << " vertex-reserved-mb=" << ring_reserved_mb(vb_per_frame_bytes())
@@ -5839,34 +5898,25 @@ void RendererD3D12::begin_frame(bool present_swap_chain) {
         const bool blur_history = get_render_config().motion_blur != 0u && !interpolation_mode();
         const RingMode mode = (temporal_mode() || blur_history) ? RingMode::Temporal
             : interpolation_mode() ? RingMode::Interp : RingMode::Normal;
-        if (mode != ring_mode_) {
-            wait_for_gpu();
-            const unsigned segments = mode == RingMode::Interp ? kRingSegments : kFramesInFlight;
-            const unsigned matrix_segments = mode == RingMode::Normal ? kFramesInFlight : kRingSegments;
-            vertex_ring_.reset();
-            index_ring_.reset();
-            constant_ring_.reset();
-            matrix_ring_.reset();
-            // Interpolated sub-frames add one VS constant block per scene
-            // record each; the constant segment holds a whole game frame.
-            if (!vertex_ring_.initialize(device_.Get(), "vertex", vb_per_frame_bytes(), segments) ||
-                !index_ring_.initialize(device_.Get(), "index", ib_per_frame_bytes(), segments) ||
-                !constant_ring_.initialize(device_.Get(), "constant",
-                    cb_per_frame_bytes() * (mode == RingMode::Interp ? 4u : 1u), segments) ||
-                !matrix_ring_.initialize(device_.Get(), "matrix", mtx_per_frame_bytes(), matrix_segments)) {
-                throw std::runtime_error("ring resize failed");
-            }
-            matrix_segments_ = matrix_segments;
-            matrix_segment_ = 0u;
-            matrix_segment_fence_.fill(0u);
-            matrix_segment_used_ = false;
-            matrix_segment_started_ = false;
-            ring_segment_ = 0u;
-            ring_segment_fence_.fill(0u);
-            ring_advance_pending_ = true;
-            replay_valid_ = false;
-            replay_recording_ = false;
-            ring_mode_ = mode;
+        // A frame that ran into a ring's headroom (split screen draws the scene twice) grows that ring
+        // here, between frames, so the next frames have their budget again.
+        bool grow = false;
+        const auto grown = [&grow](const UploadRing& ring, std::size_t& bytes, std::size_t multiplier) {
+            if (!ring.growth_requested()) return;
+            const std::size_t next = std::min(UploadRing::kMaxBytesPerFrame,
+                std::max(bytes * 2u, ring.grown_bytes_per_frame() / multiplier));
+            if (next <= bytes) return;
+            std::cerr << "[ring] growing per-frame budget: " << (bytes >> 20u) << " -> " << (next >> 20u)
+                      << " MiB\n";
+            bytes = next;
+            grow = true;
+        };
+        grown(vertex_ring_, vertex_ring_bytes_, 1u);
+        grown(index_ring_, index_ring_bytes_, 1u);
+        grown(constant_ring_, constant_ring_bytes_, ring_mode_ == RingMode::Interp ? 4u : 1u);
+        grown(matrix_ring_, matrix_ring_bytes_, 1u);
+        if (mode != ring_mode_ || grow) {
+            recreate_upload_rings(mode);
         }
     }
     frame_slot_ = static_cast<unsigned>(frame_index_ % kFramesInFlight);
