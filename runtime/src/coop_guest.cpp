@@ -559,11 +559,14 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
             // game camera's view from before the event.
             s.handover.start(s.camera2, true);
             s.hold.start(s.last_camera1, guest.vec(s.first + actor::kPosition));
-        } else if (!s.event_second) {
-            // The game camera travels back from the second player: the first player's half holds on until
-            // it is back.
-            s.hold.release();
         }
+    }
+    // The first player's half holds on past the event while the second player is still in flight (a launch
+    // star's flight outlasts its event camera, and the game camera follows the flight); once they land it
+    // waits for the game camera to be back.
+    if (!s.event_second && s.hold.active() && !s.hold.returning() && !second_special) {
+        s.hold.release();
+        trace("second player landed: the first player's half waits for the game camera");
     }
     if (s.event_second) {
         // The event's camera follows the second player while it plays.
@@ -786,9 +789,10 @@ void begin_split_draw(const Guest& guest, State& s) {
     // the first player's half holds its view until the game camera is back, then eases into it; at the start
     // of the event the second player's half eases from its own camera into the event's.
     coop::CameraMatrices game_half = s.camera1;
-    if (s.hold.returning()) {
+    if (s.hold.active() && !events_swapped(s)) {
+        // The first player's half, held through the second player's flight and until the game camera is back.
         const coop::CameraMatrices held = s.hold.view(first_position);
-        if (s.hold.back(s.camera1, first_position)) {
+        if (s.hold.returning() && s.hold.back(s.camera1, first_position)) {
             s.handover.start(held, false);
             trace("the game camera is back with the first player");
         } else {
