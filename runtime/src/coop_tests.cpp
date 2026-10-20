@@ -375,6 +375,10 @@ bool test_camera_player() {
     const Vec3 flying_beside = beside({100.0f, 200.0f, 300.0f}, {0.0f, 0.0f, 2.0f});
     ok &= expect(near(flying_beside.z, 300.0f + kBesideDistance) && near(flying_beside.x, 100.0f),
                  "travelling with the first player: beside them");
+    const Vec3 parked = travel_position({0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {500.0f, 10.0f, 20.0f});
+    ok &= expect(near(parked.x, 500.0f) && near(parked.y, 10.0f), "the first player puppeted at the origin: stay put");
+    ok &= expect(near(travel_position({1000.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {}).z, kBesideDistance),
+                 "otherwise beside them");
     ok &= expect(swap_for_entrance(true, false), "the second player at a door: swap places");
     ok &= expect(!swap_for_entrance(true, true) && !swap_for_entrance(false, true) && !swap_for_entrance(false, false),
                  "the first player there too, or nobody: no swap");

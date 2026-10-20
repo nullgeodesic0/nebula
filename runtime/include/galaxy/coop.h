@@ -797,6 +797,14 @@ inline constexpr float kBesideDistance = 150.0f;
     return first + normalized(side, {1.0f, 0.0f, 0.0f}) * kBesideDistance;
 }
 
+// Where the second player goes while they travel with the first: beside them, or, while the game puppets the
+// first player and leaves their actor at the origin (a dome's galaxy selector), where they were (`parked`).
+[[nodiscard]] inline Vec3 travel_position(Vec3 first, Vec3 side, Vec3 parked) noexcept {
+    const float from_origin = length(first);
+    if (!std::isfinite(from_origin) || from_origin < 1.0f) return parked;
+    return beside(first, side);
+}
+
 // The MarioActor::mModels slot of a power-up form's model (MarioActorDraw.cpp init*Mario), kTeresaParts
 // for the Boo form (its own parts), -1 for forms drawn with the normal model (fire, flying).
 inline constexpr int kTeresaParts = -2;

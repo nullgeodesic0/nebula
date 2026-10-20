@@ -77,6 +77,7 @@ constexpr std::uint32_t kFirstPolyOnLineToMap = 0x803E0874u;
 constexpr std::uint32_t kShadowGetDropPos = 0x8016C1B4u;  // ShadowController::getDropPos(TVec3f*) const
 constexpr std::uint32_t kIsInAreaObj = 0x803FEA64u;  // MR::isInAreaObj(const char* name, const TVec3f& position)
 constexpr std::uint32_t kIsDemoActive = 0x803C9E84u;     // MR::isDemoActive()
+constexpr std::uint32_t kIsTimeKeepDemoActive = 0x803C9F80u;  // MR::isTimeKeepDemoActive()
 constexpr std::uint32_t kIsInputDisable = 0x802E98B8u;   // MarioModule::isInputDisable() const (on a Mario)
 }  // namespace fn
 
@@ -300,6 +301,7 @@ struct State {
     // The Observatory's doors and domes (AstroChangeStageCube areas) test the game's player, the first: when
     // the second player walks into one the players swap places, so the game's own check takes them through.
     // `entrance_name` is the area class's name in the game's data; `entrance_wait` frames between swaps.
+    coop::Vec3 parked_position{};
     bool second_waiting_input = false;
     bool second_waiting_demo = false;
     std::uint32_t entrance_name = 0u;
@@ -705,7 +707,9 @@ void move_second_player(const Guest& guest, State& s) {
     // (collision, gravity) around the first player and dropped the second through the floor.
     const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
     const bool first_held = plausible(first_mario) && (guest.call(fn::kIsInputDisable, first_mario) & 0xFFu) != 0u;
-    const bool demo = (guest.call(fn::kIsDemoActive) & 0xFFu) != 0u;
+    // A dome's galaxy selector puppets the first player in a time-keep demo (not MR::isDemoActive).
+    const bool demo = (guest.call(fn::kIsDemoActive) & 0xFFu) != 0u ||
+                      (guest.call(fn::kIsTimeKeepDemoActive) & 0xFFu) != 0u;
     if (first_held != s.second_waiting_input || demo != s.second_waiting_demo) {
         trace("second player %s (first player's controls held %d, cutscene %d)",
               first_held || demo ? "goes beside the first" : "is free again", first_held ? 1 : 0, demo ? 1 : 0);
@@ -728,14 +732,17 @@ void move_second_player(const Guest& guest, State& s) {
     guest.call(fn::kMarioActorMovement, s.second);
     if (camera_ctx != 0u) write_camera(guest, camera_ctx, first_camera);
     if (beside_first && plausible(first_mario)) {
-        // Still the second player's turn: MR::setPlayerPos moves the scene's player.
-        const coop::Vec3 beside = coop::beside(guest.vec(s.first + actor::kPosition), guest.vec(first_mario + kMarioSideVec));
+        // Still the second player's turn: MR::setPlayerPos moves the scene's player. A puppeted first player's
+        // actor sits at the origin: the second player then stays where they were.
+        const coop::Vec3 there = coop::travel_position(guest.vec(s.first + actor::kPosition),
+                                                       guest.vec(first_mario + kMarioSideVec), s.parked_position);
         Guest::Frame frame(guest);
-        guest.call(fn::kSetPlayerPos, frame.vec(0, beside));
+        guest.call(fn::kSetPlayerPos, frame.vec(0, there));
     }
 
     const coop::Vec3 first_position = guest.vec(s.first + actor::kPosition);
     const coop::Vec3 second_position = guest.vec(s.second + actor::kPosition);
+    if (!beside_first) s.parked_position = second_position;
     coop::CameraShare share{};
     bool too_far = false;
     if (split_screen_enabled()) {
@@ -760,7 +767,10 @@ void move_second_player(const Guest& guest, State& s) {
     // The second player at a door or dome the first player is not at: swap places (MR::setPlayerPos moves the
     // scene's player, the second now and the first below).
     bool swap_places = false;
-    if (s.entrance_wait > 0u) {
+    if (beside_first) {
+        // Travelling with the first player: no doors, and no bringing back (the first may be parked).
+        s.leash.reset();
+    } else if (s.entrance_wait > 0u) {
         --s.entrance_wait;
     } else {
         if (!s.entrance_searched) {
@@ -781,7 +791,7 @@ void move_second_player(const Guest& guest, State& s) {
         guest.call(fn::kSetPlayerPos, frame.vec(0, first_position));
         s.entrance_wait = 120u;
         trace("second player at an entrance: the players swap places");
-    } else if (s.leash.update(too_far, coop::CameraTuning{}.warp_frames)) {
+    } else if (!beside_first && s.leash.update(too_far, coop::CameraTuning{}.warp_frames)) {
         // Still the second player's turn: MR::setPlayerPos moves the scene's player.
         Guest::Frame frame(guest);
         guest.call(fn::kSetPlayerPos, frame.vec(0, first_position));
