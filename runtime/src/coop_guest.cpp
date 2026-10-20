@@ -309,6 +309,10 @@ struct State {
     // it plays, so their half shows it, and the first player's half follows them with `follow_first`,
     // starting from `last_camera1` (the game camera before the event).
     bool event_second = false;
+    // When the game camera changes hands (a second player's event begins or ends), the half it moves to
+    // blends from that half's own camera into it, so the game camera's swing over from the other player is
+    // not seen.
+    coop::CameraHandover handover;
     coop::FollowCamera follow_first;
     coop::CameraMatrices first_view;
     coop::CameraMatrices last_camera1;
@@ -539,7 +543,12 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     const bool first_special = plausible(first_mario) && guest.u32(first_mario + kMarioState) != 0u;
     const bool second_special = plausible(s.second_mario) && guest.u32(s.second_mario + kMarioState) != 0u;
     s.event_second = coop::camera_event_is_second(actor, s.second, event, second_special, first_special);
-    if (s.event_second != was) trace("second player's camera event %s", s.event_second ? "begins" : "ends");
+    if (s.event_second != was) {
+        trace("second player's camera event %s", s.event_second ? "begins" : "ends");
+        // The half the game camera moves to starts from its own camera: the second player's as it was, or the
+        // first player's follow camera.
+        if (s.split.amount() > 0.0f) s.handover.start(s.event_second ? s.camera2 : s.first_view, s.event_second);
+    }
     if (s.event_second) {
         // The event's camera follows the second player while it plays.
         if (actor != s.second) guest.set_u32(target + 0x10u, s.second);
@@ -760,6 +769,17 @@ void begin_split_draw(const Guest& guest, State& s) {
 
     s.pass = 1u;
     s.draw_scene = guest.context()->gpr[3];
+    if (s.handover.active()) {
+        // The game camera has just changed hands: this half blends from its own camera into it.
+        const coop::CameraMatrices handed = s.handover.camera(s.camera1, second_half(s));
+        if (handed.view != s.camera1.view) {
+            SavedContext saved(guest.context());
+            write_camera(guest, context, handed);
+            guest.call(fn::kLoadViewMtx);
+            guest.call(fn::kCalcViewAndEntry);
+        }
+        s.handover.advance();
+    }
     write_floats(guest, context + camera::kProjection, half_projection(s, second_half(s)));
     send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), 1u);
 }

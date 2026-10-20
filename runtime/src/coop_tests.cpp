@@ -166,6 +166,23 @@ bool test_split_screen() {
     for (unsigned frame = 0; frame + 1u < SplitState::kTransitionFrames; ++frame) (void)ends.update(1.0f, 0.0f);
     ok &= expect(ends.eased() > ends.amount() && ends.eased() < 1.0f, "and ends gently");
 
+    // The game camera changing hands: the half it moves to starts from its own camera and reaches the game's.
+    const CameraMatrices own = look_at({0.0f, 0.0f, 1000.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
+    const CameraMatrices game = look_at({5000.0f, 0.0f, 1000.0f}, {0.0f, 1.0f, 0.0f}, {5000.0f, 0.0f, 0.0f});
+    CameraHandover handover;
+    handover.start(own, true);
+    ok &= expect(handover.active() && near(pose_of(handover.camera(game, true).inverse).eye.x, 0.0f, 0.5f),
+                 "a handover starts from the half's own camera");
+    ok &= expect(handover.camera(game, false).view == game.view, "the other half keeps the game camera");
+    for (unsigned frame = 0; frame < CameraHandover::kFrames / 2u; ++frame) handover.advance();
+    const float handover_x = pose_of(handover.camera(game, true).inverse).eye.x;
+    ok &= expect(handover_x > 1000.0f && handover_x < 4000.0f, "halfway, between the two");
+    for (unsigned frame = 0; frame < CameraHandover::kFrames; ++frame) handover.advance();
+    ok &= expect(!handover.active() && handover.camera(game, true).view == game.view, "then the game camera");
+    CameraHandover unusable;
+    unusable.start(CameraMatrices{}, true);
+    ok &= expect(!unusable.active(), "no camera to start from: no handover");
+
     // How far towards the edge of a shared picture: players across the screen of a camera looking down -z.
     const CameraMatrices shared = look_at({0.0f, 0.0f, 1000.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
     const float tan_half = std::tan(45.0f * 0.5f * 3.14159265f / 180.0f);

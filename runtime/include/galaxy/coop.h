@@ -432,6 +432,44 @@ struct CameraPose {
     return look_at(eye, up, eye + forward * 1000.0f);
 }
 
+// When the game camera changes hands in split screen (a camera event the second player sets off begins or
+// ends), the half it moves to blends from its own camera into the game's over `kFrames`, eased: the game
+// camera's own swing over from the other player is not seen, and the half starts where it was.
+class CameraHandover {
+public:
+    static constexpr unsigned kFrames = 60u;  // 1 s
+
+    // `from`: the camera the half had; `second`: whether it is the second player's half.
+    void start(const CameraMatrices& from, bool second) noexcept {
+        bool usable = false;
+        for (const float value : from.view) {
+            if (!std::isfinite(value)) return;
+            usable = usable || value != 0.0f;
+        }
+        if (!usable) return;
+        from_ = from;
+        second_ = second;
+        frame_ = 0u;
+        active_ = true;
+    }
+    [[nodiscard]] bool active() const noexcept { return active_; }
+    // The camera for a half drawn with the game camera `game`.
+    [[nodiscard]] CameraMatrices camera(const CameraMatrices& game, bool half_is_second) const noexcept {
+        if (!active_ || half_is_second != second_) return game;
+        const float t = std::clamp(static_cast<float>(frame_) / static_cast<float>(kFrames), 0.0f, 1.0f);
+        return blend_cameras(from_, game, t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f));
+    }
+    void advance() noexcept {
+        if (active_ && ++frame_ >= kFrames) active_ = false;
+    }
+
+private:
+    CameraMatrices from_{};
+    bool second_ = false;
+    unsigned frame_ = 0u;
+    bool active_ = false;
+};
+
 [[nodiscard]] inline Vec3 transform_point(const std::array<float, 12>& m, Vec3 p) noexcept {
     return {m[0] * p.x + m[1] * p.y + m[2] * p.z + m[3], m[4] * p.x + m[5] * p.y + m[6] * p.z + m[7],
             m[8] * p.x + m[9] * p.y + m[10] * p.z + m[11]};

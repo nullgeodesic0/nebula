@@ -6488,8 +6488,9 @@ void GxBackend::take_attached_fifo_markers(FrameChunk& chunk, std::size_t fifo_s
     producer_fifo_marker_view_mask_ = 0;
 }
 
-// Split screen's separator: 1.5 logical EFB pixels each side of the line (3 wide).
-constexpr float kSplitLineHalfWidth = 1.5f;
+// Split screen's separator: 0.375 logical EFB pixels each side of the line (0.75 wide; about 2 pixels at
+// 1080p).
+constexpr float kSplitLineHalfWidth = 0.375f;
 
 void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* view) {
     flush_pending_draw_batch();
