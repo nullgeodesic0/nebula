@@ -6,6 +6,7 @@
 #include "galaxy/decrementer_deadline.h"
 #include "galaxy/external_dispatch.h"
 #include "galaxy/site_hooks.h"
+#include "galaxy/coop_guest.h"
 #include "galaxy/coop_scheduler.h"
 #include "galaxy/native_call_admission.h"
 #include "galaxy/experimental_ultrawide_aspect.h"
@@ -24122,8 +24123,10 @@ void call_guest_impl_body(
     // GameScene::draw3D (from GameScene::draw) and its closing
     // MR::clearZBuffer bracket the 3D scene. The renderer handles each
     // marker at this exact point of the GX stream.
-    if (((guest_address == 0x8033EE8Cu && context->lr == 0x8033E824u) ||
-         (guest_address == 0x803CA76Cu && context->lr == 0x8033F028u)) &&
+    // Split screen (coop_guest.cpp) draws the scene twice: the first half's closing clearZBuffer is not
+    // the scene's end, and the second draw3D is not a new scene.
+    if (((guest_address == 0x8033EE8Cu && context->lr == 0x8033E824u && galaxy::coop_split_pass() != 2u) ||
+         (guest_address == 0x803CA76Cu && context->lr == 0x8033F028u && galaxy::coop_split_pass() != 1u)) &&
         state.address_space != nullptr) {
         state.address_space->flush_wgpipe_gather_tail_for_frame();
         if (guest_address == 0x8033EE8Cu) {

@@ -44,7 +44,9 @@ use std::{fs, path::Path};
 //     regenerate every module.
 // 21: Mario and Luigi co-op's hooks around eight game calls (SiteHookKind 41 and 42);
 //     regenerate every module.
-pub const GENERATION_VERSION: u32 = 21;
+// 22: split screen's hooks around GameScene::draw3D, GXSetViewport, GXSetScissor and
+//     ClippingJudge::isJudgedToClipFrustum (SiteHookKind 41 and 42); regenerate every module.
+pub const GENERATION_VERSION: u32 = 22;
 
 /// Shard size and per-shard source budget of the qualified module build.
 pub const MODULE_SHARD_SIZE: usize = 64;

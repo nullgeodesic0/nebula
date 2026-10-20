@@ -144,6 +144,76 @@ bool test_body_push() {
     return ok;
 }
 
+bool test_split_screen() {
+    bool ok = true;
+    const SplitTuning tuning{};
+    SplitState split;
+    ok &= expect(split.update(tuning.split_at - 1.0f) == 0.0f, "close: one screen");
+    float amount = 0.0f;
+    for (unsigned frame = 0; frame < SplitState::kTransitionFrames; ++frame) amount = split.update(tuning.split_at + 10.0f);
+    ok &= expect(near(amount, 1.0f) && split.split(), "far apart: fully split after the transition");
+    ok &= expect(near(split.update(tuning.merge_at + 10.0f), 1.0f), "between the thresholds: stays split");
+    (void)split.update(tuning.merge_at - 10.0f);
+    ok &= expect(!split.split() && split.amount() < 1.0f && split.amount() > 0.0f, "close again: joining, gradually");
+    split.reset();
+    (void)split.update(tuning.split_at + 1.0f);
+    ok &= expect(split.amount() > 0.0f && split.eased() < split.amount(), "the transition starts gently");
+
+    // At the split each half shows its own side of the full picture: a point on the left edge of the full
+    // view lands on the left edge of the left half, the centre on its right edge.
+    std::array<float, 16> projection{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.5f, 0.0f, 0.0f,
+                                     0.0f, 0.0f, -1.0f, -2.0f, 0.0f, 0.0f, -1.0f, 0.0f};
+    const auto ndc_x = [](const std::array<float, 16>& m, Vec3 v) {
+        const float x = m[0] * v.x + m[1] * v.y + m[2] * v.z + m[3];
+        const float w = m[12] * v.x + m[13] * v.y + m[14] * v.z + m[15];
+        return x / w;
+    };
+    std::array<float, 16> left = projection;
+    half_projection(left, 1.0f);
+    ok &= expect(near(ndc_x(left, {-10.0f, 0.0f, -10.0f}), -1.0f) && near(ndc_x(left, {0.0f, 0.0f, -10.0f}), 1.0f),
+                 "left half at the split: the full picture's left half");
+    std::array<float, 16> right = projection;
+    half_projection(right, -1.0f);
+    ok &= expect(near(ndc_x(right, {0.0f, 0.0f, -10.0f}), -1.0f) && near(ndc_x(right, {10.0f, 0.0f, -10.0f}), 1.0f),
+                 "right half at the split: the full picture's right half");
+    std::array<float, 16> centred = projection;
+    half_projection(centred, 0.0f);
+    ok &= expect(near(ndc_x(centred, {0.0f, 0.0f, -10.0f}), 0.0f) && near(ndc_x(centred, {5.0f, 0.0f, -10.0f}), 1.0f),
+                 "split: each half centred on its camera, twice as narrow");
+
+    const CameraMatrices camera = look_at({0.0f, 0.0f, 10.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
+    const Vec3 seen = transform_point(camera.view, {0.0f, 0.0f, 0.0f});
+    ok &= expect(near(seen.x, 0.0f) && near(seen.z, -10.0f), "look_at looks down -z at the target");
+    ok &= expect(near(pose_of(camera.inverse).eye.z, 10.0f) && near(pose_of(camera.inverse).forward.z, -1.0f),
+                 "the inverse holds the eye and the forward direction");
+    const CameraMatrices other = look_at({10.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
+    ok &= expect(near(pose_of(blend_cameras(camera, other, 0.0f).inverse).eye.z, 10.0f) &&
+                     near(pose_of(blend_cameras(camera, other, 1.0f).inverse).eye.x, 10.0f),
+                 "blending runs from one camera to the other");
+    ok &= expect(sphere_in_view(camera.view, {0.0f, 0.0f, 0.0f}, 1.0f, 45.0f, 1.0f, 1000.0f), "in front: seen");
+    ok &= expect(!sphere_in_view(camera.view, {0.0f, 0.0f, 20.0f}, 1.0f, 45.0f, 1.0f, 1000.0f), "behind: not seen");
+    ok &= expect(!sphere_in_view(camera.view, {50.0f, 0.0f, 0.0f}, 1.0f, 45.0f, 1.0f, 1000.0f), "far to the side: not seen");
+    ok &= expect(sphere_in_view(camera.view, {50.0f, 0.0f, 0.0f}, 60.0f, 45.0f, 1.0f, 1000.0f), "a big sphere reaching in: seen");
+
+    FollowCamera follow;
+    follow.start({0.0f, 300.0f, 1000.0f}, {0.0f, 0.0f, 0.0f}, {2000.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    CameraMatrices view{};
+    for (unsigned frame = 0; frame < 200u; ++frame) view = follow.update({2000.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    const Vec3 eye = pose_of(view.inverse).eye;
+    const Vec3 behind = eye - Vec3{2000.0f, tuning.look_height, 0.0f};
+    ok &= expect(near(std::sqrt(behind.x * behind.x + behind.z * behind.z), tuning.distance, 1.0f) &&
+                     near(behind.y, tuning.height, 1.0f),
+                 "the follow camera settles behind and above its player");
+    ok &= expect(near(transform_point(view.view, {2000.0f, tuning.look_height, 0.0f}).x, 0.0f, 0.01f),
+                 "and looks at them");
+
+    ScreenRect full{0.0f, 0.0f, 640.0f, 456.0f};
+    ok &= expect(half_of(full, true) && near(full.left, 320.0f) && near(full.width, 320.0f), "full screen: the right half");
+    ScreenRect corner{0.0f, 0.0f, 256.0f, 256.0f};
+    ok &= expect(!half_of(corner, false) && near(corner.width, 256.0f), "an effect's corner viewport is left alone");
+    return ok;
+}
+
 bool test_leash() {
     bool ok = true;
     LeashTimer leash;
@@ -169,6 +239,7 @@ int main() {
     passed &= test_partner_input_from_bindings();
     passed &= test_shared_camera();
     passed &= test_body_push();
+    passed &= test_split_screen();
     passed &= test_leash();
     if (!passed) {
         return 1;

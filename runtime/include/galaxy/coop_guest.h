@@ -18,6 +18,10 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
 // Whether `mario` (a Mario, MarioActor + 0x230) is the second player's, which the Odyssey moveset leaves alone.
 [[nodiscard]] bool coop_is_second_player_mario(std::uint32_t mario) noexcept;
 
+// 1 or 2 while split screen draws the first or second half (GameScene::draw3D runs twice), else 0: the scene's
+// begin and end markers go around both (native_runtime.cpp).
+[[nodiscard]] unsigned coop_split_pass() noexcept;
+
 // The second player's controller, published by the input thread and read once a game frame.
 void coop_publish_partner_input(const coop::PartnerInput& input) noexcept;
 [[nodiscard]] coop::PartnerInput coop_partner_input();

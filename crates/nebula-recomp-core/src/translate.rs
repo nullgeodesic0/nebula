@@ -7995,6 +7995,12 @@ fn coop_call_id(target: u32) -> Option<u32> {
         0x803C_DDD4 => Some(6), // MR::mountArchive(const char*, JKRHeap*)
         0x8039_C730 => Some(7), // GameSystemStationedArchiveLoader::createAndAddPlayerArchives(bool)
         0x8039_C060 => Some(8), // PlayerHeapHolder::createHeap(u32, JKRHeap*)
+        // Split screen: the scene drawn once per half, full-screen viewports and scissors narrowed to the
+        // half, and what the second player sees kept from being clipped.
+        0x8033_EE8C => Some(9),  // GameScene::draw3D() const
+        0x804B_E434 => Some(10), // GXSetViewport(f32, f32, f32, f32, f32, f32)
+        0x804B_E4B0 => Some(11), // GXSetScissor(u32, u32, u32, u32)
+        0x8015_FDA0 => Some(12), // ClippingJudge::isJudgedToClipFrustum(const TVec3f&, f32, s32) const
         _ => None,
     }
 }
@@ -14487,6 +14493,10 @@ mod tests {
             (0x803C_DDD4, 6),
             (0x8039_C730, 7),
             (0x8039_C060, 8),
+            (0x8033_EE8C, 9),
+            (0x804B_E434, 10),
+            (0x804B_E4B0, 11),
+            (0x8015_FDA0, 12),
         ] {
             assert_eq!(coop_call_id(target), Some(id));
         }

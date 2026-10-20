@@ -60,6 +60,7 @@ constexpr Vec3 operator+(Vec3 a, Vec3 b) noexcept { return {a.x + b.x, a.y + b.y
 constexpr Vec3 operator-(Vec3 a, Vec3 b) noexcept { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 constexpr Vec3 operator*(Vec3 a, float k) noexcept { return {a.x * k, a.y * k, a.z * k}; }
 inline float length(Vec3 v) noexcept { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+[[nodiscard]] inline float dot(Vec3 a, Vec3 b) noexcept { return a.x * b.x + a.y * b.y + a.z * b.z; }
 
 // KPAD button bits (revolution/kpad.h, the Wii Remote's core buttons plus the Nunchuk's Z and C).
 namespace button {
@@ -205,11 +206,188 @@ private:
 // second player so both stay in view. Up to `share` units apart the camera looks at the midpoint; it hands
 // back to the first player by `leash`. Farther than `leash` for `warp_frames` frames, the second player is
 // brought back to the first. Units are about a centimetre (Mario is about 160 tall).
+// (With split screen, SplitTuning instead.)
 struct CameraTuning {
     float share = 1200.0f;
     float leash = 2600.0f;
     unsigned warp_frames = 120u;
 };
+
+// With split screen the camera looks at the midpoint until the split, then eases to the first player as
+// the screen splits (SplitState).
+struct SplitTuning {
+    float split_at = 1600.0f;  // farther apart: split
+    float merge_at = 1100.0f;  // closer again: one screen
+    float split_warp = 15000.0f;
+    // The second player's camera: `distance` behind and `height` above the point it looks at, which is
+    // `look_height` above the player; it trails the player (a lazy follow) and eases by `follow` a frame.
+    float distance = 1000.0f;
+    float height = 380.0f;
+    float look_height = 110.0f;
+    float follow = 0.2f;
+    float up_follow = 0.1f;
+};
+
+// Splits past `split_at` and joins below `merge_at`, so the screen does not flicker at one distance, and
+// moves between the two over `transition_frames` (Lego style, seamless):
+//
+// - At amount 0 there is one screen; the camera looks at the players' midpoint.
+// - As the amount rises, the screen is drawn twice, each half first showing exactly its part of the shared
+//   picture (an off-centre projection, half_projection), so nothing moves at the split. Each half then slides
+//   to centre on its own player as the first player's camera eases from the midpoint to them and the second
+//   player's camera pans from the first player's view to its own.
+// - Joining runs the same backwards: the halves meet in one picture before the second draw stops.
+class SplitState {
+public:
+    static constexpr unsigned kTransitionFrames = 36u;  // 0.6 s
+
+    // The split amount after this frame, 0..1.
+    float update(float distance, const SplitTuning& tuning = {}) noexcept {
+        if (std::isfinite(distance)) {
+            if (!split_ && distance >= tuning.split_at) split_ = true;
+            else if (split_ && distance < tuning.merge_at) split_ = false;
+        }
+        const float step = 1.0f / static_cast<float>(kTransitionFrames);
+        amount_ = split_ ? std::min(1.0f, amount_ + step) : std::max(0.0f, amount_ - step);
+        return amount_;
+    }
+    [[nodiscard]] bool split() const noexcept { return split_; }
+    // 0: one screen; 1: fully split.
+    [[nodiscard]] float amount() const noexcept { return amount_; }
+    // The amount eased (smoothstep), for the cameras and projections.
+    [[nodiscard]] float eased() const noexcept { return amount_ * amount_ * (3.0f - 2.0f * amount_); }
+    void reset() noexcept { *this = SplitState{}; }
+
+private:
+    bool split_ = false;
+    float amount_ = 0.0f;
+};
+
+// The projection of one half: twice the x scale (the half is half as wide), and `centre` shifts which part
+// of the full picture it shows: +1 the left half of it, -1 the right half, 0 its own centre. A GameCube
+// perspective projection's last row is (0, 0, -1, 0), so row 0 becomes 2 * row0 + centre * row3.
+inline void half_projection(std::array<float, 16>& projection, float centre) noexcept {
+    for (unsigned column = 0; column < 4u; ++column) projection[column] *= 2.0f;
+    for (unsigned column = 0; column < 4u; ++column) projection[column] += centre * projection[12u + column];
+}
+
+[[nodiscard]] inline Vec3 cross(Vec3 a, Vec3 b) noexcept {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+[[nodiscard]] inline Vec3 normalized(Vec3 v, Vec3 fallback) noexcept {
+    const float l = length(v);
+    return std::isfinite(l) && l > 1e-4f ? v * (1.0f / l) : fallback;
+}
+
+// A camera as the GameCube's MTXLookAt makes it: `view` maps the world to the camera (looking down -z), 3x4
+// row-major; `inverse` maps back, with the eye in its last column.
+struct CameraMatrices {
+    std::array<float, 12> view{};
+    std::array<float, 12> inverse{};
+};
+
+[[nodiscard]] inline CameraMatrices look_at(Vec3 eye, Vec3 up, Vec3 target) noexcept {
+    const Vec3 z = normalized(eye - target, {0.0f, 0.0f, 1.0f});
+    const Vec3 x = normalized(cross(up, z), std::fabs(z.y) < 0.9f ? normalized(cross({0.0f, 1.0f, 0.0f}, z), {1.0f, 0.0f, 0.0f})
+                                                                  : Vec3{1.0f, 0.0f, 0.0f});
+    const Vec3 y = cross(z, x);
+    CameraMatrices m;
+    m.view = {x.x, x.y, x.z, -dot(x, eye), y.x, y.y, y.z, -dot(y, eye), z.x, z.y, z.z, -dot(z, eye)};
+    m.inverse = {x.x, y.x, z.x, eye.x, x.y, y.y, z.y, eye.y, x.z, y.z, z.z, eye.z};
+    return m;
+}
+
+// A camera's eye, forward (where it looks) and up, from its inverse view matrix.
+struct CameraPose {
+    Vec3 eye{};
+    Vec3 forward{0.0f, 0.0f, -1.0f};
+    Vec3 up{0.0f, 1.0f, 0.0f};
+};
+[[nodiscard]] inline CameraPose pose_of(const std::array<float, 12>& inverse) noexcept {
+    return {{inverse[3], inverse[7], inverse[11]},
+            {-inverse[2], -inverse[6], -inverse[10]},
+            {inverse[1], inverse[5], inverse[9]}};
+}
+// Between two cameras: `t` 0 is `a`, 1 is `b`.
+[[nodiscard]] inline CameraMatrices blend_cameras(const CameraMatrices& a, const CameraMatrices& b, float t) noexcept {
+    const CameraPose pa = pose_of(a.inverse);
+    const CameraPose pb = pose_of(b.inverse);
+    const Vec3 eye = pa.eye + (pb.eye - pa.eye) * t;
+    const Vec3 forward = normalized(pa.forward + (pb.forward - pa.forward) * t, pb.forward);
+    const Vec3 up = normalized(pa.up + (pb.up - pa.up) * t, pb.up);
+    return look_at(eye, up, eye + forward * 1000.0f);
+}
+
+[[nodiscard]] inline Vec3 transform_point(const std::array<float, 12>& m, Vec3 p) noexcept {
+    return {m[0] * p.x + m[1] * p.y + m[2] * p.z + m[3], m[4] * p.x + m[5] * p.y + m[6] * p.z + m[7],
+            m[8] * p.x + m[9] * p.y + m[10] * p.z + m[11]};
+}
+
+// The second player's own camera while the screen is split: it trails the player at `distance`, keeps
+// `height` above them along their up vector (their gravity's opposite) and looks just above their head.
+class FollowCamera {
+public:
+    // Starts where the first player's camera sits relative to the first player, moved to the second.
+    void start(Vec3 first_eye, Vec3 first_player, Vec3 second_player, Vec3 up, const SplitTuning& tuning = {}) noexcept {
+        up_ = normalized(up, {0.0f, 1.0f, 0.0f});
+        const Vec3 first_look = first_player + up_ * tuning.look_height;
+        eye_ = second_player + up_ * tuning.look_height + (first_eye - first_look);
+        if (!std::isfinite(length(eye_))) eye_ = second_player + up_ * tuning.height + Vec3{0.0f, 0.0f, tuning.distance};
+        started_ = true;
+    }
+
+    CameraMatrices update(Vec3 player, Vec3 up, const SplitTuning& tuning = {}) noexcept {
+        const Vec3 target_up = normalized(up, up_);
+        up_ = normalized(up_ + (target_up - up_) * tuning.up_follow, target_up);
+        const Vec3 look = player + up_ * tuning.look_height;
+        Vec3 behind = eye_ - look;
+        behind = behind - up_ * dot(behind, up_);
+        const Vec3 fallback = normalized(cross(up_, std::fabs(up_.x) < 0.9f ? Vec3{1.0f, 0.0f, 0.0f} : Vec3{0.0f, 0.0f, 1.0f}),
+                                         {0.0f, 0.0f, 1.0f});
+        const Vec3 desired = look + normalized(behind, fallback) * tuning.distance + up_ * tuning.height;
+        eye_ = eye_ + (desired - eye_) * tuning.follow;
+        if (!std::isfinite(length(eye_))) eye_ = desired;
+        return look_at(eye_, up_, look);
+    }
+
+    [[nodiscard]] bool started() const noexcept { return started_; }
+    void reset() noexcept { *this = FollowCamera{}; }
+
+private:
+    Vec3 eye_{};
+    Vec3 up_{0.0f, 1.0f, 0.0f};
+    bool started_ = false;
+};
+
+// Whether a sphere can be seen from a camera (view as look_at's) with vertical field of view `fovy_degrees`,
+// width:height `aspect` and far plane `far_z`. Conservative: the sphere is tested against widened planes.
+[[nodiscard]] inline bool sphere_in_view(const std::array<float, 12>& view, Vec3 centre, float radius, float fovy_degrees,
+                                         float aspect, float far_z) noexcept {
+    const Vec3 v = transform_point(view, centre);
+    const float depth = -v.z;
+    if (!std::isfinite(depth) || depth + radius < 0.0f || depth - radius > far_z) return false;
+    const float ty = std::tan(fovy_degrees * 0.5f * 3.14159265f / 180.0f);
+    const float tx = ty * aspect;
+    if (!std::isfinite(tx) || !std::isfinite(ty)) return false;
+    return std::fabs(v.x) <= depth * tx + radius * std::sqrt(1.0f + tx * tx) &&
+           std::fabs(v.y) <= depth * ty + radius * std::sqrt(1.0f + ty * ty);
+}
+
+// Which half a player takes: split screen viewports and scissors that cover the whole screen are narrowed
+// to the left or right half; smaller ones (effects drawing into a corner of the EFB) are left alone.
+struct ScreenRect {
+    float left = 0.0f;
+    float top = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+};
+inline constexpr float kFullScreenWidth = 600.0f;  // the EFB is 640 wide; anything this wide spans it
+[[nodiscard]] inline bool half_of(ScreenRect& rect, bool right) noexcept {
+    if (rect.left > 1.0f || rect.width < kFullScreenWidth) return false;
+    rect.width *= 0.5f;
+    if (right) rect.left += rect.width;
+    return true;
+}
 
 struct CameraShare {
     Vec3 offset{};          // add to the first player's camera point
@@ -237,8 +415,6 @@ struct BodyTuning {
     float height = 150.0f;
     float max_push = 12.0f;
 };
-
-[[nodiscard]] inline float dot(Vec3 a, Vec3 b) noexcept { return a.x * b.x + a.y * b.y + a.z * b.z; }
 
 // The push for the second player (the first gets its opposite), or zero when they do not touch. `up` is a
 // unit vector.
