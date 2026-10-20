@@ -438,9 +438,14 @@ struct CameraPose {
 class CameraHandover {
 public:
     static constexpr unsigned kFrames = 60u;  // 1 s
+    // An event camera aims at the game's player (the first) for its first frames, before it follows the
+    // second player: their half waits this long before easing in.
+    static constexpr unsigned kEventDelayFrames = 10u;
 
-    // `from`: the camera the half had; `second`: whether it is the second player's half.
-    void start(const CameraMatrices& from, bool second) noexcept {
+    // `from`: the camera the half had; `second`: whether it is the second player's half; `projection`, the
+    // lens it had (eased into the game's too; none keeps the game's).
+    void start(const CameraMatrices& from, bool second, const std::array<float, 16>* projection = nullptr,
+               unsigned delay_frames = 0u) noexcept {
         bool usable = false;
         for (const float value : from.view) {
             if (!std::isfinite(value)) return;
@@ -449,22 +454,41 @@ public:
         if (!usable) return;
         from_ = from;
         second_ = second;
+        has_projection_ = projection != nullptr;
+        if (projection != nullptr) from_projection_ = *projection;
         frame_ = 0u;
+        delay_ = delay_frames;
         active_ = true;
     }
     [[nodiscard]] bool active() const noexcept { return active_; }
     // The camera for a half drawn with the game camera `game`.
     [[nodiscard]] CameraMatrices camera(const CameraMatrices& game, bool half_is_second) const noexcept {
         if (!active_ || half_is_second != second_) return game;
-        const float t = std::clamp(static_cast<float>(frame_) / static_cast<float>(kFrames), 0.0f, 1.0f);
-        return blend_cameras(from_, game, t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f));
+        return blend_cameras(from_, game, eased());
+    }
+    // The lens for that half, from its own to the game's.
+    [[nodiscard]] std::array<float, 16> projection(const std::array<float, 16>& game, bool half_is_second) const noexcept {
+        if (!active_ || !has_projection_ || half_is_second != second_) return game;
+        const float t = eased();
+        std::array<float, 16> blended{};
+        for (std::size_t i = 0; i < blended.size(); ++i) blended[i] = from_projection_[i] + (game[i] - from_projection_[i]) * t;
+        return blended;
     }
     void advance() noexcept {
-        if (active_ && ++frame_ >= kFrames) active_ = false;
+        if (active_ && ++frame_ >= kFrames + delay_) active_ = false;
     }
 
 private:
+    [[nodiscard]] float eased() const noexcept {
+        const float waited = frame_ > delay_ ? static_cast<float>(frame_ - delay_) : 0.0f;
+        const float t = std::clamp(waited / static_cast<float>(kFrames), 0.0f, 1.0f);
+        return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+    }
+
+    unsigned delay_ = 0u;
     CameraMatrices from_{};
+    std::array<float, 16> from_projection_{};
+    bool has_projection_ = false;
     bool second_ = false;
     unsigned frame_ = 0u;
     bool active_ = false;
@@ -480,17 +504,20 @@ public:
     static constexpr float kCloseDistance = 150.0f;
     static constexpr float kCloseCosine = 0.995f;    // about 6 degrees
 
-    void start(const CameraMatrices& camera, Vec3 player) noexcept {
+    // `projection`: the lens the view had (the game's lens changes with the other player's event camera).
+    void start(const CameraMatrices& camera, Vec3 player, const std::array<float, 16>& projection) noexcept {
         for (const float value : camera.inverse) {
             if (!std::isfinite(value)) return;
         }
         camera_ = camera;
+        projection_ = projection;
         origin_ = player;
         returning_ = false;
         frames_ = 0u;
         active_ = true;
     }
     [[nodiscard]] bool active() const noexcept { return active_; }
+    [[nodiscard]] const std::array<float, 16>& projection() const noexcept { return projection_; }
     // The held view, moved with the player.
     [[nodiscard]] CameraMatrices view(Vec3 player) const noexcept {
         const CameraPose pose = pose_of(camera_.inverse);
@@ -525,6 +552,7 @@ public:
 
 private:
     CameraMatrices camera_{};
+    std::array<float, 16> projection_{};
     Vec3 origin_{};
     bool returning_ = false;
     unsigned frames_ = 0u;

@@ -179,6 +179,16 @@ bool test_split_screen() {
     ok &= expect(handover_x > 1000.0f && handover_x < 4000.0f, "halfway, between the two");
     for (unsigned frame = 0; frame < CameraHandover::kFrames; ++frame) handover.advance();
     ok &= expect(!handover.active() && handover.camera(game, true).view == game.view, "then the game camera");
+    CameraHandover delayed;
+    std::array<float, 16> lens{};
+    lens[0] = 2.0f;
+    delayed.start(own, true, &lens, CameraHandover::kEventDelayFrames);
+    for (unsigned frame = 0; frame < CameraHandover::kEventDelayFrames; ++frame) delayed.advance();
+    ok &= expect(near(pose_of(delayed.camera(game, true).inverse).eye.x, 0.0f, 0.5f) &&
+                     near(delayed.projection(std::array<float, 16>{}, true)[0], 2.0f),
+                 "a delayed handover keeps the half's own camera and lens through the delay");
+    for (unsigned frame = 0; frame < CameraHandover::kFrames; ++frame) delayed.advance();
+    ok &= expect(!delayed.active(), "then eases in and ends");
     CameraHandover unusable;
     unusable.start(CameraMatrices{}, true);
     ok &= expect(!unusable.active(), "no camera to start from: no handover");

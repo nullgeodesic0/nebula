@@ -334,6 +334,7 @@ struct State {
     coop::CameraHold hold;
     // The game camera's last view that was the first player's, and where they were then.
     coop::CameraMatrices last_camera1;
+    std::array<float, 16> last_projection{};
     coop::Vec3 last_origin{};
     // The second player's half, eased from the event's camera into their own when their event ends;
     // `second_view` is what their half drew last frame.
@@ -579,8 +580,10 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
         if (s.event_second && s.split.amount() > 0.0f) {
             // Their half blends from their own camera into the event's; the first player's half holds the
             // game camera's view from before the event.
-            s.handover.start(s.camera2, true);
-            s.hold.start(s.last_camera1, s.last_origin);
+            // The event camera aims at the first player for its first frames (until it follows the second),
+            // so their half keeps its own view a moment before easing in.
+            s.handover.start(s.camera2, true, &s.projection, coop::CameraHandover::kEventDelayFrames);
+            s.hold.start(s.last_camera1, s.last_origin, s.last_projection);
         } else if (!s.event_second && s.split.amount() > 0.0f) {
             // Their half eases from the event's camera back into their own.
             s.second_handover.start(s.second_view, true);
@@ -799,9 +802,16 @@ void move_second_player(const Guest& guest, State& s) {
     }
 }
 
+// The lens of a player's half: the game's, except the first player's while their view is held (the game's
+// lens is the other player's event camera's then) and as it eases back.
+std::array<float, 16> half_lens(const State& s, bool second) {
+    if (!second && s.hold.active()) return s.hold.projection();
+    return s.handover.projection(s.projection, second);
+}
+
 // The projection of a player's half: centred on the middle of their side of the line as the split eases in.
 std::array<float, 16> half_projection(const State& s, bool second) {
-    std::array<float, 16> projection = s.projection;
+    std::array<float, 16> projection = half_lens(s, second);
     const std::array<float, 2> centre = s.layout.centre(second, s.screen_width, s.screen_height);
     coop::split_projection(projection, centre[0], centre[1], s.split.eased());
     return projection;
@@ -847,13 +857,14 @@ void begin_split_draw(const Guest& guest, State& s) {
         // player's: their half holds its last good view until the game camera is back with them.
         if (coop::camera_is_second_players(coop::pose_of(s.camera1.inverse).eye, first_position, second_position)) {
             if (!s.hold.active()) {
-                s.hold.start(s.last_camera1, s.last_origin);
+                s.hold.start(s.last_camera1, s.last_origin, s.last_projection);
                 trace("the game camera is at the second player: the first player's half holds");
             } else {
                 s.hold.rearm();
             }
-        } else if (!s.hold.active()) {
+        } else if (!s.hold.active() && !s.handover.active()) {
             s.last_camera1 = s.camera1;
+            s.last_projection = s.projection;
             s.last_origin = first_position;
         }
     }
@@ -875,7 +886,8 @@ void begin_split_draw(const Guest& guest, State& s) {
         // The first player's half, held through the second player's flight and until the game camera is back.
         const coop::CameraMatrices held = s.hold.view(first_position);
         if (s.hold.returning() && s.hold.back(s.camera1, first_position)) {
-            s.handover.start(held, false);
+            const std::array<float, 16> held_lens = s.hold.projection();
+            s.handover.start(held, false, &held_lens);
             trace("the game camera is back with the first player");
         } else {
             game_half = held;
