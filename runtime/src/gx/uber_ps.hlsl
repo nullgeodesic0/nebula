@@ -198,6 +198,8 @@ struct PSOut { float4 color : SV_Target0; };
 [earlydepthstencil]
 #endif
 PSOut main(PSIn pin) {
+    // Split screen: the other player's side of the line (zero: none).
+    if (dot(ztex_params.zw, pin.pos.xy) + asfloat(uber_ps_header.w) < 0.0) discard;
     const uint n_stages = uber_ps_header.x & 0xFFu;
     const uint key_texgens = (uber_ps_header.x >> 8u) & 0xFFu;
     const uint fog_type = (uber_ps_header.x >> 24u) & 0xFFu;

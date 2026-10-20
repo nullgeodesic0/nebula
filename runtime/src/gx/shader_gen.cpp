@@ -340,6 +340,8 @@ cbuffer GxPsConstants : register(b1) {
     uint4    ind_cmd[4];
     int4     ind_mtx[6];
     uint4    ind_misc;
+    // Uber shader's header; .w carries split screen's line offset (see main).
+    uint4    uber_ps_header;
 };
 Texture2D    tex[8] : register(t0);
 SamplerState samp[8] : register(s0);
@@ -1253,6 +1255,8 @@ std::string ShaderGenerator::generate_ps(const PixelShaderKey& key) const {
         s << "float4 main(PSIn pin) : SV_Target0 {\n";
     }
 
+    // Split screen: the other player's side of the line (zero: none).
+    s << "    if (dot(ztex_params.zw, pin.pos.xy) + asfloat(uber_ps_header.w) < 0.0) discard;\n";
     // TEV working registers: PREV, REG0, REG1, REG2.
     // Dolphin keeps these as int4s. A/B/C inputs are masked to 8-bit, D stays
     // signed/raw, and unclamped outputs stay in the -1024..1023 range.

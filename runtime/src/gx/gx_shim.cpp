@@ -76,6 +76,10 @@ void attach_scene_view(const float view[12]) noexcept {
     backend().attach_scene_view(view);
 }
 
+void attach_split_clip(const float plane[3], std::size_t fifo_offset) noexcept {
+    backend().attach_split_clip(plane, fifo_offset);
+}
+
 bool capture_pointer_depth(std::span<std::uint32_t> pixels) {
     return backend().capture_pointer_depth(pixels);
 }

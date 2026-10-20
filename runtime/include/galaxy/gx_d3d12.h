@@ -52,6 +52,9 @@ struct HostClientExtent {
 enum class FifoMarker : std::uint8_t {
     SceneBegin,
     SceneEnd,
+    // Split screen (coop_guest.cpp): from here on, full-screen draws keep only the pixels on one side of a
+    // line (attach_split_clip).
+    SplitClip,
 };
 
 enum class EfbPeekKind : std::uint8_t {
@@ -125,6 +128,9 @@ void attach_fifo_marker(FifoMarker marker, std::size_t fifo_offset) noexcept;
 // Simulation thread, before attach_fifo_marker(SceneBegin): the game camera's
 // world-to-eye matrix (row-major 3x4) for that scene.
 void attach_scene_view(const float view[12]) noexcept;
+// Simulation thread: a SplitClip marker at `fifo_offset`. Full-screen draws after it keep the pixels where
+// plane[0] * x + plane[1] * y + plane[2] >= 0, x and y in logical EFB pixels; (0, 0, 0) keeps all.
+void attach_split_clip(const float plane[3], std::size_t fifo_offset) noexcept;
 void set_pointer_response(PointerResponseStamp stamp) noexcept;
 // Simulation producer; copied into each owned FIFO chunk and selected XFB.
 void set_prerecorded_movie_content(bool movie) noexcept;

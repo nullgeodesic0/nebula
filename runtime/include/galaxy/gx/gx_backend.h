@@ -240,6 +240,16 @@ public:
         }
         producer_scene_view_valid_ = false;
     }
+    // Simulation thread: a SplitClip marker; its plane rides in the marker's view slot (first three floats).
+    void attach_split_clip(const float plane[3], std::size_t fifo_offset) noexcept {
+        if (producer_fifo_marker_count_ < producer_fifo_markers_.size()) {
+            const std::uint8_t index = producer_fifo_marker_count_++;
+            producer_fifo_markers_[index] = {fifo_offset, FifoMarker::SplitClip};
+            producer_fifo_marker_views_[index] = {};
+            for (unsigned i = 0; i < 3u; ++i) producer_fifo_marker_views_[index][i] = plane[i];
+            producer_fifo_marker_view_mask_ |= static_cast<std::uint8_t>(1u << index);
+        }
+    }
     // Simulation thread: the game camera for the next SceneBegin marker.
     void attach_scene_view(const float view[12]) noexcept {
         for (unsigned i = 0; i < 12u; ++i) producer_scene_view_[i] = view[i];
@@ -536,11 +546,11 @@ private:
         std::size_t pointer_depth_capture_fifo_offset = 0;
         bool pointer_depth_in_frame = false;
         // Scene boundaries in this chunk's FIFO, in stream order.
-        std::array<std::pair<std::size_t, FifoMarker>, 4> fifo_markers{};
+        std::array<std::pair<std::size_t, FifoMarker>, 8> fifo_markers{};
         std::uint8_t fifo_marker_count = 0;
         // Game camera (world to eye) per SceneBegin marker; bit i of the
         // mask marks marker i's view valid.
-        std::array<std::array<float, 12>, 4> fifo_marker_views{};
+        std::array<std::array<float, 12>, 8> fifo_marker_views{};
         std::uint8_t fifo_marker_view_mask = 0;
         std::uint64_t dependency_scan_ns = 0;
         std::uint64_t snapshot_ns = 0;
@@ -607,14 +617,18 @@ private:
     PointerResponseStamp producer_pointer_response_{}, render_pointer_response_{}, last_response_{};
     std::shared_ptr<PointerDepthCapture> producer_pointer_depth_capture_;
     std::size_t producer_pointer_depth_capture_offset_ = 0;
-    std::array<std::pair<std::size_t, FifoMarker>, 4> producer_fifo_markers_{};
+    std::array<std::pair<std::size_t, FifoMarker>, 8> producer_fifo_markers_{};
     std::uint8_t producer_fifo_marker_count_ = 0;
-    std::array<std::array<float, 12>, 4> producer_fifo_marker_views_{};
+    std::array<std::array<float, 12>, 8> producer_fifo_marker_views_{};
     std::uint8_t producer_fifo_marker_view_mask_ = 0;
     std::array<float, 12> producer_scene_view_{};
     bool producer_scene_view_valid_ = false;
     // Render thread: inside GameScene::draw3D (between the scene markers).
     bool scene_phase_ = false;
+    // Render thread: split screen's line from the last SplitClip marker (logical EFB pixels; zero: none),
+    // and the one in the last uploaded pixel-shader constants (physical pixels).
+    std::array<float, 3> split_clip_{};
+    std::array<float, 3> uploaded_split_clip_{};
     // Temporal upscaling for the current scene: perspective projections carry
     // this sub-pixel jitter (render pixels).
     bool temporal_scene_ = false;

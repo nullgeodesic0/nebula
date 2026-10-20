@@ -3307,11 +3307,22 @@ bool GxBackend::initialize(int w, int h) {
     renderer_.create_first_use_resources();
 
     // Determine shader-cache directory.
+    // GALAXY_SHADER_CACHE_DIR keeps a test build's shaders apart from the installed game's, whose cache
+    // version may differ (each would otherwise discard and rebuild the other's).
     std::filesystem::path cache_dir;
     {
+        wchar_t* override_dir = nullptr;
+        std::size_t override_len = 0;
         wchar_t* local_app = nullptr;
         std::size_t local_app_len = 0;
-        if (_wdupenv_s(&local_app, &local_app_len, L"LOCALAPPDATA") == 0 && local_app != nullptr) {
+        if (_wdupenv_s(&override_dir, &override_len, L"GALAXY_SHADER_CACHE_DIR") == 0 && override_dir != nullptr &&
+            override_dir[0] != L'\0') {
+            cache_dir = std::filesystem::path(override_dir);
+        }
+        std::free(override_dir);
+        if (!cache_dir.empty()) {
+            // GALAXY_SHADER_CACHE_DIR
+        } else if (_wdupenv_s(&local_app, &local_app_len, L"LOCALAPPDATA") == 0 && local_app != nullptr) {
             cache_dir = std::filesystem::path(local_app)
                 / L"Nebula" / L"shadercache" / L"RMGE01";
             std::free(local_app);
@@ -6478,6 +6489,14 @@ void GxBackend::take_attached_fifo_markers(FrameChunk& chunk, std::size_t fifo_s
 
 void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* view) {
     flush_pending_draw_batch();
+    if (marker == FifoMarker::SplitClip) {
+        // Split screen: the following full-screen draws keep one side of the line (flush_constants).
+        split_clip_ = {0.0f, 0.0f, 0.0f};
+        if (view != nullptr) {
+            for (unsigned i = 0; i < 3u; ++i) split_clip_[i] = (*view)[i];
+        }
+        return;
+    }
     ++scene_markers_seen_;
     scene_phase_ = marker == FifoMarker::SceneBegin;
     const bool was_temporal = temporal_scene_;
@@ -8539,7 +8558,7 @@ void GxBackend::render_frame_on_thread(FrameChunk& chunk) {
                     int marker;  // -1: pointer depth field
                     int view;    // marker index (its camera), -1 none
                 };
-                std::array<Split, 5> splits{};
+                std::array<Split, 9> splits{};
                 std::size_t split_count = 0;
                 if (capture_in_frame) {
                     splits[split_count++] = {
@@ -10416,9 +10435,23 @@ ID3D12PipelineState* GxBackend::flush_draw_state(
         }
     }
 
+    // Split screen: draws over the whole screen keep their half (SplitClip marker); smaller viewports are
+    // effects drawing into a corner of the EFB (Mario's shadow capture) and are left whole. The line goes
+    // to the pixel shader in physical pixels: ztex_params.zw and uber_ps_header.w.
+    std::array<float, 3> clip{0.0f, 0.0f, 0.0f};
+    if (split_clip_[0] != 0.0f || split_clip_[1] != 0.0f || split_clip_[2] != 0.0f) {
+        const float half_width = std::fabs(std::bit_cast<float>(state_.xf(xf::kViewportBase)));
+        const float x_origin = std::bit_cast<float>(state_.xf(static_cast<std::uint16_t>(xf::kViewportBase + 3u))) - 342.0f;
+        if (half_width * 2.0f >= 600.0f && x_origin - half_width <= 1.0f) {
+            const float scale = static_cast<float>(renderer_.efb_scale());
+            clip = {split_clip_[0] / scale, split_clip_[1] / scale, split_clip_[2]};
+        }
+    }
+    const bool clip_changed = clip != uploaded_split_clip_;
+
     // Upload PS constants when TEV stage config / fog / alpha / tex dims change.
     if (tev_dirty || tev_c_dirty || tex_dirty || frame_bindings_dirty_ ||
-        dirty == ~0u) {
+        dirty == ~0u || clip_changed) {
         const auto constants_start = time_detail
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
@@ -10426,6 +10459,10 @@ ID3D12PipelineState* GxBackend::flush_draw_state(
         fill_ps_constants(state_, ps_c);
         ps_c.ztex_params[1] = 1.0f / static_cast<float>(renderer_.efb_scale());
         apply_uber_ps_key(ps_key_, ps_c);
+        ps_c.ztex_params[2] = clip[0];
+        ps_c.ztex_params[3] = clip[1];
+        ps_c.uber_ps_header[3] = std::bit_cast<std::uint32_t>(clip[2]);
+        uploaded_split_clip_ = clip;
 
         UploadRing::Allocation ps_alloc =
             renderer_.constant_ring().allocate(sizeof(GxPsConstants), 256u);
