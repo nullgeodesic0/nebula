@@ -216,6 +216,17 @@ bool test_split_screen() {
     return ok;
 }
 
+bool test_camera_player() {
+    bool ok = true;
+    constexpr std::uint32_t first = 0x80A00000u;
+    constexpr std::uint32_t second = 0x80B00000u;
+    ok &= expect(camera_player(second, first, second) == first, "an event caught the second player: back to the first");
+    ok &= expect(camera_player(first, first, second) == first, "the first player stays");
+    ok &= expect(camera_player(0x80C00000u, first, second) == 0x80C00000u, "an event's own target is left alone");
+    ok &= expect(camera_player(0u, first, 0u) == 0u, "no second player: nothing changes");
+    return ok;
+}
+
 bool test_leash() {
     bool ok = true;
     LeashTimer leash;
@@ -242,6 +253,7 @@ int main() {
     passed &= test_shared_camera();
     passed &= test_body_push();
     passed &= test_split_screen();
+    passed &= test_camera_player();
     passed &= test_leash();
     if (!passed) {
         return 1;

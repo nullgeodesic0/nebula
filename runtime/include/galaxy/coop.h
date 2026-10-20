@@ -440,6 +440,14 @@ struct BodyTuning {
     return across * (amount / distance);
 }
 
+// The player the game camera follows. Camera events and "target the player" calls made while the second
+// player moves catch the second player's MarioActor; the camera is the first player's, so it goes back to
+// them. Any other target (an object, an event's own actor) is left alone.
+[[nodiscard]] constexpr std::uint32_t camera_player(std::uint32_t current, std::uint32_t first,
+                                                    std::uint32_t second) noexcept {
+    return second != 0u && current == second ? first : current;
+}
+
 // Counts frames out of range; true on the frame the second player should be brought back.
 class LeashTimer {
 public:

@@ -64,6 +64,7 @@ constexpr std::uint32_t kGameSceneDraw3D = 0x8033EE8Cu;     // GameScene::draw3D
 constexpr std::uint32_t kCalcViewAndEntry = 0x80343DCCu;    // SceneFunction::executeCalcViewAndEntryList()
 constexpr std::uint32_t kLoadViewMtx = 0x803C7394u;         // MR::loadViewMtx(): CameraContext view -> j3dSys
 constexpr std::uint32_t kSetDefaultViewportAndScissor = 0x803CA5F4u;  // MR::setDefaultViewportAndScissor()
+constexpr std::uint32_t kGetCameraDirector = 0x8009B08Cu;   // MR::getCameraDirector()
 }  // namespace fn
 
 // CameraContext (scene object 0x17), reached as MR::getCameraViewMtx does: *(r13 - 0x3A78) -> +0x24 -> +0xAC ->
@@ -475,6 +476,25 @@ void bump_players(const Guest& guest, const State& s, coop::Vec3 first_position,
     guest.call(fn::kMarioPush, first_mario, frame.vec(1, push * -1.0f));
 }
 
+// The game camera's player: CameraDirector +0x34 CameraTargetHolder, +0xC its CameraTargetPlayer, whose
+// MarioActor is at +0x10 (Petari CameraDirector.hpp, CameraTargetHolder.hpp, CameraTargetObj.hpp).
+// While the second player moves, the game's player is them, so a warp, launch star, pipe or event camera
+// they set off (MR::setCameraTargetToPlayer, CameraTargetArg::setTarget) points the camera at them, and it
+// stayed there. The camera is the first player's (and, split, the second has their own): put it back.
+void keep_camera_on_first_player(const Guest& guest, State& s) {
+    const std::uint32_t director = guest.call(fn::kGetCameraDirector);
+    if (!plausible(director)) return;
+    const std::uint32_t holder = guest.u32(director + 0x34u);
+    if (!plausible(holder)) return;
+    const std::uint32_t target = guest.u32(holder + 0xCu);
+    if (!plausible(target)) return;
+    const std::uint32_t actor = guest.u32(target + 0x10u);
+    const std::uint32_t kept = coop::camera_player(actor, s.first, s.second);
+    if (kept == actor) return;
+    guest.set_u32(target + 0x10u, kept);
+    trace("camera target was the second player (%08X): back to the first (%08X)", actor, kept);
+}
+
 // After the game moves its players, the second player: one MarioActor::movement with the game's player,
 // character and controller switched to it. Then the shared camera, and the warp back to the first player.
 void move_second_player(const Guest& guest, State& s) {
@@ -533,6 +553,7 @@ void move_second_player(const Guest& guest, State& s) {
     guest.set_u8(kIsLuigi, character_byte(s.own));
     s.moving_second = false;
 
+    keep_camera_on_first_player(guest, s);
     bump_players(guest, s, first_position, second_position);
 
     // The game camera looks at the first player's camera point; move it towards the second player.
