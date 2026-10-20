@@ -31,6 +31,9 @@ namespace Nebula.Launcher
         /// <summary>Index into <see cref="MotionStyles"/>; a running game takes it at once.</summary>
         public int MotionStyle = 0;
 
+        /// <summary>Mario and Luigi co-op (runtime_settings.ini coop); the game takes it at its next start.</summary>
+        public bool Coop = false;
+
         public static GeneralSettings Load()
         {
             var settings = new GeneralSettings();
@@ -52,6 +55,8 @@ namespace Nebula.Launcher
                     int index = Array.FindIndex(LanguageKeys, k => string.Equals(k, value, StringComparison.OrdinalIgnoreCase));
                     if (index >= 0) settings.Language = index;
                 }
+                if (key == "coop")
+                    settings.Coop = string.Equals(value, "on", StringComparison.OrdinalIgnoreCase) || value == "1";
                 if (key == "motion_style")
                 {
                     int index = Array.FindIndex(MotionStyleKeys, k => string.Equals(k, value, StringComparison.OrdinalIgnoreCase));
@@ -72,6 +77,7 @@ namespace Nebula.Launcher
                 new KeyValuePair<string, string>("text_speed", Math.Max(1, Math.Min(TextSpeed, 3)).ToString(System.Globalization.CultureInfo.InvariantCulture)),
                 new KeyValuePair<string, string>("language", LanguageKeys[Math.Max(0, Math.Min(Language, LanguageKeys.Length - 1))]),
                 new KeyValuePair<string, string>("motion_style", MotionStyleKeys[Math.Max(0, Math.Min(MotionStyle, MotionStyleKeys.Length - 1))]),
+                new KeyValuePair<string, string>("coop", Coop ? "on" : "off"),
             };
         }
 

@@ -2471,6 +2471,7 @@ fn lower_resident_integer_direct_calls(
                         && !(target == 0x8039_8D3C && pc == 0x8039_8E7C)
                         && !is_animation_interpole_call(target)
                         && !is_mario_action_main_call(target, pc)
+                        && coop_call_id(target).is_none()
                 });
                 let lean_contract = lean_body_call_contract(
                     target,
@@ -7642,6 +7643,26 @@ fn emit_direct_guest_call_with_exact_fpu(
     if is_mario_action_main_call(target, pc) {
         output.push_str(&site_hook_call(pc, "MarioActionMain", 0));
     }
+    // Mario and Luigi co-op: the runtime sees the arguments of a few game calls before they run and
+    // their results after (coop_guest.cpp), on every direct call of the target.
+    let coop = coop_call_id(target);
+    if let Some(id) = coop {
+        output.push_str(&site_hook_call(pc, "CoopBeforeCall", id));
+    }
+    emit_direct_guest_call_body(output, target, pc, callable_entries, exact_fpu_functions)?;
+    if let Some(id) = coop {
+        output.push_str(&site_hook_call(pc, "CoopAfterCall", id));
+    }
+    Ok(())
+}
+
+fn emit_direct_guest_call_body(
+    output: &mut String,
+    target: u32,
+    pc: u32,
+    callable_entries: Option<&BTreeMap<u32, u32>>,
+    exact_fpu_functions: Option<&BTreeSet<u32>>,
+) -> Result<(), TranslationError> {
     fn emit_post_call_hook(
         output: &mut String,
         target: u32,
@@ -7960,6 +7981,22 @@ fn site_hook_call(pc: u32, kind: &str, argument: u32) -> String {
     format!(
         "    galaxy::site_hook(services, context, memory, 0x{pc:08X}u, galaxy::SiteHookKind::{kind}, {argument}u);\n"
     )
+}
+
+/// Game calls the Mario and Luigi co-op watches (CoopBeforeCall/CoopAfterCall, argument the id). The ids
+/// match runtime/src/coop_guest.cpp; addresses are RMGE01's, from Petari's symbols.
+fn coop_call_id(target: u32) -> Option<u32> {
+    match target {
+        0x8045_06D8 => Some(1), // KPADRead(s32 chan, KPADStatus*, u32)
+        0x803B_17D4 => Some(2), // GameDataHolder::isDataMario() const
+        0x803A_F80C => Some(3), // GameDataFunction::isDataMario()
+        0x802A_ED64 => Some(4), // MarioActor::init2(const TVec3f&, const TVec3f&, s32)
+        0x8034_481C => Some(5), // CategoryList::execute(MR::MovementType)
+        0x803C_DDD4 => Some(6), // MR::mountArchive(const char*, JKRHeap*)
+        0x8039_C730 => Some(7), // GameSystemStationedArchiveLoader::createAndAddPlayerArchives(bool)
+        0x8039_C060 => Some(8), // PlayerHeapHolder::createHeap(u32, JKRHeap*)
+        _ => None,
+    }
 }
 
 fn is_animation_interpole_call(target: u32) -> bool {
@@ -14419,6 +14456,40 @@ mod tests {
             0x4E80_0020,
         ];
         assert!(!lower_instruction_fixture(0x802A_D184, &elsewhere).contains("MarioActionMain"));
+    }
+
+    #[test]
+    fn rmge01_coop_hooks_wrap_every_direct_call_of_their_targets() {
+        const TARGET: u32 = 0x8045_06D8; // KPADRead
+        const PC: u32 = 0x8030_0000;
+        let before = "galaxy::site_hook(services, context, memory, 0x80300000u, galaxy::SiteHookKind::CoopBeforeCall, 1u);";
+        let after = "galaxy::site_hook(services, context, memory, 0x80300000u, galaxy::SiteHookKind::CoopAfterCall, 1u);";
+        let link = [0x4800_0001 | (TARGET.wrapping_sub(PC) & 0x03FF_FFFC), 0x4E80_0020];
+        let output = lower_instruction_fixture(PC, &link);
+        assert_eq!(output.matches(before).count(), 1);
+        assert_eq!(output.matches(after).count(), 1);
+        let bytes: Vec<u8> = link.iter().flat_map(|word| word.to_be_bytes()).collect();
+        let entries = BTreeMap::from([(TARGET, TARGET)]);
+        let output = lower_words_for_module(PC, &bytes, &BTreeSet::new(), &entries)
+            .expect("resolved KPADRead call lowers");
+        let call = output.find(&format!("fn_{TARGET:08X}")).expect("the call is emitted");
+        assert!(output.find(before).expect("hook before") < call);
+        assert!(output.find(after).expect("hook after") > call);
+        // Other calls are left alone.
+        const OTHER: u32 = 0x8045_06DC;
+        let other = [0x4800_0001 | (OTHER.wrapping_sub(PC) & 0x03FF_FFFC), 0x4E80_0020];
+        assert!(!lower_instruction_fixture(PC, &other).contains("Coop"));
+        for (target, id) in [
+            (0x803B_17D4u32, 2u32),
+            (0x803A_F80C, 3),
+            (0x802A_ED64, 4),
+            (0x8034_481C, 5),
+            (0x803C_DDD4, 6),
+            (0x8039_C730, 7),
+            (0x8039_C060, 8),
+        ] {
+            assert_eq!(coop_call_id(target), Some(id));
+        }
     }
 
     #[test]

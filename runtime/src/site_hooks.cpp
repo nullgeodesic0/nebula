@@ -1,6 +1,7 @@
 #include "galaxy/site_hooks.h"
 
 #include "galaxy/button_prompts.h"
+#include "galaxy/coop_guest.h"
 #include "galaxy/motion_style.h"
 #include "galaxy/odyssey_moveset_guest.h"
 #include "galaxy/experimental_ultrawide_aspect.h"
@@ -235,6 +236,12 @@ void dispatch_site_hook(
         return;
     case SiteHookKind::MarioActionMain:
         tick_odyssey_moveset(context, memory, services, guest_pc);
+        return;
+    case SiteHookKind::CoopBeforeCall:
+        coop_before_call(argument, context, memory, services, guest_pc);
+        return;
+    case SiteHookKind::CoopAfterCall:
+        coop_after_call(argument, context, memory, services, guest_pc);
         return;
     case SiteHookKind::LodDistance:
         // LodCtrl::update keeps the game's distances: which model shows is

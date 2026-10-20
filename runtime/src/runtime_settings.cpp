@@ -189,6 +189,8 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
         settings.moveset.dive = parse_switch(value, settings.moveset.dive);
     } else if (std::strcmp(key, "moveset_turn_boost") == 0) {
         settings.moveset.turn_boost = parse_switch(value, settings.moveset.turn_boost);
+    } else if (std::strcmp(key, "coop") == 0) {
+        settings.coop = parse_switch(value, settings.coop);
     } else if (std::strcmp(key, "custom_animations") == 0) {
         if (_stricmp(value, "on") == 0 || std::strcmp(value, "1") == 0) settings.custom_animations = true;
         if (_stricmp(value, "off") == 0 || std::strcmp(value, "0") == 0) settings.custom_animations = false;
@@ -336,6 +338,7 @@ void apply_env_overrides(RuntimeSettings& settings) {
     apply_env(settings, "GALAXY_BUTTON_PROMPTS", "button_prompts");
     apply_env(settings, "GALAXY_MOTION_STYLE", "motion_style");
     apply_env(settings, "GALAXY_ODYSSEY_MOVESET", "odyssey_moveset");
+    apply_env(settings, "GALAXY_COOP", "coop");
     apply_env(settings, "GALAXY_CUSTOM_ANIMATIONS", "custom_animations");
     apply_env(settings, "GALAXY_CUSTOM_MODEL", "custom_model");
     apply_env(settings, "GALAXY_CUSTOM_VOICE", "custom_voice");
@@ -377,6 +380,7 @@ namespace {
 // 0 until the disc opens, then 1 (off) or 2 (on).
 std::atomic<std::uint8_t> s_running_custom_animations{0u};
 std::atomic<std::uint8_t> s_running_custom_model{0u};
+std::atomic<std::uint8_t> s_running_coop{0u};
 
 // The disc opens before the settings load, so the file is read here.
 bool mod_for_boot(std::atomic<std::uint8_t>& running_state, bool RuntimeSettings::*field) noexcept {
@@ -422,6 +426,10 @@ bool custom_model_for_boot() noexcept {
 
 bool running_custom_model(bool& enabled) noexcept {
     return running_mod(s_running_custom_model, enabled);
+}
+
+bool coop_for_boot() noexcept {
+    return mod_for_boot(s_running_coop, &RuntimeSettings::coop);
 }
 
 const char* game_language_key(GameLanguage language) noexcept {
@@ -541,6 +549,7 @@ bool reload_runtime_audio_settings_if_changed() noexcept {
         settings.button_prompts = parsed.button_prompts;
         settings.motion_style = parsed.motion_style;
         settings.moveset = parsed.moveset;
+        settings.coop = parsed.coop;
         settings.custom_animations = parsed.custom_animations;
         settings.custom_model = parsed.custom_model;
         settings.custom_voice = parsed.custom_voice;
@@ -591,6 +600,7 @@ bool save_runtime_settings_to_file() {
                  << "moveset_ground_pound_jump=" << (settings.moveset.ground_pound_jump ? "on" : "off") << '\n'
                  << "moveset_dive=" << (settings.moveset.dive ? "on" : "off") << '\n'
                  << "moveset_turn_boost=" << (settings.moveset.turn_boost ? "on" : "off") << '\n'
+                 << "coop=" << (settings.coop ? "on" : "off") << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;

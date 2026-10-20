@@ -64,9 +64,10 @@ namespace Nebula.Setup
         /// without the C runtime (a 1.0.0 SSE2 module calls its soft-float fma for every fused guest
         /// instruction); no LodDistance hook. 3: the motion style setting's site hook
         /// (AnimationInterpole) before XanimePlayer::updateInterpoleRatio. 4: the Odyssey moveset's site hook
-        /// (MarioActionMain) before Mario::actionMain.
+        /// (MarioActionMain) before Mario::actionMain. 5: Mario and Luigi co-op's site hooks (CoopBeforeCall,
+        /// CoopAfterCall) around eight game calls.
         /// </summary>
-        public const int ModuleGeneration = 4;
+        public const int ModuleGeneration = 5;
 
         /// <summary>Installed modules an update must recompile rather than relink.</summary>
         private static bool ModulesNeedRebuild(InstalledInfo current)
