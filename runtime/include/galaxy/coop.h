@@ -233,7 +233,7 @@ struct SplitTuning {
 //
 // - At amount 0 there is one screen; the camera looks at the players' midpoint.
 // - As the amount rises, the screen is drawn twice, each half first showing exactly its part of the shared
-//   picture (an off-centre projection, half_projection), so nothing moves at the split. Each half then slides
+//   picture (an off-centre projection, split_projection), so nothing moves at the split. Each half then slides
 //   to centre on its own player as the first player's camera eases from the midpoint to them and the second
 //   player's camera pans from the first player's view to its own.
 // - Joining runs the same backwards: the halves meet in one picture before the second draw stops.
@@ -263,12 +263,16 @@ private:
     float amount_ = 0.0f;
 };
 
-// The projection of one half: twice the x scale (the half is half as wide), and `centre` shifts which part
-// of the full picture it shows: +1 the left half of it, -1 the right half, 0 its own centre. A GameCube
-// perspective projection's last row is (0, 0, -1, 0), so row 0 becomes 2 * row0 + centre * row3.
-inline void half_projection(std::array<float, 16>& projection, float centre) noexcept {
-    for (unsigned column = 0; column < 4u; ++column) projection[column] *= 2.0f;
-    for (unsigned column = 0; column < 4u; ++column) projection[column] += centre * projection[12u + column];
+// The projection of one half. Viewports stay full-screen (the game's screen-space passes, such as the
+// shadow and bloom composites, draw textures of the whole screen and must not be squeezed) and the scissor
+// keeps each half's draws on its side; the camera's picture is moved into its half instead: its centre
+// shifts a quarter of the screen towards the half's side as the split eases in (`eased` 0..1). At the
+// split the shift is 0, so each half shows exactly its part of the shared picture; split, each half is
+// centred on its own camera at the same scale. A GameCube perspective projection's last row is
+// (0, 0, -1, 0): row 0 becomes row0 + shift * row3, shift = +-eased / 2 in normalized x.
+inline void split_projection(std::array<float, 16>& projection, bool right, float eased) noexcept {
+    const float shift = (right ? 0.5f : -0.5f) * eased;
+    for (unsigned column = 0; column < 4u; ++column) projection[column] += shift * projection[12u + column];
 }
 
 [[nodiscard]] inline Vec3 cross(Vec3 a, Vec3 b) noexcept {

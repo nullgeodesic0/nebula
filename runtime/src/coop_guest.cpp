@@ -38,7 +38,7 @@ constexpr std::uint32_t kMountArchive = 6u;
 constexpr std::uint32_t kCreateAndAddPlayerArchives = 7u;
 constexpr std::uint32_t kPlayerHeapCreateHeap = 8u;
 constexpr std::uint32_t kGameSceneDraw3D = 9u;
-constexpr std::uint32_t kGxSetViewport = 10u;
+constexpr std::uint32_t kGxSetViewport = 10u;  // hooked but left alone: viewports stay full-screen
 constexpr std::uint32_t kGxSetScissor = 11u;
 constexpr std::uint32_t kClipFrustum = 12u;
 }  // namespace call
@@ -63,6 +63,7 @@ constexpr std::uint32_t kMarioPush = 0x8030C330u;
 constexpr std::uint32_t kGameSceneDraw3D = 0x8033EE8Cu;     // GameScene::draw3D() const
 constexpr std::uint32_t kCalcViewAndEntry = 0x80343DCCu;    // SceneFunction::executeCalcViewAndEntryList()
 constexpr std::uint32_t kLoadViewMtx = 0x803C7394u;         // MR::loadViewMtx(): CameraContext view -> j3dSys
+constexpr std::uint32_t kSetDefaultViewportAndScissor = 0x803CA5F4u;  // MR::setDefaultViewportAndScissor()
 }  // namespace fn
 
 // CameraContext (scene object 0x17), reached as MR::getCameraViewMtx does: *(r13 - 0x3A78) -> +0x24 -> +0xAC ->
@@ -352,11 +353,6 @@ bool finite(const std::array<float, 12>& values) {
 // Whether the half drawn now is the right one: the first pass draws the first player's half.
 bool right_half(const State& s) { return s.pass == 1u ? !s.second_right : s.second_right; }
 
-// Which part of the full picture a half shows: its own side of it at the split, its own centre once split.
-float half_centre(const State& s, bool right) {
-    const float shift = 1.0f - s.split.eased();
-    return right ? -shift : shift;
-}
 
 coop::Vec3 player_up(const Guest& guest, std::uint32_t mario) {
     return coop::normalized(guest.vec(mario + kMarioUpVec), {0.0f, 1.0f, 0.0f});
@@ -590,7 +586,7 @@ void begin_split_draw(const Guest& guest, State& s) {
     s.pass = 1u;
     s.draw_scene = guest.context()->gpr[3];
     std::array<float, 16> projection = s.projection;
-    coop::half_projection(projection, half_centre(s, right_half(s)));
+    coop::split_projection(projection, right_half(s), s.split.eased());
     write_floats(guest, context + camera::kProjection, projection);
 }
 
@@ -607,7 +603,7 @@ void finish_split_draw(const Guest& guest, State& s) {
     s.pass = 2u;
     write_camera(guest, context, s.camera2);
     std::array<float, 16> projection = s.projection;
-    coop::half_projection(projection, half_centre(s, right_half(s)));
+    coop::split_projection(projection, right_half(s), s.split.eased());
     write_floats(guest, context + camera::kProjection, projection);
     guest.call(fn::kLoadViewMtx);
     guest.call(fn::kCalcViewAndEntry);
@@ -616,25 +612,13 @@ void finish_split_draw(const Guest& guest, State& s) {
     write_floats(guest, context + camera::kProjection, s.projection);
     guest.call(fn::kLoadViewMtx);
     s.pass = 0u;
+    // The whole screen again for the 2D layer (HUD): the second half left the scissor on its side.
+    guest.call(fn::kSetDefaultViewportAndScissor);
 }
 
 double fpr(const PpcContext* context, unsigned index) { return std::bit_cast<double>(context->fpr_bits[index]); }
-// A single-precision argument as lfs leaves it: the double in ps0, and ps1 the same.
-void set_fpr(PpcContext* context, unsigned index, float value) {
-    context->fpr_bits[index] = std::bit_cast<std::uint64_t>(static_cast<double>(value));
-    context->ps1_bits[index] = context->fpr_bits[index];
-}
-
-// GXSetViewport(left, top, width, height, near, far) in f1..f6, while a half is drawn.
-void narrow_viewport(PpcContext* context, const State& s) {
-    coop::ScreenRect rect{static_cast<float>(fpr(context, 1)), static_cast<float>(fpr(context, 2)),
-                          static_cast<float>(fpr(context, 3)), static_cast<float>(fpr(context, 4))};
-    if (!coop::half_of(rect, right_half(s))) return;
-    set_fpr(context, 1, rect.left);
-    set_fpr(context, 3, rect.width);
-}
-
-// GXSetScissor(left, top, width, height) in r3..r6, while a half is drawn.
+// GXSetScissor(left, top, width, height) in r3..r6, while a half is drawn: a scissor over the whole screen
+// keeps the half's draws on its side. Viewports stay full-screen (split_projection).
 void narrow_scissor(PpcContext* context, const State& s) {
     coop::ScreenRect rect{static_cast<float>(context->gpr[3]), static_cast<float>(context->gpr[4]),
                           static_cast<float>(context->gpr[5]), static_cast<float>(context->gpr[6])};
@@ -691,9 +675,6 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         return;
     case call::kGameSceneDraw3D:
         begin_split_draw(Guest(context, memory, services, guest_pc), s);
-        return;
-    case call::kGxSetViewport:
-        if (s.pass != 0u) narrow_viewport(context, s);
         return;
     case call::kGxSetScissor:
         if (s.pass != 0u) narrow_scissor(context, s);

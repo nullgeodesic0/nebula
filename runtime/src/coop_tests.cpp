@@ -159,8 +159,8 @@ bool test_split_screen() {
     (void)split.update(tuning.split_at + 1.0f);
     ok &= expect(split.amount() > 0.0f && split.eased() < split.amount(), "the transition starts gently");
 
-    // At the split each half shows its own side of the full picture: a point on the left edge of the full
-    // view lands on the left edge of the left half, the centre on its right edge.
+    // Viewports stay full-screen; the camera's picture moves into its half. At the split it does not move,
+    // so each half shows its own side of the shared picture; split, the camera's centre is the half's.
     std::array<float, 16> projection{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.5f, 0.0f, 0.0f,
                                      0.0f, 0.0f, -1.0f, -2.0f, 0.0f, 0.0f, -1.0f, 0.0f};
     const auto ndc_x = [](const std::array<float, 16>& m, Vec3 v) {
@@ -168,18 +168,20 @@ bool test_split_screen() {
         const float w = m[12] * v.x + m[13] * v.y + m[14] * v.z + m[15];
         return x / w;
     };
-    std::array<float, 16> left = projection;
-    half_projection(left, 1.0f);
-    ok &= expect(near(ndc_x(left, {-10.0f, 0.0f, -10.0f}), -1.0f) && near(ndc_x(left, {0.0f, 0.0f, -10.0f}), 1.0f),
-                 "left half at the split: the full picture's left half");
+    std::array<float, 16> at_split = projection;
+    split_projection(at_split, true, 0.0f);
+    ok &= expect(at_split == projection, "at the split: the shared picture, unmoved");
     std::array<float, 16> right = projection;
-    half_projection(right, -1.0f);
-    ok &= expect(near(ndc_x(right, {0.0f, 0.0f, -10.0f}), -1.0f) && near(ndc_x(right, {10.0f, 0.0f, -10.0f}), 1.0f),
-                 "right half at the split: the full picture's right half");
-    std::array<float, 16> centred = projection;
-    half_projection(centred, 0.0f);
-    ok &= expect(near(ndc_x(centred, {0.0f, 0.0f, -10.0f}), 0.0f) && near(ndc_x(centred, {5.0f, 0.0f, -10.0f}), 1.0f),
-                 "split: each half centred on its camera, twice as narrow");
+    split_projection(right, true, 1.0f);
+    ok &= expect(near(ndc_x(right, {0.0f, 0.0f, -10.0f}), 0.5f) && near(ndc_x(right, {5.0f, 0.0f, -10.0f}), 1.0f),
+                 "split: the right camera's centre is the right half's, at the same scale");
+    std::array<float, 16> left = projection;
+    split_projection(left, false, 1.0f);
+    ok &= expect(near(ndc_x(left, {0.0f, 0.0f, -10.0f}), -0.5f) && near(ndc_x(left, {-5.0f, 0.0f, -10.0f}), -1.0f),
+                 "split: the left camera's centre is the left half's");
+    std::array<float, 16> halfway = projection;
+    split_projection(halfway, true, 0.5f);
+    ok &= expect(near(ndc_x(halfway, {0.0f, 0.0f, -10.0f}), 0.25f), "halfway through, halfway there");
 
     const CameraMatrices camera = look_at({0.0f, 0.0f, 10.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
     const Vec3 seen = transform_point(camera.view, {0.0f, 0.0f, 0.0f});
@@ -210,7 +212,7 @@ bool test_split_screen() {
     ScreenRect full{0.0f, 0.0f, 640.0f, 456.0f};
     ok &= expect(half_of(full, true) && near(full.left, 320.0f) && near(full.width, 320.0f), "full screen: the right half");
     ScreenRect corner{0.0f, 0.0f, 256.0f, 256.0f};
-    ok &= expect(!half_of(corner, false) && near(corner.width, 256.0f), "an effect's corner viewport is left alone");
+    ok &= expect(!half_of(corner, false) && near(corner.width, 256.0f), "an effect's corner scissor is left alone");
     return ok;
 }
 

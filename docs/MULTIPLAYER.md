@@ -60,8 +60,10 @@ While split, the second player's stick is relative to their own camera, and thin
 can see are not clipped (they move and are drawn). The HUD is drawn once over the whole screen.
 
 How: `GameScene::draw3D` runs a second time with the second player's camera in `CameraContext` and its
-view matrices recalculated (`SceneFunction::executeCalcViewAndEntryList`); during each half, viewports and
-scissors that cover the whole screen are narrowed to the half and the projection to its width.
+view matrices recalculated (`SceneFunction::executeCalcViewAndEntryList`). Viewports stay full-screen, so the
+game's screen-space passes (the shadow and bloom composites, which draw textures of the whole screen) line
+up; a scissor over the whole screen is narrowed to the half, and each camera's picture is moved into its
+half by shifting the projection's centre a quarter screen as the split eases in.
 `GALAXY_COOP_SPLIT=0` keeps one shared screen (the camera then hands back to the first player between 1200
 and 2600 units, and the second player is brought back after two seconds past 2600).
 
@@ -74,8 +76,7 @@ These come from a game written for one player and are what the playtest should l
 - Rumble goes to the first player's controller.
 - Domes, warps and cutscenes move the first player only; the second rejoins them at the next level start.
 - The Odyssey moves are the first player's only.
-- Split screen: effects that copy the whole screen (bloom, the screen blur, mirror reflections) are made
-  for one full picture and can look wrong in the halves; the second player's camera has no camera areas
+- Split screen: mirror reflections follow the first player's camera only; the second player's camera has no camera areas
   or collision (it can go through walls); the temporal upscaler and motion blur assume one camera a frame,
   so turn them off while playing split. The 3D scene costs twice as much to draw while split.
 
