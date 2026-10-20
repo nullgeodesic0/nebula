@@ -340,6 +340,8 @@ struct State {
     // `second_view` is what their half drew last frame.
     coop::CameraHandover second_handover;
     coop::CameraMatrices second_view;
+    // Trace: frames of per-frame camera detail left after a camera change of hands.
+    unsigned camera_trace_frames = 0u;
     std::uint32_t shadow_controller = 0u;
     float shadow_clip = 0.0f;
     std::uint32_t draw_scene = 0u;
@@ -574,9 +576,11 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
               actor == s.second ? "second" : actor == s.first ? "first" : "other", second_special ? 1 : 0,
               first_special ? 1 : 0, s.split.amount());
         s.event_inputs = inputs;
+        s.camera_trace_frames = 120u;
     }
     if (s.event_second != was) {
         trace("second player's camera event %s", s.event_second ? "begins" : "ends");
+        s.camera_trace_frames = 120u;
         if (s.event_second && s.split.amount() > 0.0f) {
             // Their half blends from their own camera into the event's; the first player's half holds the
             // game camera's view from before the event.
@@ -594,6 +598,7 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     // waits for the game camera to be back.
     if (!s.event_second && s.hold.active() && !s.hold.returning() && !second_special) {
         s.hold.release();
+        s.camera_trace_frames = 120u;
         trace("second player landed: the first player's half waits for the game camera");
     }
     if (s.event_second) {
@@ -913,6 +918,21 @@ void begin_split_draw(const Guest& guest, State& s) {
         guest.call(fn::kCalcViewAndEntry);
     }
     s.second_view = second_half(s) ? game_half : s.camera2;
+    if (s.camera_trace_frames > 0u && trace_enabled()) {
+        --s.camera_trace_frames;
+        const coop::Vec3 game_eye = coop::pose_of(s.camera1.inverse).eye;
+        const coop::Vec3 drawn_eye = coop::pose_of(game_half.inverse).eye;
+        const coop::Vec3 other_eye = coop::pose_of(s.camera2.inverse).eye;
+        const coop::Vec3 drawn_fwd = coop::pose_of(game_half.inverse).forward;
+        const coop::Vec3 other_fwd = coop::pose_of(s.camera2.inverse).forward;
+        trace("cam f%u pass1=%s ev=%d hold=%d/%d ho=%d ho2=%d line=%.0f game(%.0f %.0f %.0f) "
+              "pass1(%.0f %.0f %.0f >%.2f %.2f %.2f) pass2(%.0f %.0f %.0f >%.2f %.2f %.2f) fov00=%.3f",
+              120u - s.camera_trace_frames, second_half(s) ? "second" : "first", s.event_second ? 1 : 0,
+              s.hold.active() ? 1 : 0, s.hold.returning() ? 1 : 0, s.handover.active() ? 1 : 0,
+              s.second_handover.active() ? 1 : 0, s.layout.angle() * 57.2958f, game_eye.x, game_eye.y, game_eye.z,
+              drawn_eye.x, drawn_eye.y, drawn_eye.z, drawn_fwd.x, drawn_fwd.y, drawn_fwd.z, other_eye.x, other_eye.y,
+              other_eye.z, other_fwd.x, other_fwd.y, other_fwd.z, s.projection[0]);
+    }
     write_floats(guest, context + camera::kProjection, half_projection(s, second_half(s)));
     send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), 1u);
 }
