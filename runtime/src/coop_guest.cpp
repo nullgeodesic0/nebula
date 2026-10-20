@@ -348,6 +348,7 @@ struct State {
     // level start until the first has had control a moment); `controllable_frames` counts frames the first
     // player has been in ordinary play.
     bool travelling = false;
+    bool sticky_travel = false;
     bool level_start = false;
     unsigned controllable_frames = 0u;
     coop::CameraMatrices second_view;
@@ -501,6 +502,7 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     // Until the first player has landed and has control, the second waits where they were placed.
     s.level_start = true;
     s.travelling = true;
+    s.sticky_travel = false;
     s.controllable_frames = 0u;
     s.follow.reset();
     const std::uint32_t first_mario = guest.u32(first + actor::kMario);
@@ -733,7 +735,10 @@ void move_second_player(const Guest& guest, State& s) {
     const coop::Vec3 first_now = guest.vec(s.first + actor::kPosition);
     // A puppeted first player's actor sits at the origin (a dome's galaxy selector).
     const bool first_parked = !(coop::length(first_now) >= 1.0f);
-    const bool first_busy = coop::second_player_waits(first_held, demo) || first_parked;
+    // Once a dome's galaxy selector has puppeted the first player, the rest of the scene is the flight into the
+    // chosen galaxy (the dome floor no longer holds the second player): travel with them until the next scene.
+    if (first_parked && !s.level_start) s.sticky_travel = true;
+    const bool first_busy = coop::second_player_waits(first_held, demo) || first_parked || s.sticky_travel;
     s.controllable_frames = first_busy ? 0u : s.controllable_frames + 1u;
     bool land_beside = false;
     if (s.level_start && s.controllable_frames >= coop::kLevelStartSettleFrames) {

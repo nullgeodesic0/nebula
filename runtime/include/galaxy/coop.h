@@ -500,9 +500,11 @@ private:
 // `kReturnFrames`, and then hands over (CameraHandover).
 class CameraHold {
 public:
-    static constexpr unsigned kReturnFrames = 150u;  // 2.5 s
-    static constexpr float kCloseDistance = 150.0f;
-    static constexpr float kCloseCosine = 0.995f;    // about 6 degrees
+    static constexpr unsigned kReturnFrames = 150u;  // 2.5 s at most
+    // Back: the game camera's eye within `kBackDistance` of the first player and moving less than `kSettled`
+    // a frame (it has finished travelling back).
+    static constexpr float kBackDistance = 2500.0f;
+    static constexpr float kSettled = 25.0f;
 
     // `projection`: the lens the view had (the game's lens changes with the other player's event camera).
     void start(const CameraMatrices& camera, Vec3 player, const std::array<float, 16>& projection) noexcept {
@@ -535,17 +537,19 @@ public:
         frames_ = 0u;
     }
     [[nodiscard]] bool returning() const noexcept { return active_ && returning_; }
-    // While returning, once a frame with the game camera: true when it is back (near the held view) or has
-    // taken too long; the hold then ends.
+    // While returning, once a frame with the game camera: true when it is back with the player and has
+    // stopped travelling, or has taken too long; the hold then ends (and the half eases into the game camera).
     bool back(const CameraMatrices& game, Vec3 player) noexcept {
         if (!returning()) return false;
-        const CameraPose held = pose_of(view(player).inverse);
-        const CameraPose now = pose_of(game.inverse);
-        const bool close = length(held.eye - now.eye) <= kCloseDistance && dot(held.forward, now.forward) >= kCloseCosine;
-        if (close || ++frames_ >= kReturnFrames) {
+        const Vec3 eye = pose_of(game.inverse).eye;
+        const bool near_player = length(eye - player) <= kBackDistance;
+        const bool settled = frames_ > 0u && length(eye - last_eye_) <= kSettled;
+        last_eye_ = eye;
+        if ((near_player && settled) || ++frames_ >= kReturnFrames) {
             active_ = false;
             return true;
         }
+        if (frames_ == 0u) frames_ = 1u;
         return false;
     }
     void reset() noexcept { *this = CameraHold{}; }
@@ -554,6 +558,7 @@ private:
     CameraMatrices camera_{};
     std::array<float, 16> projection_{};
     Vec3 origin_{};
+    Vec3 last_eye_{};
     bool returning_ = false;
     unsigned frames_ = 0u;
     bool active_ = false;

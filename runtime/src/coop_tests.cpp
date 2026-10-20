@@ -204,7 +204,8 @@ bool test_split_screen() {
     ok &= expect(!hold.back(game, {}), "not returning yet: nothing to check");
     hold.release();
     ok &= expect(hold.returning() && !hold.back(game, {}), "the game camera far away: still held");
-    ok &= expect(hold.back(own, {}) && !hold.active(), "the game camera back at the held view: the hold ends");
+    ok &= expect(!hold.back(own, {}), "back near the player but still moving: still held");
+    ok &= expect(hold.back(own, {}) && !hold.active(), "back near the player and settled: the hold ends");
     CameraHold slow;
     slow.start(own, {}, std::array<float, 16>{});
     slow.release();
