@@ -309,6 +309,7 @@ struct State {
     // it plays, so their half shows it, and the first player's half follows them with `follow_first`,
     // starting from `last_camera1` (the game camera before the event).
     bool event_second = false;
+    unsigned event_inputs = 0u;  // for the trace: what camera_event_is_second last saw
     // When the game camera changes hands (a second player's event begins or ends), the half it moves to
     // blends from that half's own camera into it, so the game camera's swing over from the other player is
     // not seen.
@@ -543,6 +544,14 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     const bool first_special = plausible(first_mario) && guest.u32(first_mario + kMarioState) != 0u;
     const bool second_special = plausible(s.second_mario) && guest.u32(s.second_mario + kMarioState) != 0u;
     s.event_second = coop::camera_event_is_second(actor, s.second, event, second_special, first_special);
+    const unsigned inputs = (event ? 1u : 0u) | (actor == s.second ? 2u : actor == s.first ? 4u : 0u) |
+                            (second_special ? 8u : 0u) | (first_special ? 16u : 0u);
+    if (inputs != s.event_inputs) {
+        trace("camera event %d, camera on %s, special: second %d first %d (split %.2f)", event ? 1 : 0,
+              actor == s.second ? "second" : actor == s.first ? "first" : "other", second_special ? 1 : 0,
+              first_special ? 1 : 0, s.split.amount());
+        s.event_inputs = inputs;
+    }
     if (s.event_second != was) {
         trace("second player's camera event %s", s.event_second ? "begins" : "ends");
         // The half the game camera moves to starts from its own camera: the second player's as it was, or the
@@ -681,7 +690,11 @@ void move_second_player(const Guest& guest, State& s) {
         // The camera looks at the midpoint until the split and eases to the first player as it splits.
         const coop::SplitTuning tuning{};
         const float distance = coop::length(second_position - first_position);
-        s.split.update(shared_extent(guest, s, first_position, second_position), distance, tuning);
+        // While the second player's camera event plays the game camera is theirs, so it cannot tell whether
+        // both fit one picture: the screen stays as it is until the event ends.
+        if (!s.event_second) {
+            s.split.update(shared_extent(guest, s, first_position, second_position), distance, tuning);
+        }
         if (s.split.amount() == 0.0f) {
             s.follow.reset();
             s.layout.reset();
