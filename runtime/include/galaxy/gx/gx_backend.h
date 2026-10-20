@@ -627,9 +627,9 @@ private:
     // Render thread: inside GameScene::draw3D (between the scene markers).
     bool scene_phase_ = false;
     // Render thread: split screen's line from the last SplitClip marker (logical EFB pixels; zero: none),
-    // and the one in the last uploaded pixel-shader constants (physical pixels).
+    // and the one in the last uploaded vertex-shader constants (split_clip_vs_words).
     std::array<float, 3> split_clip_{};
-    std::array<float, 3> uploaded_split_clip_{};
+    std::array<std::uint32_t, 2> uploaded_split_clip_{};
     // Temporal upscaling for the current scene: perspective projections carry
     // this sub-pixel jitter (render pixels).
     bool temporal_scene_ = false;

@@ -46,7 +46,15 @@ struct VSOut {
     float4   col0     : COLOR0;
     float4   col1     : COLOR1;
     float3   uv[8]    : TEXCOORD;
+    // Split screen: clips away the other player's side of the line (shader_gen.cpp kSplitClipMember).
+    float    split_clip : SV_ClipDistance0;
 };
+
+float split_clip_distance(float4 pos) {
+    if (pad0 == 0u) return 1.0;
+    float angle = asfloat(pad0) - 16.0;
+    return cos(angle) * pos.x + sin(angle) * pos.y + asfloat(pad1) * pos.w;
+}
 
 float xfw(uint w) {
     float4 v = mtx_palette[mtx_palette_base + (w >> 2u)];
@@ -333,5 +341,6 @@ VSOut main(VSIn v) {
     [unroll] for (uint w = 0u; w < 8u; ++w) {
         o.uv[w] = uvs[w];
     }
+    o.split_clip = split_clip_distance(o.pos);
     return o;
 }

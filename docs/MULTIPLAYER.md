@@ -72,8 +72,7 @@ view matrices recalculated (`SceneFunction::executeCalcViewAndEntryList`). Viewp
 full-screen, so the game's screen-space passes (the shadow and bloom composites, which draw textures of the
 whole screen) line up. Each half's camera picture is moved to the middle of its side by shifting the
 projection's centre as the split eases in, and a `SplitClip` marker in the GX stream tells the renderer the
-line: every pixel shader drops the other side's pixels for draws over the whole screen (smaller viewports,
-such as Mario's shadow capture in a corner of the EFB, are left whole).
+line: for draws over the whole screen every vertex shader clips the other side away before rasterizing(`SV_ClipDistance0`), so nothing is written there, colour, depth or stencil (smaller viewports, such as's shadow capture in a corner of the EFB, are left whole; lines and points are not clipped).
 `GALAXY_COOP_SPLIT=0` keeps one shared screen (the camera then hands back to the first player between 1200
 and 2600 units, and the second player is brought back after two seconds past 2600).
 ## Known limits

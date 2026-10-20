@@ -11,6 +11,7 @@
 #pragma warning(pop)
 
 #include "galaxy/gx/gx_backend.h"
+#include "galaxy/gx/split_clip.h"
 #include "galaxy/gx/dependency_draw_memo.h"
 #include "galaxy/gx/dependency_range_memo.h"
 #include "galaxy/gx/dependency_page_mask.h"
@@ -6497,6 +6498,7 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
             for (unsigned i = 0; i < 3u; ++i) split_clip_[i] = (*view)[i];
             pass = static_cast<unsigned>((*view)[3]);
         }
+
         // The second half's EFB copies are its own; the game's addresses point at each half's copies while it
         // draws, and back at the first half's after.
         for (const EfbCopyParams& params : renderer_.set_efb_copy_view(pass == 2u ? 1u : 0u, texture_cache_)) {
@@ -10412,9 +10414,29 @@ ID3D12PipelineState* GxBackend::flush_draw_state(
         ? renderer_.matrix_ring().gpu_base()
         : current_matrix_palette_;
 
+    // Split screen: draws over the whole screen keep their half (SplitClip marker); smaller viewports are
+    // effects drawing into a corner of the EFB (Mario's shadow capture) and are left whole. The vertex
+    // shader clips the other side away before rasterizing (SV_ClipDistance0), so nothing is written there:
+    // colour, depth or stencil. The line, in logical EFB pixels, goes into clip space through the viewport:
+    // pad0 = its angle + 16 (0: no line), pad1 = its offset.
+    std::array<std::uint32_t, 2> clip{0u, 0u};
+    if (split_clip_[0] != 0.0f || split_clip_[1] != 0.0f || split_clip_[2] != 0.0f) {
+        const auto xf_float = [this](unsigned offset) {
+            return std::bit_cast<float>(state_.xf(static_cast<std::uint16_t>(xf::kViewportBase + offset)));
+        };
+        const float half_width = std::fabs(xf_float(0u));
+        const float half_height = std::fabs(xf_float(1u));
+        const float left = xf_float(3u) - 342.0f - half_width;
+        const float top = xf_float(4u) - 342.0f - half_height;
+        if (half_width * 2.0f >= 600.0f && left <= 1.0f) {
+            clip = split_clip_vs_words(split_clip_, half_width, half_height, left, top);
+        }
+    }
+    const bool clip_changed = clip != uploaded_split_clip_;
+
     // Upload VS constants when scalar state or fixed inline matrices change.
     if (vs_c_dirty || xf_dirty || vcd_dirty || inline_matrices_stale_ ||
-        frame_bindings_dirty_ || dirty == ~0u ||
+        frame_bindings_dirty_ || dirty == ~0u || clip_changed ||
         (history_scene_ && current_matrix_palette_ != temporal_vs_palette_va_)) {
         const auto constants_start = time_detail
             ? std::chrono::steady_clock::now()
@@ -10434,6 +10456,9 @@ ID3D12PipelineState* GxBackend::flush_draw_state(
             write_scene_vs_constants(vs_c, *reinterpret_cast<GxVsConstants*>(vs_alloc.cpu));
         }
         apply_uber_vs_key(vs_key_, *reinterpret_cast<GxVsConstants*>(vs_alloc.cpu));
+        reinterpret_cast<GxVsConstants*>(vs_alloc.cpu)->pad0 = clip[0];
+        reinterpret_cast<GxVsConstants*>(vs_alloc.cpu)->pad1 = clip[1];
+        uploaded_split_clip_ = clip;
         current_vs_constants_ = vs_alloc.gpu;
         inline_matrices_stale_ = false;
         ++stat_inline_matrix_uploads_;
@@ -10443,23 +10468,9 @@ ID3D12PipelineState* GxBackend::flush_draw_state(
         }
     }
 
-    // Split screen: draws over the whole screen keep their half (SplitClip marker); smaller viewports are
-    // effects drawing into a corner of the EFB (Mario's shadow capture) and are left whole. The line goes
-    // to the pixel shader in physical pixels: ztex_params.zw and uber_ps_header.w.
-    std::array<float, 3> clip{0.0f, 0.0f, 0.0f};
-    if (split_clip_[0] != 0.0f || split_clip_[1] != 0.0f || split_clip_[2] != 0.0f) {
-        const float half_width = std::fabs(std::bit_cast<float>(state_.xf(xf::kViewportBase)));
-        const float x_origin = std::bit_cast<float>(state_.xf(static_cast<std::uint16_t>(xf::kViewportBase + 3u))) - 342.0f;
-        if (half_width * 2.0f >= 600.0f && x_origin - half_width <= 1.0f) {
-            const float scale = static_cast<float>(renderer_.efb_scale());
-            clip = {split_clip_[0] / scale, split_clip_[1] / scale, split_clip_[2]};
-        }
-    }
-    const bool clip_changed = clip != uploaded_split_clip_;
-
     // Upload PS constants when TEV stage config / fog / alpha / tex dims change.
     if (tev_dirty || tev_c_dirty || tex_dirty || frame_bindings_dirty_ ||
-        dirty == ~0u || clip_changed) {
+        dirty == ~0u) {
         const auto constants_start = time_detail
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
@@ -10467,10 +10478,6 @@ ID3D12PipelineState* GxBackend::flush_draw_state(
         fill_ps_constants(state_, ps_c);
         ps_c.ztex_params[1] = 1.0f / static_cast<float>(renderer_.efb_scale());
         apply_uber_ps_key(ps_key_, ps_c);
-        ps_c.ztex_params[2] = clip[0];
-        ps_c.ztex_params[3] = clip[1];
-        ps_c.uber_ps_header[3] = std::bit_cast<std::uint32_t>(clip[2]);
-        uploaded_split_clip_ = clip;
 
         UploadRing::Allocation ps_alloc =
             renderer_.constant_ring().allocate(sizeof(GxPsConstants), 256u);

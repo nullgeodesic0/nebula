@@ -340,8 +340,6 @@ cbuffer GxPsConstants : register(b1) {
     uint4    ind_cmd[4];
     int4     ind_mtx[6];
     uint4    ind_misc;
-    // Uber shader's header; .w carries split screen's line offset (see main).
-    uint4    uber_ps_header;
 };
 Texture2D    tex[8] : register(t0);
 SamplerState samp[8] : register(s0);
@@ -366,6 +364,18 @@ static constexpr const char* kVsMotionConstantMembers = R"HLSL(    float4   moti
 static constexpr const char* kMotionInterpolants =
     "    float4   mv_cur    : TEXCOORD12;\n"
     "    float4   mv_prev   : TEXCOORD13;\n";
+
+// Split screen (coop_guest.cpp): the vertex output's last member clips away the other player's side of a
+// line before rasterizing, so nothing there is written (colour, depth or stencil). GxVsConstants pad0 holds
+// the line's angle + 16 (0: no line) and pad1 its offset, in clip space (GxBackend::flush_constants).
+static constexpr const char* kSplitClipMember = "    float    split_clip : SV_ClipDistance0;\n";
+static constexpr const char* kSplitClipFunction = R"HLSL(
+float split_clip_distance(float4 pos) {
+    if (pad0 == 0u) return 1.0;
+    float angle = asfloat(pad0) - 16.0;
+    return cos(angle) * pos.x + sin(angle) * pos.y + asfloat(pad1) * pos.w;
+}
+)HLSL";
 
 static std::string insert_before_close(const char* text, const char* members, bool last) {
     std::string out(text);
@@ -818,11 +828,14 @@ std::string ShaderGenerator::generate_vs(const VertexShaderKey& key) const {
     const bool motion = (key.flags & kVsKeyMotion) != 0u;
     if (motion) {
         s << insert_before_close(kVsConstantsDef, kVsMotionConstantMembers, false);
-        s << insert_before_close(ppl ? kVsStructsPpl : kVsStructs, kMotionInterpolants, true);
+        const std::string structs =
+            insert_before_close(ppl ? kVsStructsPpl : kVsStructs, kMotionInterpolants, true);
+        s << insert_before_close(structs.c_str(), kSplitClipMember, true);
     } else {
         s << kVsConstantsDef;
-        s << (ppl ? kVsStructsPpl : kVsStructs);
+        s << insert_before_close(ppl ? kVsStructsPpl : kVsStructs, kSplitClipMember, true);
     }
+    s << kSplitClipFunction;
 
     const bool dual_tex = (key.flags & 0x04u) != 0u;
 
@@ -1172,7 +1185,8 @@ float xfw(uint w) {
         }
         s << "    }\n";
     }
-    s << "\n    return o;\n}\n";
+    s << "\n    o.split_clip = split_clip_distance(o.pos);\n";
+    s << "    return o;\n}\n";
 
     return s.str();
 }
@@ -1255,8 +1269,6 @@ std::string ShaderGenerator::generate_ps(const PixelShaderKey& key) const {
         s << "float4 main(PSIn pin) : SV_Target0 {\n";
     }
 
-    // Split screen: the other player's side of the line (zero: none).
-    s << "    if (dot(ztex_params.zw, pin.pos.xy) + asfloat(uber_ps_header.w) < 0.0) discard;\n";
     // TEV working registers: PREV, REG0, REG1, REG2.
     // Dolphin keeps these as int4s. A/B/C inputs are masked to 8-bit, D stays
     // signed/raw, and unclamped outputs stay in the -1024..1023 range.

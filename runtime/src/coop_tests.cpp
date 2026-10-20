@@ -1,4 +1,5 @@
 #include "galaxy/coop.h"
+#include "galaxy/gx/split_clip.h"
 
 #include <cmath>
 #include <iostream>
@@ -295,6 +296,30 @@ bool test_camera_player() {
     return ok;
 }
 
+// The renderer's form of the line: the vertex shader's clip distance in clip space.
+bool test_split_clip_vs_words() {
+    bool ok = true;
+    const auto distance = [](const std::array<std::uint32_t, 2>& words, float x_ndc, float y_ndc) {
+        const float angle = std::bit_cast<float>(words[0]) - 16.0f;
+        const float w = 2.0f;  // any positive w: clip space is NDC times w
+        return std::cos(angle) * x_ndc * w + std::sin(angle) * y_ndc * w + std::bit_cast<float>(words[1]) * w;
+    };
+    // Keep x >= 320 of a 640 x 456 screen.
+    const auto right = galaxy::gx::split_clip_vs_words({1.0f, 0.0f, -320.0f}, 320.0f, 228.0f, 0.0f, 0.0f);
+    ok &= expect(right[0] != 0u, "a line has words");
+    ok &= expect(distance(right, 0.5f, 0.0f) > 0.0f && distance(right, -0.5f, 0.0f) < 0.0f,
+                 "right of the middle kept, left clipped");
+    ok &= expect(std::fabs(distance(right, 0.0f, 0.3f)) < 1e-4f, "the line runs through the middle");
+    // Keep y >= 300 (pixels run down; NDC y up): the bottom.
+    const auto bottom = galaxy::gx::split_clip_vs_words({0.0f, 1.0f, -300.0f}, 320.0f, 228.0f, 0.0f, 0.0f);
+    const float y_ndc_300 = 1.0f - 300.0f / 228.0f;
+    ok &= expect(distance(bottom, 0.0f, y_ndc_300 - 0.1f) > 0.0f && distance(bottom, 0.0f, y_ndc_300 + 0.1f) < 0.0f,
+                 "below the line kept, above clipped");
+    const auto none = galaxy::gx::split_clip_vs_words({0.0f, 0.0f, 0.0f}, 320.0f, 228.0f, 0.0f, 0.0f);
+    ok &= expect(none[0] == 0u && none[1] == 0u, "no line: no words (nothing clipped)");
+    return ok;
+}
+
 bool test_leash() {
     bool ok = true;
     LeashTimer leash;
@@ -322,6 +347,7 @@ int main() {
     passed &= test_body_push();
     passed &= test_split_screen();
     passed &= test_camera_player();
+    passed &= test_split_clip_vs_words();
     passed &= test_leash();
     if (!passed) {
         return 1;
