@@ -38,16 +38,19 @@ spin is the shake binding or a real shake.
   game's own player code each frame with their own controller.
 - The players bump into each other: when their bodies (50 units round, 150 tall) overlap, each is pushed
   half the overlap apart through the game's own `Mario::push`, so walls and floors still hold them.
-- The camera looks at the point between the players. Past 1600 units apart the screen splits (below).
+- The camera looks at the point between the players. When one is about to leave the picture the screen splits
+  (below).
   More than 15000 apart for two seconds, the second player is brought back to the first.
 
 ## Split screen
 
-Past 1600 units apart the screen splits, Lego Indiana Jones 2 style: the line between the halves runs
+When a player is about to leave the shared picture (85% of the way from its middle to an edge, or 6000 units
+apart) the screen splits, Lego Indiana Jones 2 style: the line between the halves runs
 through the middle of the screen, square to where the second player is from the first on screen, so each
 player takes the side they are on (left and right, top and bottom, or any angle between), and the line turns
-smoothly as they move around each other. It joins again below 1100 (the gap keeps it from flickering at one
-distance). The change takes 0.6 s and is seamless:
+smoothly as they move around each other; a black line between the halves fades in with the split. It joins
+again when both are back within 60% of the shared picture (the gap keeps it from flickering). The change takes
+1.25 s, eased to be still at both ends, and is seamless:
 
 1. At the split each half shows exactly its part of the shared picture, so nothing on screen moves.
 2. Each half then slides to centre on its own player: the first player's camera eases from the midpoint to

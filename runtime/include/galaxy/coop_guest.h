@@ -24,8 +24,9 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
 
 // Where split screen's line goes into the GX stream: native_runtime.cpp flushes the gather pipe and attaches a
 // SplitClip marker (gx_d3d12.h attach_split_clip) with `plane`, in logical EFB pixels, and `pass` (1 or 2);
-// zero and pass 0 clear it.
-using SplitClipSink = void (*)(void* user, const float plane[3], unsigned pass);
+// zero and pass 0 clear it. `separator`: the black line between the halves (a, b, c as `plane`, opacity),
+// drawn by the pass 0 marker after the second half.
+using SplitClipSink = void (*)(void* user, const float plane[3], unsigned pass, const float separator[4]);
 void coop_set_split_clip_sink(SplitClipSink sink, void* user) noexcept;
 
 // The second player's controller, published by the input thread and read once a game frame.

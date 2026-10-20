@@ -33563,11 +33563,11 @@ int wmain(int argc, wchar_t** argv) {
     load_anim_neutral_joints(state, paths.content_root);
     // Split screen's line (coop_guest.cpp) goes into the GX stream where the game is, as the scene markers do.
     galaxy::coop_set_split_clip_sink(
-        [](void* user, const float plane[3], unsigned pass) {
+        [](void* user, const float plane[3], unsigned pass, const float separator[4]) {
             auto& runtime = *static_cast<RuntimeState*>(user);
             if (runtime.address_space == nullptr) return;
             runtime.address_space->flush_wgpipe_gather_tail_for_frame();
-            galaxy::gx::attach_split_clip(plane, pass, runtime.address_space->gx_fifo_data().size());
+            galaxy::gx::attach_split_clip(plane, pass, separator, runtime.address_space->gx_fifo_data().size());
         },
         &state);
     state.jaudio_mixer.set_voice_override(

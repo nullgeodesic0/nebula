@@ -10,6 +10,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 
 namespace galaxy::coop {
@@ -221,8 +222,12 @@ struct CameraTuning {
 // With split screen the camera looks at the midpoint until the split, then eases to the first player as
 // the screen splits (SplitState).
 struct SplitTuning {
-    float split_at = 1600.0f;  // farther apart: split
-    float merge_at = 1100.0f;  // closer again: one screen
+    // The screen splits when a player is about to leave the shared picture: past `split_extent` of the way
+    // from its middle to its edge (shared_view_extent), and joins again below `merge_extent`. Farther apart
+    // than `split_at` it splits whatever the picture.
+    float split_extent = 0.85f;
+    float merge_extent = 0.6f;
+    float split_at = 6000.0f;
     float split_warp = 15000.0f;
     // The second player's camera: `distance` behind and `height` above the point it looks at, which is
     // `look_height` above the player; it trails the player (a lazy follow) and eases by `follow` a frame.
@@ -249,13 +254,17 @@ struct SplitTuning {
 // - Joining runs the same backwards: the halves meet in one picture before the second draw stops.
 class SplitState {
 public:
-    static constexpr unsigned kTransitionFrames = 36u;  // 0.6 s
+    static constexpr unsigned kTransitionFrames = 75u;  // 1.25 s
 
-    // The split amount after this frame, 0..1.
-    float update(float distance, const SplitTuning& tuning = {}) noexcept {
-        if (std::isfinite(distance)) {
-            if (!split_ && distance >= tuning.split_at) split_ = true;
-            else if (split_ && distance < tuning.merge_at) split_ = false;
+    // The split amount after this frame, 0..1. `extent`: how far towards the edge of the shared picture the
+    // players are (shared_view_extent); `distance` between them.
+    float update(float extent, float distance, const SplitTuning& tuning = {}) noexcept {
+        const bool far = std::isfinite(distance) && distance >= tuning.split_at;
+        if (std::isfinite(extent)) {
+            if (!split_ && (extent >= tuning.split_extent || far)) split_ = true;
+            else if (split_ && extent < tuning.merge_extent && !far) split_ = false;
+        } else if (far) {
+            split_ = true;
         }
         const float step = 1.0f / static_cast<float>(kTransitionFrames);
         amount_ = split_ ? std::min(1.0f, amount_ + step) : std::max(0.0f, amount_ - step);
@@ -264,8 +273,12 @@ public:
     [[nodiscard]] bool split() const noexcept { return split_; }
     // 0: one screen; 1: fully split.
     [[nodiscard]] float amount() const noexcept { return amount_; }
-    // The amount eased (smoothstep), for the cameras and projections.
-    [[nodiscard]] float eased() const noexcept { return amount_ * amount_ * (3.0f - 2.0f * amount_); }
+    // The amount eased (smootherstep: still at both ends, so the halves leave and meet the shared picture
+    // without a jolt), for the cameras and projections.
+    [[nodiscard]] float eased() const noexcept {
+        const float t = amount_;
+        return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+    }
     void reset() noexcept { *this = SplitState{}; }
 
 private:
@@ -519,6 +532,26 @@ inline constexpr float kSteerDeadZone = 0.2f;
     return steer;
 }
 
+// How far towards the edge of a shared picture the players would be: the camera turned as `camera` is,
+// looking at their midpoint from `depth` away, with vertical field of view `fovy_degrees` and width:height
+// `aspect`. 0 at the middle, 1 at the edge (the larger of across and up); infinity when it cannot frame them.
+[[nodiscard]] inline float shared_view_extent(const CameraMatrices& camera, Vec3 first, Vec3 second, float depth,
+                                              float fovy_degrees, float aspect) noexcept {
+    const Vec3 half = (second - first) * 0.5f;
+    // The camera's rotation (the view matrix without its translation).
+    const float x = camera.view[0] * half.x + camera.view[1] * half.y + camera.view[2] * half.z;
+    const float y = camera.view[4] * half.x + camera.view[5] * half.y + camera.view[6] * half.z;
+    const float z = camera.view[8] * half.x + camera.view[9] * half.y + camera.view[10] * half.z;
+    const float ty = std::tan(fovy_degrees * 0.5f * 3.14159265f / 180.0f);
+    const float tx = ty * aspect;
+    // The nearer player is |z| closer to the camera.
+    const float near_depth = depth - std::fabs(z);
+    if (!std::isfinite(near_depth) || near_depth <= 1.0f || !(tx > 0.0f) || !(ty > 0.0f)) {
+        return std::numeric_limits<float>::infinity();
+    }
+    return std::max(std::fabs(x) / (near_depth * tx), std::fabs(y) / (near_depth * ty));
+}
+
 // Whether a sphere can be seen from a camera (view as look_at's) with vertical field of view `fovy_degrees`,
 // width:height `aspect` and far plane `far_z`. Conservative: the sphere is tested against widened planes.
 [[nodiscard]] inline bool sphere_in_view(const std::array<float, 12>& view, Vec3 centre, float radius, float fovy_degrees,
@@ -597,12 +630,14 @@ struct BodyTuning {
     return second != 0u && current == second ? first : current;
 }
 
-// A camera event the second player set off: the camera follows them while an event camera plays. Then their
-// half shows it (split screen) and the camera is left on them until it ends; after it, camera_player puts
-// the camera back on the first player.
+// A camera event the second player set off, while an event camera plays: their own move pointed the camera
+// at them, or an object started it for them (a launch star, a warp pad: the camera then points at the first
+// player, but only the second is in a special state, flying or warping). Their half shows it (split screen)
+// and the camera follows them until it ends; after it, camera_player puts it back on the first player.
 [[nodiscard]] constexpr bool camera_event_is_second(std::uint32_t current, std::uint32_t second,
-                                                    bool event_camera_active) noexcept {
-    return event_camera_active && second != 0u && current == second;
+                                                    bool event_camera_active, bool second_special,
+                                                    bool first_special) noexcept {
+    return event_camera_active && second != 0u && (current == second || (second_special && !first_special));
 }
 
 // Counts frames out of range; true on the frame the second player should be brought back.

@@ -6488,6 +6488,9 @@ void GxBackend::take_attached_fifo_markers(FrameChunk& chunk, std::size_t fifo_s
     producer_fifo_marker_view_mask_ = 0;
 }
 
+// Split screen's separator: 1.5 logical EFB pixels each side of the line (3 wide).
+constexpr float kSplitLineHalfWidth = 1.5f;
+
 void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* view) {
     flush_pending_draw_batch();
     if (marker == FifoMarker::SplitClip) {
@@ -6497,6 +6500,10 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
         if (view != nullptr) {
             for (unsigned i = 0; i < 3u; ++i) split_clip_[i] = (*view)[i];
             pass = static_cast<unsigned>((*view)[3]);
+            // After the second half: the black separator between the halves, faded in with the split.
+            if (pass == 0u && (*view)[7] > 0.0f) {
+                renderer_.draw_split_line({(*view)[4], (*view)[5], (*view)[6]}, kSplitLineHalfWidth, (*view)[7]);
+            }
         }
 
         // The second half's EFB copies are its own; the game's addresses point at each half's copies while it

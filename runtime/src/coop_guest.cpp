@@ -102,6 +102,7 @@ constexpr std::uint32_t kCameraTrans = 0x2F4u;  // MarioActor::mCameraTrans: wha
 constexpr std::uint32_t kMarioSideVec = 0x310u;  // Mario::mSideVec
 constexpr std::uint32_t kMarioUpVec = 0x1FCu;    // Mario::_1FC, Mario::getUpVec()
 constexpr std::uint32_t kMarioFrontVec = 0x208u;  // Mario::mFrontVec
+constexpr std::uint32_t kMarioState = 0x97Cu;     // Mario: MarioState* of a special state, 0 in ordinary play
 // ShadowController::_67 (u8): the shadow is past the far clip from the camera (updateFarClipping).
 constexpr std::uint32_t kShadowFarClipped = 0x67u;
 
@@ -350,9 +351,10 @@ SplitClipSinkSlot& split_clip_sink() {
     static SplitClipSinkSlot slot;
     return slot;
 }
-void send_split_clip(const std::array<float, 3>& plane, unsigned pass) {
+void send_split_clip(const std::array<float, 3>& plane, unsigned pass,
+                     const std::array<float, 4>& separator = {0.0f, 0.0f, 0.0f, 0.0f}) {
     const SplitClipSinkSlot& slot = split_clip_sink();
-    if (slot.sink != nullptr) slot.sink(slot.user, plane.data(), pass);
+    if (slot.sink != nullptr) slot.sink(slot.user, plane.data(), pass, separator.data());
 }
 
 std::uint32_t camera_context(const Guest& guest) {
@@ -530,9 +532,19 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     const std::uint32_t actor = guest.u32(target + 0x10u);
     const bool event = (guest.call(fn::kIsEventCameraActive) & 0xFFu) != 0u;
     const bool was = s.event_second;
-    s.event_second = coop::camera_event_is_second(actor, s.second, event);
+    // An event set off by the second player's own move points the camera at them; one an object starts for
+    // them (a launch star, a warp pad) points it at the first player, but then only the second player is
+    // in a special state (flying, warping).
+    const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
+    const bool first_special = plausible(first_mario) && guest.u32(first_mario + kMarioState) != 0u;
+    const bool second_special = plausible(s.second_mario) && guest.u32(s.second_mario + kMarioState) != 0u;
+    s.event_second = coop::camera_event_is_second(actor, s.second, event, second_special, first_special);
     if (s.event_second != was) trace("second player's camera event %s", s.event_second ? "begins" : "ends");
-    if (s.event_second) return;
+    if (s.event_second) {
+        // The event's camera follows the second player while it plays.
+        if (actor != s.second) guest.set_u32(target + 0x10u, s.second);
+        return;
+    }
     const std::uint32_t kept = coop::camera_player(actor, s.first, s.second);
     if (kept == actor) return;
     guest.set_u32(target + 0x10u, kept);
@@ -581,6 +593,24 @@ void update_second_camera(const Guest& guest, State& s, coop::Vec3 first_positio
     const coop::Vec3 a = coop::transform_point(first_camera.view, first_position);
     const coop::Vec3 b = coop::transform_point(first_camera.view, second_position);
     s.layout.update(b.x - a.x, a.y - b.y);  // screen y runs down
+}
+
+// How far towards the edge of a shared picture the players would be, with the game camera's turn and
+// distance (from the midpoint it looks at while the screen is one, from the first player once split).
+float shared_extent(const Guest& guest, const State& s, coop::Vec3 first_position, coop::Vec3 second_position) {
+    const std::uint32_t context = camera_context(guest);
+    if (context == 0u) return 0.0f;
+    const coop::CameraMatrices camera = read_camera(guest, context);
+    if (!finite(camera.view) || !finite(camera.inverse)) return 0.0f;
+    float fovy = guest.f32(context + camera::kFovy);
+    float aspect = guest.f32(context + camera::kAspect);
+    if (!std::isfinite(fovy) || fovy <= 1.0f || fovy >= 170.0f) fovy = s.fovy;
+    if (!std::isfinite(aspect) || aspect <= 0.1f) aspect = s.aspect;
+    const coop::CameraPose pose = coop::pose_of(camera.inverse);
+    const coop::Vec3 looked_at =
+        s.split.split() ? first_position : first_position + (second_position - first_position) * 0.5f;
+    const float depth = coop::dot(pose.forward, looked_at - pose.eye);
+    return coop::shared_view_extent(camera, first_position, second_position, depth, fovy, aspect);
 }
 
 // While the second player's camera event plays (split), the first player's half follows them from where
@@ -642,7 +672,7 @@ void move_second_player(const Guest& guest, State& s) {
         // The camera looks at the midpoint until the split and eases to the first player as it splits.
         const coop::SplitTuning tuning{};
         const float distance = coop::length(second_position - first_position);
-        s.split.update(distance, tuning);
+        s.split.update(shared_extent(guest, s, first_position, second_position), distance, tuning);
         if (s.split.amount() == 0.0f) {
             s.follow.reset();
             s.layout.reset();
@@ -751,8 +781,10 @@ void finish_split_draw(const Guest& guest, State& s) {
     guest.call(fn::kCalcViewAndEntry);
     send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), 2u);
     guest.call(fn::kGameSceneDraw3D, s.draw_scene);
-    // The whole screen again for the 2D layer (HUD).
-    send_split_clip({0.0f, 0.0f, 0.0f}, 0u);
+    // The whole screen again for the 2D layer (HUD), and the black line between the halves, fading in with
+    // the split.
+    const std::array<float, 3> line = s.layout.plane(true, s.screen_width, s.screen_height);
+    send_split_clip({0.0f, 0.0f, 0.0f}, 0u, {line[0], line[1], line[2], s.split.eased()});
     write_camera(guest, context, s.camera1);
     write_floats(guest, context + camera::kProjection, s.projection);
     guest.call(fn::kLoadViewMtx);

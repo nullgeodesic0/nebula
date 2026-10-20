@@ -149,16 +149,33 @@ bool test_split_screen() {
     bool ok = true;
     const SplitTuning tuning{};
     SplitState split;
-    ok &= expect(split.update(tuning.split_at - 1.0f) == 0.0f, "close: one screen");
+    ok &= expect(split.update(tuning.split_extent - 0.05f, 1000.0f) == 0.0f, "both well in the picture: one screen");
     float amount = 0.0f;
-    for (unsigned frame = 0; frame < SplitState::kTransitionFrames; ++frame) amount = split.update(tuning.split_at + 10.0f);
-    ok &= expect(near(amount, 1.0f) && split.split(), "far apart: fully split after the transition");
-    ok &= expect(near(split.update(tuning.merge_at + 10.0f), 1.0f), "between the thresholds: stays split");
-    (void)split.update(tuning.merge_at - 10.0f);
-    ok &= expect(!split.split() && split.amount() < 1.0f && split.amount() > 0.0f, "close again: joining, gradually");
+    for (unsigned frame = 0; frame < SplitState::kTransitionFrames; ++frame) {
+        amount = split.update(tuning.split_extent + 0.01f, 1000.0f);
+    }
+    ok &= expect(near(amount, 1.0f) && split.split(), "a player about to leave the picture: fully split after the transition");
+    ok &= expect(near(split.update(tuning.merge_extent + 0.05f, 1000.0f), 1.0f), "between the thresholds: stays split");
+    (void)split.update(tuning.merge_extent - 0.05f, 1000.0f);
+    ok &= expect(!split.split() && split.amount() < 1.0f && split.amount() > 0.0f, "back in the picture: joining, gradually");
     split.reset();
-    (void)split.update(tuning.split_at + 1.0f);
+    (void)split.update(0.1f, tuning.split_at + 1.0f);
+    ok &= expect(split.split(), "very far apart: split whatever the picture");
     ok &= expect(split.amount() > 0.0f && split.eased() < split.amount(), "the transition starts gently");
+    SplitState ends;
+    for (unsigned frame = 0; frame + 1u < SplitState::kTransitionFrames; ++frame) (void)ends.update(1.0f, 0.0f);
+    ok &= expect(ends.eased() > ends.amount() && ends.eased() < 1.0f, "and ends gently");
+
+    // How far towards the edge of a shared picture: players across the screen of a camera looking down -z.
+    const CameraMatrices shared = look_at({0.0f, 0.0f, 1000.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
+    const float tan_half = std::tan(45.0f * 0.5f * 3.14159265f / 180.0f);
+    const float edge = shared_view_extent(shared, {-1000.0f * tan_half, 0.0f, 0.0f}, {1000.0f * tan_half, 0.0f, 0.0f},
+                                          1000.0f, 45.0f, 1.0f);
+    ok &= expect(near(edge, 1.0f, 0.01f), "players at the picture's edges: extent 1");
+    ok &= expect(shared_view_extent(shared, {-100.0f, 0.0f, 0.0f}, {100.0f, 0.0f, 0.0f}, 1000.0f, 45.0f, 2.0f) < 0.2f,
+                 "close together: near the middle");
+    ok &= expect(shared_view_extent(shared, {0.0f, 0.0f, -1500.0f}, {0.0f, 0.0f, 1500.0f}, 1000.0f, 45.0f, 1.0f) > 1.0f,
+                 "one behind the camera: cannot be framed");
 
     // Viewports stay full-screen; the camera's picture moves into its half. At the split it does not move,
     // so each half shows its own side of the shared picture; split, the camera's centre is the half's.
@@ -289,10 +306,15 @@ bool test_camera_player() {
     ok &= expect(camera_player(first, first, second) == first, "the first player stays");
     ok &= expect(camera_player(0x80C00000u, first, second) == 0x80C00000u, "an event's own target is left alone");
     ok &= expect(camera_player(0u, first, 0u) == 0u, "no second player: nothing changes");
-    ok &= expect(camera_event_is_second(second, second, true), "the second player's warp camera stays theirs while it plays");
-    ok &= expect(!camera_event_is_second(second, second, false), "and the camera is the first player's once it ends");
-    ok &= expect(!camera_event_is_second(first, second, true), "an event on the first player is theirs");
-    ok &= expect(!camera_event_is_second(0u, 0u, true), "no second player: no swap");
+    ok &= expect(camera_event_is_second(second, second, true, false, false),
+                 "the second player's warp camera stays theirs while it plays");
+    ok &= expect(!camera_event_is_second(second, second, false, true, false),
+                 "and the camera is the first player's once it ends");
+    ok &= expect(!camera_event_is_second(first, second, true, false, false), "an event on the first player is theirs");
+    ok &= expect(camera_event_is_second(first, second, true, true, false),
+                 "a launch star started for the second player (only they are flying) is theirs");
+    ok &= expect(!camera_event_is_second(first, second, true, true, true), "both in special states: the first player's");
+    ok &= expect(!camera_event_is_second(0u, 0u, true, true, false), "no second player: no swap");
     return ok;
 }
 

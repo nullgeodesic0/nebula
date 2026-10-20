@@ -574,6 +574,9 @@ public:
     // Split screen: view 1 while the second player's half is drawn, else 0. Re-registers that view's
     // latest copies with `textures`; returns the copies whose alias changed (their bindings are stale).
     [[nodiscard]] std::vector<EfbCopyParams> set_efb_copy_view(unsigned view, TextureCache& textures);
+    // Split screen: the black separator along `plane` (logical EFB pixels), `half_width` logical pixels each
+    // side, at `opacity`, over the current EFB.
+    void draw_split_line(const std::array<float, 3>& plane, float half_width, float opacity);
 
     // Stretch-blit `source` to the backbuffer. A null/invalid source is a
     // runtime bug: callers must keep the last valid swap-chain image instead
@@ -1269,6 +1272,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> motion_debug_root_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_debug_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> clear_alpha_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> split_line_root_sig_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> split_line_pipeline_;
 
     // Synchronous GXPeekARGB/GXPeekZ bridge. Peeks execute on the render
     // thread through a tiny 1x1 conversion target and readback buffer, so

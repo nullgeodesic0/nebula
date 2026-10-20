@@ -2741,6 +2741,15 @@ static constexpr char kClearPs[] =
     "cbuffer C:register(b0){float4 clear_color;};"
     "float4 main():SV_Target{return clear_color;}";
 
+// Split screen's separator: black over a band around the line a*x + b*y + c = 0 (physical pixels, a and b
+// a unit normal), line_style.x its half width, line_style.y its opacity; one pixel of antialiasing.
+static constexpr char kSplitLinePs[] =
+    "cbuffer C:register(b0){float4 line_plane;float4 line_style;};"
+    "float4 main(float4 pos:SV_Position):SV_Target{"
+    " float d=abs(dot(line_plane.xy,pos.xy)+line_plane.z);"
+    " return float4(0,0,0,saturate(line_style.x+0.5-d)*line_style.y);"
+    "}";
+
 // EFB-copy conversion pixel shader. Operation order on hardware: quantize source samples to
 // bytes -> integer 3-row filter -> gamma -> optional RGB-to-YUV conversion -> destination-format
 // channel mapping. The filter applies to color and packed depth RGB alike; alpha is always the
@@ -4364,7 +4373,66 @@ bool RendererD3D12::create_clear_pipeline() {
         D3D12_COLOR_WRITE_ENABLE_ALPHA;
     d3d_check(device_->CreateGraphicsPipelineState(
         &pd, IID_PPV_ARGS(&clear_alpha_pipeline_)), "CreateClearAlphaPSO");
+
+    // Split screen's separator line: eight constants, blended over the colour.
+    D3D12_ROOT_PARAMETER line_param = param;
+    line_param.Constants.Num32BitValues = 8;
+    rsd.pParameters = &line_param;
+    ComPtr<ID3DBlob> line_blob;
+    d3d_check(D3D12SerializeRootSignature(
+        &rsd, D3D_ROOT_SIGNATURE_VERSION_1, &line_blob, &err),
+        "SerializeSplitLineRS");
+    d3d_check(device_->CreateRootSignature(
+        0, line_blob->GetBufferPointer(), line_blob->GetBufferSize(),
+        IID_PPV_ARGS(&split_line_root_sig_)), "CreateSplitLineRS");
+    const ComPtr<ID3DBlob> line_ps =
+        compile_hlsl(kSplitLinePs, sizeof(kSplitLinePs) - 1, "ps_5_1", "main");
+    pd.pRootSignature = split_line_root_sig_.Get();
+    pd.PS = {line_ps->GetBufferPointer(), line_ps->GetBufferSize()};
+    auto& blend = pd.BlendState.RenderTarget[0];
+    blend.BlendEnable = TRUE;
+    blend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ZERO;
+    blend.DestBlendAlpha = D3D12_BLEND_ONE;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTargetWriteMask =
+        D3D12_COLOR_WRITE_ENABLE_RED |
+        D3D12_COLOR_WRITE_ENABLE_GREEN |
+        D3D12_COLOR_WRITE_ENABLE_BLUE;
+    d3d_check(device_->CreateGraphicsPipelineState(
+        &pd, IID_PPV_ARGS(&split_line_pipeline_)), "CreateSplitLinePSO");
     return true;
+}
+
+void RendererD3D12::draw_split_line(const std::array<float, 3>& plane, float half_width, float opacity) {
+    if (!split_line_pipeline_ || opacity <= 0.0f) return;
+    const float length = std::sqrt(plane[0] * plane[0] + plane[1] * plane[1]);
+    if (!(length > 1e-6f)) return;
+    // The line in logical EFB pixels to the current target's physical pixels (the output EFB after the
+    // scene, at its own scale), with a unit normal so the shader's distance is in pixels.
+    const float scale = static_cast<float>(efb_scale_);
+    const float constants[8] = {
+        plane[0] / length / scale, plane[1] / length / scale, plane[2] / length, 0.0f,
+        half_width * scale, std::clamp(opacity, 0.0f, 1.0f), 0.0f, 0.0f};
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = efb_rtv_;
+    command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    bound_rt_aux_ = 0u;
+    const LONG efb_w = static_cast<LONG>(kEfbWidth * efb_scale_);
+    const LONG efb_h = static_cast<LONG>(kEfbHeight * efb_scale_);
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(efb_w), static_cast<float>(efb_h), 0.0f, 1.0f};
+    const D3D12_RECT rect{0, 0, efb_w, efb_h};
+    command_list_->RSSetViewports(1, &vp);
+    command_list_->RSSetScissorRects(1, &rect);
+    command_list_->SetGraphicsRootSignature(split_line_root_sig_.Get());
+    command_list_->SetPipelineState(split_line_pipeline_.Get());
+    command_list_->SetGraphicsRoot32BitConstants(0, 8, constants, 0);
+    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    command_list_->DrawInstanced(3, 1, 0, 0);
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    invalidate_gx_bindings();
+    bind_efb(nullptr);
 }
 
 // ---------------------------------------------------------------------------
