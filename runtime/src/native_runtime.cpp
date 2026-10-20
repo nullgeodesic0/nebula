@@ -24111,6 +24111,17 @@ void call_guest_impl_body(
         coop_call_intercept(state, guest_address, resolved_function, context, memory)) {
         return;
     }
+    // A failed JKRHeap allocation calls the heap error handler through a function pointer (Galaxy's
+    // HeapMemoryWatcher::memoryErrorCallback, or JSystem's default): log it, since the game carries on with a
+    // null pointer and fails later somewhere unrelated.
+    if (guest_address == 0x8039EF50u || guest_address == 0x80409AB8u) {
+        static unsigned logged = 0u;
+        if (logged++ < 32u) {
+            std::cerr << "[heap] allocation failed: heap=" << hexadecimal(context->gpr[3])
+                      << " size=" << context->gpr[4] << " align=" << static_cast<std::int32_t>(context->gpr[5])
+                      << " lr=" << hexadecimal(context->lr) << '\n';
+        }
+    }
     PreparedGuestSetCurrentContext prepared_set_current_context{};
     // Exact MoviePlayerSimple quad draw and stop-owned wrapper boundaries.
     // Original bodies and timing execute normally. The marker travels with
