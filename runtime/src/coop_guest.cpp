@@ -67,6 +67,7 @@ constexpr std::uint32_t kLoadViewMtx = 0x803C7394u;         // MR::loadViewMtx()
 constexpr std::uint32_t kSetDefaultViewportAndScissor = 0x803CA5F4u;  // MR::setDefaultViewportAndScissor()
 constexpr std::uint32_t kGetCameraDirector = 0x8009B08Cu;   // MR::getCameraDirector()
 constexpr std::uint32_t kIsEventCameraActive = 0x803C799Cu;  // MR::isEventCameraActive()
+constexpr std::uint32_t kResetCameraMan = 0x803C7860u;       // MR::resetCameraMan(): reset at the next camera move
 constexpr std::uint32_t kGetFrameBufferWidth = 0x802B5140u;   // MR::getFrameBufferWidth()
 constexpr std::uint32_t kGetFrameBufferHeight = 0x8034AFB0u;  // MR::getFrameBufferHeight()
 // MR::getFirstPolyOnLineToMap(TVec3f* hit, Triangle*, const TVec3f& start, const TVec3f& direction): the
@@ -566,7 +567,10 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     const std::uint32_t kept = coop::camera_player(actor, s.first, s.second);
     if (kept == actor) return;
     guest.set_u32(target + 0x10u, kept);
-    trace("camera target was the second player (%08X): back to the first (%08X)", actor, kept);
+    // The game camera was following the second player (and their camera area): set it up behind the first
+    // player at once rather than travelling back across the level (CameraHandover eases the half into it).
+    guest.call(fn::kResetCameraMan);
+    trace("camera target was the second player (%08X): back to the first (%08X), camera reset", actor, kept);
 }
 
 // While split, after both players moved: the second player's own camera (it trails them, turned and raised
