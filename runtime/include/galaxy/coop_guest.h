@@ -20,5 +20,6 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
 
 // The second player's controller, published by the input thread and read once a game frame.
 void coop_publish_partner_input(const coop::PartnerInput& input) noexcept;
+[[nodiscard]] coop::PartnerInput coop_partner_input();
 
 }  // namespace galaxy

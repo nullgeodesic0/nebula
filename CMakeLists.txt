@@ -518,6 +518,7 @@ target_link_libraries(galaxy_jaudio_mixer_tests PRIVATE galaxy_jaudio_mixer)
 add_library(galaxy_native_host STATIC
     runtime/src/native_host.cpp
     runtime/src/controller_hid.cpp
+    runtime/src/coop_input.cpp
     runtime/src/flat_guest_memory.cpp)
 target_link_libraries(
     galaxy_native_host
@@ -546,6 +547,7 @@ endif()
 add_library(galaxy_native_host_test_support STATIC
     runtime/src/native_host.cpp
     runtime/src/controller_hid.cpp
+    runtime/src/coop_input.cpp
     runtime/src/flat_guest_memory.cpp)
 target_link_libraries(
     galaxy_native_host_test_support

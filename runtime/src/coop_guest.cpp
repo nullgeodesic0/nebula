@@ -204,21 +204,6 @@ private:
     PpcContext saved_;
 };
 
-struct PartnerInputSlot {
-    std::mutex mutex;
-    coop::PartnerInput input;
-};
-
-PartnerInputSlot& partner_input_slot() {
-    static PartnerInputSlot slot;
-    return slot;
-}
-
-coop::PartnerInput partner_input() {
-    PartnerInputSlot& slot = partner_input_slot();
-    std::lock_guard lock(slot.mutex);
-    return slot.input;
-}
 
 // Guest addresses of the strings the archive calls take, found once.
 struct ArchiveNames {
@@ -418,7 +403,7 @@ void move_second_player(const Guest& guest, State& s) {
 
 void fill_partner_kpad(const Guest& guest, State& s) {
     if (!plausible(s.kpad_buffer)) return;
-    const coop::KpadStatusBytes bytes = s.kpad.next(partner_input());
+    const coop::KpadStatusBytes bytes = s.kpad.next(coop_partner_input());
     for (std::size_t at = 0; at < bytes.size(); at += 4u) {
         guest.set_u32(s.kpad_buffer + static_cast<std::uint32_t>(at),
                       (static_cast<std::uint32_t>(bytes[at]) << 24u) | (static_cast<std::uint32_t>(bytes[at + 1u]) << 16u) |
@@ -517,10 +502,5 @@ bool coop_is_second_player_mario(std::uint32_t mario) noexcept {
     return mario != 0u && mario == s.second_mario;
 }
 
-void coop_publish_partner_input(const coop::PartnerInput& input) noexcept {
-    PartnerInputSlot& slot = partner_input_slot();
-    std::lock_guard lock(slot.mutex);
-    slot.input = input;
-}
 
 }  // namespace galaxy
