@@ -196,7 +196,7 @@ bool test_split_screen() {
     // The first player's half during the second player's event: the view from before, moved with them; after
     // the event, held until the game camera is back.
     CameraHold hold;
-    hold.start(own, {0.0f, 0.0f, 0.0f});
+    hold.start(own, {0.0f, 0.0f, 0.0f}, std::array<float, 16>{});
     ok &= expect(hold.active() && !hold.returning(), "held while the event plays");
     ok &= expect(near(pose_of(hold.view({100.0f, 0.0f, 0.0f}).inverse).eye.x, 100.0f, 0.5f) &&
                      near(pose_of(hold.view({100.0f, 0.0f, 0.0f}).inverse).forward.z, -1.0f, 0.001f),
@@ -206,7 +206,7 @@ bool test_split_screen() {
     ok &= expect(hold.returning() && !hold.back(game, {}), "the game camera far away: still held");
     ok &= expect(hold.back(own, {}) && !hold.active(), "the game camera back at the held view: the hold ends");
     CameraHold slow;
-    slow.start(own, {});
+    slow.start(own, {}, std::array<float, 16>{});
     slow.release();
     bool released = false;
     for (unsigned frame = 0; frame < CameraHold::kReturnFrames && !released; ++frame) released = slow.back(game, {});
