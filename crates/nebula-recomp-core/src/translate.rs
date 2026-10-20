@@ -8003,6 +8003,8 @@ fn coop_call_id(target: u32) -> Option<u32> {
         0x8015_FDA0 => Some(12), // ClippingJudge::isJudgedToClipFrustum(const TVec3f&, f32, s32) const
         0x8016_BF1C => Some(13), // ShadowController::updateFarClipping(f32): shadows near the second player
         0x802C_42C0 => Some(14), // MarioActor::setPlayerMode(u16, bool): no power-up without its model
+        0x8026_B9F4 => Some(15), // NameObjHolder::NameObjHolder(int): room for the second player's objects
+        0x8026_BA50 => Some(16), // NameObjHolder::add(NameObj*): counted for the trace
         _ => None,
     }
 }
@@ -14501,6 +14503,8 @@ mod tests {
             (0x8015_FDA0, 12),
             (0x8016_BF1C, 13),
             (0x802C_42C0, 14),
+            (0x8026_B9F4, 15),
+            (0x8026_BA50, 16),
         ] {
             assert_eq!(coop_call_id(target), Some(id));
         }

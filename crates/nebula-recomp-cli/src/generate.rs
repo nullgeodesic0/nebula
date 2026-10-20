@@ -48,7 +48,8 @@ use std::{fs, path::Path};
 //     ClippingJudge::isJudgedToClipFrustum (SiteHookKind 41 and 42); regenerate every module.
 // 23: co-op hook around ShadowController::updateFarClipping; regenerate every module.
 // 24: co-op hook around MarioActor::setPlayerMode; regenerate every module.
-pub const GENERATION_VERSION: u32 = 24;
+// 25: co-op hooks around NameObjHolder's constructor and add; regenerate every module.
+pub const GENERATION_VERSION: u32 = 25;
 
 /// Shard size and per-shard source budget of the qualified module build.
 pub const MODULE_SHARD_SIZE: usize = 64;

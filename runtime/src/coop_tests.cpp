@@ -384,6 +384,8 @@ bool test_camera_player() {
     ok &= expect(keep_travelling(true, false, kTravelReleaseFrames - 1u), "a moment of control: still travelling");
     ok &= expect(!keep_travelling(true, false, kTravelReleaseFrames), "control for a while: free again");
     ok &= expect(!keep_travelling(false, false, 0u), "free stays free");
+    ok &= expect(scene_name_obj_capacity(0x1300u) == 0x1300u + kNameObjHolderExtra && scene_name_obj_capacity(0x100u) == 0x100u,
+                 "the scene's object table gets room for the second player; the system's stays");
     ok &= expect(swap_for_entrance(true, false), "the second player at a door: swap places");
     ok &= expect(!swap_for_entrance(true, true) && !swap_for_entrance(false, true) && !swap_for_entrance(false, false),
                  "the first player there too, or nobody: no swap");

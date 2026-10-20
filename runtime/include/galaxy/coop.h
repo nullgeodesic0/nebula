@@ -819,6 +819,15 @@ inline constexpr float kBesideDistance = 150.0f;
     return beside(first, side);
 }
 
+// The scene's NameObjHolder holds every NameObj of a scene in a fixed-size array the game fills without a
+// bounds check (0x1300 entries); the second player's MarioActor, its models and parts add their own, which in
+// big galaxies (Space Junk) ran past the end and corrupted what followed. With two players it is made larger.
+inline constexpr std::uint32_t kSceneNameObjHolderMin = 0x1000u;  // the system's holder is 0x100
+inline constexpr std::uint32_t kNameObjHolderExtra = 0x800u;
+[[nodiscard]] constexpr std::uint32_t scene_name_obj_capacity(std::uint32_t game_capacity) noexcept {
+    return game_capacity >= kSceneNameObjHolderMin ? game_capacity + kNameObjHolderExtra : game_capacity;
+}
+
 // The MarioActor::mModels slot of a power-up form's model (MarioActorDraw.cpp init*Mario), kTeresaParts
 // for the Boo form (its own parts), -1 for forms drawn with the normal model (fire, flying).
 inline constexpr int kTeresaParts = -2;

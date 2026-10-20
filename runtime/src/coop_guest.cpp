@@ -43,6 +43,8 @@ constexpr std::uint32_t kGxSetScissor = 11u;   // likewise: the renderer keeps e
 constexpr std::uint32_t kClipFrustum = 12u;
 constexpr std::uint32_t kShadowFarClipping = 13u;
 constexpr std::uint32_t kSetPlayerMode = 14u;
+constexpr std::uint32_t kNameObjHolderCtor = 15u;
+constexpr std::uint32_t kNameObjHolderAdd = 16u;
 }  // namespace call
 
 namespace fn {
@@ -302,6 +304,12 @@ struct State {
     // the second player walks into one the players swap places, so the game's own check takes them through.
     // `entrance_name` is the area class's name in the game's data; `entrance_wait` frames between swaps.
     coop::Vec3 parked_position{};
+    // The scene's NameObjHolder (every NameObj in the scene, a fixed-size array without a bounds check): the
+    // second player's MarioActor and its parts add their own, so it is made larger (kNameObjHolderExtra);
+    // `holder_count` counts what is added, for the trace.
+    std::uint32_t scene_holder = 0u;
+    std::uint32_t holder_capacity = 0u;
+    std::uint32_t holder_count = 0u;
     bool second_waiting_input = false;
     bool second_waiting_demo = false;
     std::uint32_t entrance_name = 0u;
@@ -1094,6 +1102,22 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         // ClippingJudge::isJudgedToClipFrustum(this, const TVec3f& position, f32 radius, s32 level).
         s.clip_position = s.split.amount() > 0.0f && s.follow.started() ? context->gpr[4] : 0u;
         s.clip_radius = static_cast<float>(fpr(context, 1));
+        return;
+    case call::kNameObjHolderCtor:
+        // NameObjHolder::NameObjHolder(this, int num): the scene's (num 0x1300) gets room for the second player.
+        if (context->gpr[4] >= coop::kSceneNameObjHolderMin) {
+            s.scene_holder = context->gpr[3];
+            s.holder_capacity = context->gpr[4];
+            s.holder_count = 0u;
+            context->gpr[4] = coop::scene_name_obj_capacity(context->gpr[4]);
+            trace("scene object table: %u entries (game's %u)", context->gpr[4], s.holder_capacity);
+        }
+        return;
+    case call::kNameObjHolderAdd:
+        // NameObjHolder::add(this, NameObj*).
+        if (context->gpr[3] == s.scene_holder && s.scene_holder != 0u && ++s.holder_count == s.holder_capacity + 1u) {
+            trace("scene object table past the game's %u entries (the extra room is in use)", s.holder_capacity);
+        }
         return;
     case call::kSetPlayerMode:
         // MarioActor::setPlayerMode(this, u16 mode, bool): the second player stays as they are rather than
