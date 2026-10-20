@@ -80,13 +80,16 @@ inline constexpr std::uint32_t kHome = 0x8000u;
 }  // namespace button
 
 // The second player's controller, as a Wii Remote and Nunchuk: buttons (button::k*), the Nunchuk stick
-// (-1..1, up positive) and a shake (the spin).
+// (-1..1, up positive) and a shake (the spin). `camera_x`/`camera_y` are the stick bound to the pointer
+// (usually the right stick): the second player does not aim, so it turns their split-screen camera.
 struct PartnerInput {
     bool connected = false;
     std::uint32_t buttons = 0u;
     float stick_x = 0.0f;
     float stick_y = 0.0f;
     bool shake = false;
+    float camera_x = 0.0f;
+    float camera_y = 0.0f;
 };
 
 // The second player's Wii Remote and Nunchuk from their controller's bindings (the same tables as the first
@@ -106,6 +109,8 @@ struct PartnerInput {
     input.stick_x = logic.stick_x;
     input.stick_y = logic.stick_y;
     input.shake = shaking || logic.held(WiiTarget::Shake) || logic.held(WiiTarget::NunchukShake);
+    input.camera_x = logic.pointer_x;
+    input.camera_y = logic.pointer_y;
     return input;
 }
 
@@ -226,6 +231,11 @@ struct SplitTuning {
     float look_height = 110.0f;
     float follow = 0.2f;
     float up_follow = 0.1f;
+    // The range the second player can raise or lower their camera to (as `height`).
+    float min_height = -150.0f;
+    float max_height = 1100.0f;
+    // Camera collision: the camera stops this far short of a wall between it and the player.
+    float wall_margin = 40.0f;
 };
 
 // Splits past `split_at` and joins below `merge_at`, so the screen does not flicker at one distance, and
@@ -264,16 +274,103 @@ private:
 };
 
 // The projection of one half. Viewports stay full-screen (the game's screen-space passes, such as the
-// shadow and bloom composites, draw textures of the whole screen and must not be squeezed) and the scissor
-// keeps each half's draws on its side; the camera's picture is moved into its half instead: its centre
-// shifts a quarter of the screen towards the half's side as the split eases in (`eased` 0..1). At the
-// split the shift is 0, so each half shows exactly its part of the shared picture; split, each half is
-// centred on its own camera at the same scale. A GameCube perspective projection's last row is
-// (0, 0, -1, 0): row 0 becomes row0 + shift * row3, shift = +-eased / 2 in normalized x.
-inline void split_projection(std::array<float, 16>& projection, bool right, float eased) noexcept {
-    const float shift = (right ? 0.5f : -0.5f) * eased;
-    for (unsigned column = 0; column < 4u; ++column) projection[column] += shift * projection[12u + column];
+// shadow and bloom composites, draw textures of the whole screen and must not be squeezed), the renderer
+// keeps each half's pixels on its side of the line (SplitLayout::plane), and the camera's picture is moved
+// into its half instead: its centre shifts towards the middle of the half (`centre_x`, `centre_y` in
+// normalized device coordinates, y up) as the split eases in (`eased` 0..1). At the split the shift is 0,
+// so each half shows exactly its part of the shared picture; split, each half is centred on its own camera
+// at the same scale. A GameCube perspective projection's last row is (0, 0, -1, 0): rows 0 and 1 become
+// row + shift * row3.
+inline void split_projection(std::array<float, 16>& projection, float centre_x, float centre_y, float eased) noexcept {
+    for (unsigned column = 0; column < 4u; ++column) {
+        projection[column] += centre_x * eased * projection[12u + column];
+        projection[4u + column] += centre_y * eased * projection[12u + column];
+    }
 }
+
+// Lego Indiana Jones 2 style: the line between the halves runs through the middle of the screen, square to
+// where the second player is from the first on the first player's screen, so each takes the side of the
+// screen they are on and the line turns as they move around each other. Screen pixels, y down.
+class SplitLayout {
+public:
+    static constexpr float kTurnPerFrame = 0.06f;  // radians, the most the line turns in a frame
+    static constexpr float kTurnEase = 0.15f;
+
+    // `dx`, `dy`: the second player from the first, on screen. The first call sets the line; later ones
+    // turn it towards the new direction, smoothly. A direction too short to tell keeps the line.
+    void update(float dx, float dy) noexcept {
+        if (!std::isfinite(dx) || !std::isfinite(dy) || dx * dx + dy * dy < 1e-6f) return;
+        const float target = std::atan2(dy, dx);
+        if (!started_) {
+            angle_ = target;
+            started_ = true;
+            return;
+        }
+        constexpr float kPi = 3.14159265f;
+        float turn = target - angle_;
+        while (turn > kPi) turn -= 2.0f * kPi;
+        while (turn < -kPi) turn += 2.0f * kPi;
+        angle_ += std::clamp(turn * kTurnEase, -kTurnPerFrame, kTurnPerFrame);
+        if (angle_ > kPi) angle_ -= 2.0f * kPi;
+        if (angle_ < -kPi) angle_ += 2.0f * kPi;
+    }
+    [[nodiscard]] bool started() const noexcept { return started_; }
+    [[nodiscard]] float angle() const noexcept { return angle_; }
+    void reset() noexcept { *this = SplitLayout{}; }
+
+    // The half a player keeps: a * x + b * y + c >= 0 in screen pixels (the renderer's SplitClip line).
+    [[nodiscard]] std::array<float, 3> plane(bool second, float width, float height) const noexcept {
+        const float sign = second ? 1.0f : -1.0f;
+        const float a = std::cos(angle_) * sign;
+        const float b = std::sin(angle_) * sign;
+        return {a, b, -(a * width * 0.5f + b * height * 0.5f)};
+    }
+
+    // The middle (centroid) of a player's half, in normalized device coordinates (y up).
+    [[nodiscard]] std::array<float, 2> centre(bool second, float width, float height) const noexcept {
+        const std::array<float, 3> p = plane(second, width, height);
+        // The screen rectangle cut by the line (Sutherland-Hodgman), then its centroid.
+        const float corners[4][2] = {{0.0f, 0.0f}, {width, 0.0f}, {width, height}, {0.0f, height}};
+        float poly[8][2]{};
+        unsigned n = 0u;
+        for (unsigned i = 0; i < 4u; ++i) {
+            const float* a = corners[i];
+            const float* b = corners[(i + 1u) % 4u];
+            const float da = p[0] * a[0] + p[1] * a[1] + p[2];
+            const float db = p[0] * b[0] + p[1] * b[1] + p[2];
+            if (da >= 0.0f) {
+                poly[n][0] = a[0];
+                poly[n][1] = a[1];
+                ++n;
+            }
+            if ((da >= 0.0f) != (db >= 0.0f)) {
+                const float t = da / (da - db);
+                poly[n][0] = a[0] + (b[0] - a[0]) * t;
+                poly[n][1] = a[1] + (b[1] - a[1]) * t;
+                ++n;
+            }
+        }
+        float area = 0.0f;
+        float cx = 0.0f;
+        float cy = 0.0f;
+        for (unsigned i = 0; i < n; ++i) {
+            const float* a = poly[i];
+            const float* b = poly[(i + 1u) % n];
+            const float cross_ab = a[0] * b[1] - b[0] * a[1];
+            area += cross_ab;
+            cx += (a[0] + b[0]) * cross_ab;
+            cy += (a[1] + b[1]) * cross_ab;
+        }
+        if (n < 3u || std::fabs(area) < 1e-3f) return {0.0f, 0.0f};
+        cx /= 3.0f * area;
+        cy /= 3.0f * area;
+        return {cx / width * 2.0f - 1.0f, 1.0f - cy / height * 2.0f};
+    }
+
+private:
+    float angle_ = 0.0f;
+    bool started_ = false;
+};
 
 [[nodiscard]] inline Vec3 cross(Vec3 a, Vec3 b) noexcept {
     return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
@@ -340,28 +437,87 @@ public:
         started_ = true;
     }
 
+    // The player's own camera controls, before update: `turn` orbits the camera around them (radians; +
+    // to the camera's right), `raise` moves it up or down (units, kept within the tuning's range).
+    void steer(float turn, float raise, const SplitTuning& tuning = {}) noexcept {
+        if (std::isfinite(raise)) {
+            height_offset_ = std::clamp(height_offset_ + raise, tuning.min_height - tuning.height,
+                                        tuning.max_height - tuning.height);
+        }
+        if (!std::isfinite(turn) || turn == 0.0f || !started_) return;
+        // Rodrigues' rotation of the eye about the up axis through the look point.
+        const Vec3 offset = eye_ - look_;
+        const float c = std::cos(turn);
+        const float s = std::sin(turn);
+        const Vec3 rotated = offset * c + cross(up_, offset) * s + up_ * (dot(up_, offset) * (1.0f - c));
+        eye_ = look_ + rotated;
+    }
+
+    // Behind the player again, facing where they face (`front`), as the game's C button does.
+    void recentre(Vec3 player, Vec3 front, const SplitTuning& tuning = {}) noexcept {
+        Vec3 flat = front - up_ * dot(front, up_);
+        flat = normalized(flat, {0.0f, 0.0f, -1.0f});
+        look_ = player + up_ * tuning.look_height;
+        eye_ = look_ - flat * tuning.distance + up_ * (tuning.height + height_offset_);
+    }
+
     CameraMatrices update(Vec3 player, Vec3 up, const SplitTuning& tuning = {}) noexcept {
         const Vec3 target_up = normalized(up, up_);
         up_ = normalized(up_ + (target_up - up_) * tuning.up_follow, target_up);
-        const Vec3 look = player + up_ * tuning.look_height;
-        Vec3 behind = eye_ - look;
+        look_ = player + up_ * tuning.look_height;
+        Vec3 behind = eye_ - look_;
         behind = behind - up_ * dot(behind, up_);
         const Vec3 fallback = normalized(cross(up_, std::fabs(up_.x) < 0.9f ? Vec3{1.0f, 0.0f, 0.0f} : Vec3{0.0f, 0.0f, 1.0f}),
                                          {0.0f, 0.0f, 1.0f});
-        const Vec3 desired = look + normalized(behind, fallback) * tuning.distance + up_ * tuning.height;
+        const Vec3 desired = look_ + normalized(behind, fallback) * tuning.distance + up_ * (tuning.height + height_offset_);
         eye_ = eye_ + (desired - eye_) * tuning.follow;
         if (!std::isfinite(length(eye_))) eye_ = desired;
-        return look_at(eye_, up_, look);
+        return look_at(eye_, up_, look_);
     }
 
     [[nodiscard]] bool started() const noexcept { return started_; }
+    [[nodiscard]] Vec3 eye() const noexcept { return eye_; }
+    [[nodiscard]] Vec3 look() const noexcept { return look_; }
+    [[nodiscard]] Vec3 up() const noexcept { return up_; }
     void reset() noexcept { *this = FollowCamera{}; }
 
 private:
     Vec3 eye_{};
+    Vec3 look_{};
     Vec3 up_{0.0f, 1.0f, 0.0f};
+    float height_offset_ = 0.0f;
     bool started_ = false;
 };
+
+// The second player's camera controls from their controller: the stick bound to the pointer turns and
+// raises the camera; the D-pad does the same (left and right turn, up and down raise), and C recentres it.
+struct CameraSteer {
+    float turn = 0.0f;   // radians this frame
+    float raise = 0.0f;  // units this frame
+    bool recentre = false;
+};
+inline constexpr float kSteerTurnPerFrame = 0.045f;  // about 2.6 degrees, 155 a second at full tilt
+inline constexpr float kSteerRaisePerFrame = 9.0f;
+inline constexpr float kSteerDeadZone = 0.2f;
+[[nodiscard]] inline CameraSteer camera_steer(const PartnerInput& input, std::uint32_t previous_buttons) noexcept {
+    CameraSteer steer;
+    if (!input.connected) return steer;
+    const auto axis = [](float value) {
+        if (!std::isfinite(value) || std::fabs(value) < kSteerDeadZone) return 0.0f;
+        return std::clamp((std::fabs(value) - kSteerDeadZone) / (1.0f - kSteerDeadZone), 0.0f, 1.0f) *
+               (value < 0.0f ? -1.0f : 1.0f);
+    };
+    float x = axis(input.camera_x);
+    float y = axis(input.camera_y);
+    if ((input.buttons & button::kLeft) != 0u) x -= 1.0f;
+    if ((input.buttons & button::kRight) != 0u) x += 1.0f;
+    if ((input.buttons & button::kUp) != 0u) y += 1.0f;
+    if ((input.buttons & button::kDown) != 0u) y -= 1.0f;
+    steer.turn = std::clamp(x, -1.0f, 1.0f) * kSteerTurnPerFrame;
+    steer.raise = std::clamp(y, -1.0f, 1.0f) * kSteerRaisePerFrame;
+    steer.recentre = (input.buttons & button::kC) != 0u && (previous_buttons & button::kC) == 0u;
+    return steer;
+}
 
 // Whether a sphere can be seen from a camera (view as look_at's) with vertical field of view `fovy_degrees`,
 // width:height `aspect` and far plane `far_z`. Conservative: the sphere is tested against widened planes.
@@ -377,20 +533,13 @@ private:
            std::fabs(v.y) <= depth * ty + radius * std::sqrt(1.0f + ty * ty);
 }
 
-// Which half a player takes: split screen viewports and scissors that cover the whole screen are narrowed
-// to the left or right half; smaller ones (effects drawing into a corner of the EFB) are left alone.
-struct ScreenRect {
-    float left = 0.0f;
-    float top = 0.0f;
-    float width = 0.0f;
-    float height = 0.0f;
-};
-inline constexpr float kFullScreenWidth = 600.0f;  // the EFB is 640 wide; anything this wide spans it
-[[nodiscard]] inline bool half_of(ScreenRect& rect, bool right) noexcept {
-    if (rect.left > 1.0f || rect.width < kFullScreenWidth) return false;
-    rect.width *= 0.5f;
-    if (right) rect.left += rect.width;
-    return true;
+// Camera collision: where the camera goes when the map is in the way between the point it looks at and the
+// eye (`hit`, the first wall on that line): `margin` short of the wall, towards the player.
+[[nodiscard]] inline Vec3 camera_before_wall(Vec3 look, Vec3 hit, float margin) noexcept {
+    const Vec3 back = look - hit;
+    const float distance = length(back);
+    if (!std::isfinite(distance) || distance <= margin) return look + (hit - look) * 0.1f;
+    return hit + back * (margin / distance);
 }
 
 struct CameraShare {

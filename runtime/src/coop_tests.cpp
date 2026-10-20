@@ -168,20 +168,55 @@ bool test_split_screen() {
         const float w = m[12] * v.x + m[13] * v.y + m[14] * v.z + m[15];
         return x / w;
     };
+    const auto ndc_y = [](const std::array<float, 16>& m, Vec3 v) {
+        const float y = m[4] * v.x + m[5] * v.y + m[6] * v.z + m[7];
+        const float w = m[12] * v.x + m[13] * v.y + m[14] * v.z + m[15];
+        return y / w;
+    };
     std::array<float, 16> at_split = projection;
-    split_projection(at_split, true, 0.0f);
+    split_projection(at_split, 0.5f, 0.0f, 0.0f);
     ok &= expect(at_split == projection, "at the split: the shared picture, unmoved");
     std::array<float, 16> right = projection;
-    split_projection(right, true, 1.0f);
+    split_projection(right, 0.5f, 0.0f, 1.0f);
     ok &= expect(near(ndc_x(right, {0.0f, 0.0f, -10.0f}), 0.5f) && near(ndc_x(right, {5.0f, 0.0f, -10.0f}), 1.0f),
-                 "split: the right camera's centre is the right half's, at the same scale");
-    std::array<float, 16> left = projection;
-    split_projection(left, false, 1.0f);
-    ok &= expect(near(ndc_x(left, {0.0f, 0.0f, -10.0f}), -0.5f) && near(ndc_x(left, {-5.0f, 0.0f, -10.0f}), -1.0f),
-                 "split: the left camera's centre is the left half's");
+                 "split: the camera's centre moves to its half's, at the same scale");
+    std::array<float, 16> diagonal = projection;
+    split_projection(diagonal, -0.3f, 0.4f, 1.0f);
+    ok &= expect(near(ndc_x(diagonal, {0.0f, 0.0f, -10.0f}), -0.3f) && near(ndc_y(diagonal, {0.0f, 0.0f, -10.0f}), 0.4f),
+                 "an angled half: the centre moves in both directions");
     std::array<float, 16> halfway = projection;
-    split_projection(halfway, true, 0.5f);
+    split_projection(halfway, 0.5f, 0.0f, 0.5f);
     ok &= expect(near(ndc_x(halfway, {0.0f, 0.0f, -10.0f}), 0.25f), "halfway through, halfway there");
+
+    // The layout: the second player to the right of the first on screen splits left and right, the second
+    // player taking the right; below, top and bottom; the line turns smoothly as they move around.
+    SplitLayout layout;
+    layout.update(100.0f, 0.0f);
+    std::array<float, 3> plane = layout.plane(true, 640.0f, 456.0f);
+    ok &= expect(plane[0] * 600.0f + plane[1] * 200.0f + plane[2] > 0.0f &&
+                     plane[0] * 40.0f + plane[1] * 200.0f + plane[2] < 0.0f,
+                 "second player to the right: they keep the right of the screen");
+    std::array<float, 3> first_plane = layout.plane(false, 640.0f, 456.0f);
+    ok &= expect(first_plane[0] * 40.0f + first_plane[1] * 200.0f + first_plane[2] > 0.0f, "and the first the left");
+    std::array<float, 2> centre = layout.centre(true, 640.0f, 456.0f);
+    ok &= expect(near(centre[0], 0.5f, 0.01f) && near(centre[1], 0.0f, 0.01f), "the right half's middle");
+    SplitLayout below;
+    below.update(0.0f, 100.0f);
+    centre = below.centre(true, 640.0f, 456.0f);
+    ok &= expect(near(centre[0], 0.0f, 0.01f) && near(centre[1], -0.5f, 0.01f), "second player below: the bottom half");
+    SplitLayout turning;
+    turning.update(100.0f, 0.0f);
+    turning.update(0.0f, 100.0f);
+    ok &= expect(turning.angle() > 0.0f && turning.angle() <= SplitLayout::kTurnPerFrame + 1e-5f,
+                 "the line turns towards the new direction, a little a frame");
+    for (unsigned frame = 0; frame < 200u; ++frame) turning.update(0.0f, 100.0f);
+    ok &= expect(near(turning.angle(), 1.5708f, 0.01f), "and settles on it");
+    SplitLayout diagonal_layout;
+    diagonal_layout.update(100.0f, 100.0f);
+    centre = diagonal_layout.centre(true, 640.0f, 456.0f);
+    ok &= expect(centre[0] > 0.1f && centre[1] < -0.1f, "a diagonal split: the lower right");
+    turning.update(0.0f, 0.0f);
+    ok &= expect(near(turning.angle(), 1.5708f, 0.01f), "no direction: the line stays");
 
     const CameraMatrices camera = look_at({0.0f, 0.0f, 10.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
     const Vec3 seen = transform_point(camera.view, {0.0f, 0.0f, 0.0f});
@@ -209,10 +244,39 @@ bool test_split_screen() {
     ok &= expect(near(transform_point(view.view, {2000.0f, tuning.look_height, 0.0f}).x, 0.0f, 0.01f),
                  "and looks at them");
 
-    ScreenRect full{0.0f, 0.0f, 640.0f, 456.0f};
-    ok &= expect(half_of(full, true) && near(full.left, 320.0f) && near(full.width, 320.0f), "full screen: the right half");
-    ScreenRect corner{0.0f, 0.0f, 256.0f, 256.0f};
-    ok &= expect(!half_of(corner, false) && near(corner.width, 256.0f), "an effect's corner scissor is left alone");
+    // The second player's controls: turning orbits around them at the same distance; raising lifts it.
+    const Vec3 before = follow.eye();
+    follow.steer(0.5f, 0.0f);
+    const Vec3 after = follow.eye();
+    const Vec3 look = follow.look();
+    ok &= expect(near(length(after - look), length(before - look), 0.5f) && !near(after.x, before.x, 1.0f),
+                 "turning orbits the camera around the player");
+    for (unsigned frame = 0; frame < 200u; ++frame) {
+        follow.steer(0.0f, 50.0f);
+        view = follow.update({2000.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    }
+    ok &= expect(near(pose_of(view.inverse).eye.y - tuning.look_height, tuning.max_height, 1.0f),
+                 "raising stops at the top of its range");
+    follow.recentre({2000.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f});
+    ok &= expect(follow.eye().x < 2000.0f - tuning.distance * 0.9f, "recentring puts the camera behind where they face");
+
+    PartnerInput input;
+    input.connected = true;
+    input.camera_x = 1.0f;
+    CameraSteer steer = camera_steer(input, 0u);
+    ok &= expect(near(steer.turn, kSteerTurnPerFrame) && near(steer.raise, 0.0f), "the right stick turns the camera");
+    input.camera_x = 0.1f;
+    input.buttons = button::kUp | button::kC;
+    steer = camera_steer(input, 0u);
+    ok &= expect(near(steer.turn, 0.0f) && near(steer.raise, kSteerRaisePerFrame) && steer.recentre,
+                 "a resting stick does nothing; D-pad up raises; C recentres");
+    ok &= expect(!camera_steer(input, button::kC).recentre, "a held C recentres once");
+
+    // Camera collision: short of the wall, towards the player.
+    const Vec3 stop = camera_before_wall({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 500.0f}, 40.0f);
+    ok &= expect(near(stop.z, 460.0f), "the camera stops short of the wall");
+    ok &= expect(camera_before_wall({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 20.0f}, 40.0f).z < 20.0f,
+                 "a wall right behind the player: the camera stays in front of it");
     return ok;
 }
 

@@ -46,7 +46,8 @@ use std::{fs, path::Path};
 //     regenerate every module.
 // 22: split screen's hooks around GameScene::draw3D, GXSetViewport, GXSetScissor and
 //     ClippingJudge::isJudgedToClipFrustum (SiteHookKind 41 and 42); regenerate every module.
-pub const GENERATION_VERSION: u32 = 22;
+// 23: co-op hook around ShadowController::updateFarClipping; regenerate every module.
+pub const GENERATION_VERSION: u32 = 23;
 
 /// Shard size and per-shard source budget of the qualified module build.
 pub const MODULE_SHARD_SIZE: usize = 64;

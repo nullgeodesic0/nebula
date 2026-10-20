@@ -39,8 +39,9 @@ constexpr std::uint32_t kCreateAndAddPlayerArchives = 7u;
 constexpr std::uint32_t kPlayerHeapCreateHeap = 8u;
 constexpr std::uint32_t kGameSceneDraw3D = 9u;
 constexpr std::uint32_t kGxSetViewport = 10u;  // hooked but left alone: viewports stay full-screen
-constexpr std::uint32_t kGxSetScissor = 11u;
+constexpr std::uint32_t kGxSetScissor = 11u;   // likewise: the renderer keeps each half (SplitClip)
 constexpr std::uint32_t kClipFrustum = 12u;
+constexpr std::uint32_t kShadowFarClipping = 13u;
 }  // namespace call
 
 namespace fn {
@@ -65,6 +66,12 @@ constexpr std::uint32_t kCalcViewAndEntry = 0x80343DCCu;    // SceneFunction::ex
 constexpr std::uint32_t kLoadViewMtx = 0x803C7394u;         // MR::loadViewMtx(): CameraContext view -> j3dSys
 constexpr std::uint32_t kSetDefaultViewportAndScissor = 0x803CA5F4u;  // MR::setDefaultViewportAndScissor()
 constexpr std::uint32_t kGetCameraDirector = 0x8009B08Cu;   // MR::getCameraDirector()
+constexpr std::uint32_t kGetFrameBufferWidth = 0x802B5140u;   // MR::getFrameBufferWidth()
+constexpr std::uint32_t kGetFrameBufferHeight = 0x8034AFB0u;  // MR::getFrameBufferHeight()
+// MR::getFirstPolyOnLineToMap(TVec3f* hit, Triangle*, const TVec3f& start, const TVec3f& direction): the
+// second player's camera collision.
+constexpr std::uint32_t kFirstPolyOnLineToMap = 0x803E0874u;
+constexpr std::uint32_t kShadowGetDropPos = 0x8016C1B4u;  // ShadowController::getDropPos(TVec3f*) const
 }  // namespace fn
 
 // CameraContext (scene object 0x17), reached as MR::getCameraViewMtx does: *(r13 - 0x3A78) -> +0x24 -> +0xAC ->
@@ -93,6 +100,9 @@ constexpr std::uint32_t kCameraTrans = 0x2F4u;  // MarioActor::mCameraTrans: wha
 }  // namespace actor
 constexpr std::uint32_t kMarioSideVec = 0x310u;  // Mario::mSideVec
 constexpr std::uint32_t kMarioUpVec = 0x1FCu;    // Mario::_1FC, Mario::getUpVec()
+constexpr std::uint32_t kMarioFrontVec = 0x208u;  // Mario::mFrontVec
+// ShadowController::_67 (u8): the shadow is past the far clip from the camera (updateFarClipping).
+constexpr std::uint32_t kShadowFarClipped = 0x67u;
 
 bool plausible(std::uint32_t address) {
     return address >= 0x80000000u && address < 0x81800000u && (address & 3u) == 0u;
@@ -160,7 +170,7 @@ public:
     class Frame {
     public:
         explicit Frame(const Guest& guest) : guest_(guest), sp_(guest.context_->gpr[1]) {
-            base_ = (sp_ - 0x60u) & ~0xFu;
+            base_ = (sp_ - 0x140u) & ~0xFu;
             guest_.set_u32(base_, sp_);  // back chain
             guest_.context_->gpr[1] = base_;
         }
@@ -173,6 +183,8 @@ public:
             guest_.set_vec(at, value);
             return at;
         }
+        // 0xC0 bytes of scratch after the vector slots (an out structure such as a Triangle).
+        std::uint32_t scratch() const { return base_ + 0x60u; }
 
     private:
         const Guest& guest_;
@@ -278,14 +290,21 @@ struct State {
     coop::LeashTimer leash;
     unsigned frames = 0u;
 
-    // Split screen. `camera2` is the second player's camera while split; `second_right` which half they take
-    // (chosen when the screen splits, from where they are on the first player's screen). `pass` is 1 or 2
-    // while GameScene::draw3D draws the first or second half, else 0.
+    // Split screen. `follow_view` is the second player's own camera (follow, steered and kept out of walls),
+    // `camera2` what their half draws with (blended in from the first player's as the split eases in);
+    // `layout` the line between the halves. `pass` is 1 or 2 while GameScene::draw3D draws the first or
+    // second half, else 0.
     coop::SplitState split;
     coop::FollowCamera follow;
+    coop::CameraMatrices follow_view;
     coop::CameraMatrices camera2;
-    bool second_right = true;
+    coop::SplitLayout layout;
+    std::uint32_t steer_buttons = 0u;
+    float screen_width = 640.0f;
+    float screen_height = 456.0f;
     unsigned pass = 0u;
+    std::uint32_t shadow_controller = 0u;
+    float shadow_clip = 0.0f;
     std::uint32_t draw_scene = 0u;
     std::uint32_t clip_position = 0u;
     float clip_radius = 0.0f;
@@ -312,6 +331,20 @@ bool split_screen_enabled() {
 State& state() {
     static State s;
     return s;
+}
+
+// native_runtime.cpp puts split screen's line in the GX stream (coop_set_split_clip_sink).
+struct SplitClipSinkSlot {
+    SplitClipSink sink = nullptr;
+    void* user = nullptr;
+};
+SplitClipSinkSlot& split_clip_sink() {
+    static SplitClipSinkSlot slot;
+    return slot;
+}
+void send_split_clip(const std::array<float, 3>& plane) {
+    const SplitClipSinkSlot& slot = split_clip_sink();
+    if (slot.sink != nullptr) slot.sink(slot.user, plane.data());
 }
 
 std::uint32_t camera_context(const Guest& guest) {
@@ -350,9 +383,6 @@ bool finite(const std::array<float, 12>& values) {
     }
     return true;
 }
-
-// Whether the half drawn now is the right one: the first pass draws the first player's half.
-bool right_half(const State& s) { return s.pass == 1u ? !s.second_right : s.second_right; }
 
 
 coop::Vec3 player_up(const Guest& guest, std::uint32_t mario) {
@@ -495,6 +525,50 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     trace("camera target was the second player (%08X): back to the first (%08X)", actor, kept);
 }
 
+// While split, after both players moved: the second player's own camera (it trails them, turned and raised
+// by their controller, recentred by C, and kept in front of walls), and where the line between the halves
+// runs: square to where the second player is from the first on the first player's screen.
+void update_second_camera(const Guest& guest, State& s, coop::Vec3 first_position, coop::Vec3 second_position) {
+    const std::uint32_t context = camera_context(guest);
+    if (context == 0u || !plausible(s.second_mario)) return;
+    const coop::CameraMatrices first_camera = read_camera(guest, context);
+    if (!finite(first_camera.view) || !finite(first_camera.inverse)) return;
+    const coop::SplitTuning tuning{};
+    const coop::Vec3 up = player_up(guest, s.second_mario);
+    if (!s.follow.started()) {
+        // The split begins: the second player's camera starts as the shared one, moved onto them.
+        const coop::Vec3 midpoint = first_position + (second_position - first_position) * 0.5f;
+        s.follow.start(coop::pose_of(first_camera.inverse).eye, midpoint, second_position, up, tuning);
+        trace("split begins");
+    }
+    const coop::PartnerInput input = coop_partner_input();
+    const coop::CameraSteer steer = coop::camera_steer(input, s.steer_buttons);
+    s.steer_buttons = input.connected ? input.buttons : 0u;
+    if (steer.recentre) s.follow.recentre(second_position, guest.vec(s.second_mario + kMarioFrontVec), tuning);
+    s.follow.steer(steer.turn, steer.raise, tuning);
+    s.follow_view = s.follow.update(second_position, up, tuning);
+
+    // Camera collision: the first wall between the point the camera looks at and its eye.
+    const coop::Vec3 look = s.follow.look();
+    const coop::Vec3 eye = s.follow.eye();
+    {
+        Guest::Frame frame(guest);
+        const std::uint32_t hit = frame.vec(0, eye);
+        const std::uint32_t found =
+            guest.call(fn::kFirstPolyOnLineToMap, hit, frame.scratch(), frame.vec(1, look), frame.vec(2, eye - look));
+        if ((found & 0xFFu) != 0u) {
+            const coop::Vec3 wall = guest.vec(hit);
+            if (std::isfinite(coop::length(wall))) {
+                s.follow_view = coop::look_at(coop::camera_before_wall(look, wall, tuning.wall_margin), s.follow.up(), look);
+            }
+        }
+    }
+
+    const coop::Vec3 a = coop::transform_point(first_camera.view, first_position);
+    const coop::Vec3 b = coop::transform_point(first_camera.view, second_position);
+    s.layout.update(b.x - a.x, a.y - b.y);  // screen y runs down
+}
+
 // After the game moves its players, the second player: one MarioActor::movement with the game's player,
 // character and controller switched to it. Then the shared camera, and the warp back to the first player.
 void move_second_player(const Guest& guest, State& s) {
@@ -534,7 +608,10 @@ void move_second_player(const Guest& guest, State& s) {
         const coop::SplitTuning tuning{};
         const float distance = coop::length(second_position - first_position);
         s.split.update(distance, tuning);
-        if (s.split.amount() == 0.0f) s.follow.reset();
+        if (s.split.amount() == 0.0f) {
+            s.follow.reset();
+            s.layout.reset();
+        }
         if (std::isfinite(distance)) share.offset = (second_position - first_position) * (0.5f * (1.0f - s.split.eased()));
         too_far = !std::isfinite(distance) || distance >= tuning.split_warp;
     } else {
@@ -555,6 +632,7 @@ void move_second_player(const Guest& guest, State& s) {
 
     keep_camera_on_first_player(guest, s);
     bump_players(guest, s, first_position, second_position);
+    if (s.split.amount() > 0.0f) update_second_camera(guest, s, first_position, second_position);
 
     // The game camera looks at the first player's camera point; move it towards the second player.
     const coop::Vec3 look = guest.vec(s.first + actor::kCameraTrans);
@@ -564,16 +642,26 @@ void move_second_player(const Guest& guest, State& s) {
         trace("first (%.0f %.0f %.0f) second (%.0f %.0f %.0f) camera offset (%.0f %.0f %.0f)%s", first_position.x,
               first_position.y, first_position.z, second_position.x, second_position.y, second_position.z,
               share.offset.x, share.offset.y, share.offset.z, too_far ? " out of range" : "");
-        if (s.split.amount() > 0.0f) trace("split %.2f, second player on the %s", s.split.amount(), s.second_right ? "right" : "left");
+        if (s.split.amount() > 0.0f) {
+            trace("split %.2f, line at %.0f degrees", s.split.amount(), s.layout.angle() * 57.2958f);
+        }
     }
 }
 
-// Before GameScene::draw3D: when split, the first half. The second player's camera is worked out from the
-// first player's (this frame's, as the game's camera made it) and the projection narrowed to the half.
+// The projection of a player's half: centred on the middle of their side of the line as the split eases in.
+std::array<float, 16> half_projection(const State& s, bool second) {
+    std::array<float, 16> projection = s.projection;
+    const std::array<float, 2> centre = s.layout.centre(second, s.screen_width, s.screen_height);
+    coop::split_projection(projection, centre[0], centre[1], s.split.eased());
+    return projection;
+}
+
+// Before GameScene::draw3D: when split, the first player's half. Their camera is the game's; the second
+// player's is blended in from it as the split eases in; the renderer keeps the first player's side of the line.
 void begin_split_draw(const Guest& guest, State& s) {
     s.pass = 0u;
     if (!split_screen_enabled() || s.split.amount() == 0.0f || !plausible(s.second) || !plausible(s.second_mario) ||
-        !plausible(s.first)) {
+        !plausible(s.first) || !s.follow.started() || !s.layout.started()) {
         return;
     }
     const std::uint32_t context = camera_context(guest);
@@ -587,28 +675,20 @@ void begin_split_draw(const Guest& guest, State& s) {
     if (std::isfinite(fovy) && fovy > 1.0f && fovy < 170.0f) s.fovy = fovy;
     if (std::isfinite(aspect) && aspect > 0.1f) s.aspect = aspect;
     if (std::isfinite(far_z) && far_z > 1.0f) s.far_z = far_z;
-
-    const coop::Vec3 first_position = guest.vec(s.first + actor::kPosition);
-    const coop::Vec3 second_position = guest.vec(s.second + actor::kPosition);
-    const coop::Vec3 up = player_up(guest, s.second_mario);
-    if (!s.follow.started()) {
-        // The split begins: the second player's camera starts as the shared one, moved onto them, and they
-        // take the half of the screen they are on.
-        const coop::Vec3 midpoint = first_position + (second_position - first_position) * 0.5f;
-        s.follow.start(coop::pose_of(s.camera1.inverse).eye, midpoint, second_position, up);
-        s.second_right = coop::transform_point(s.camera1.view, second_position).x >=
-                         coop::transform_point(s.camera1.view, first_position).x;
-        trace("split: second player on the %s", s.second_right ? "right" : "left");
+    {
+        SavedContext saved(guest.context());
+        const auto width = static_cast<float>(guest.call(fn::kGetFrameBufferWidth) & 0xFFFFu);
+        const auto height = static_cast<float>(guest.call(fn::kGetFrameBufferHeight) & 0xFFFFu);
+        if (width >= 320.0f && width <= 1024.0f) s.screen_width = width;
+        if (height >= 240.0f && height <= 640.0f) s.screen_height = height;
     }
-    const coop::CameraMatrices follow = s.follow.update(second_position, up);
     // Pans from the first player's view at the split to the second player's own.
-    s.camera2 = coop::blend_cameras(s.camera1, follow, s.split.eased());
+    s.camera2 = coop::blend_cameras(s.camera1, s.follow_view, s.split.eased());
 
     s.pass = 1u;
     s.draw_scene = guest.context()->gpr[3];
-    std::array<float, 16> projection = s.projection;
-    coop::split_projection(projection, right_half(s), s.split.eased());
-    write_floats(guest, context + camera::kProjection, projection);
+    write_floats(guest, context + camera::kProjection, half_projection(s, false));
+    send_split_clip(s.layout.plane(false, s.screen_width, s.screen_height));
 }
 
 // After the first half: the second, with the second player's camera, then the first player's camera back for
@@ -623,29 +703,35 @@ void finish_split_draw(const Guest& guest, State& s) {
     }
     s.pass = 2u;
     write_camera(guest, context, s.camera2);
-    std::array<float, 16> projection = s.projection;
-    coop::split_projection(projection, right_half(s), s.split.eased());
-    write_floats(guest, context + camera::kProjection, projection);
+    write_floats(guest, context + camera::kProjection, half_projection(s, true));
     guest.call(fn::kLoadViewMtx);
     guest.call(fn::kCalcViewAndEntry);
+    send_split_clip(s.layout.plane(true, s.screen_width, s.screen_height));
     guest.call(fn::kGameSceneDraw3D, s.draw_scene);
+    // The whole screen again for the 2D layer (HUD).
+    send_split_clip({0.0f, 0.0f, 0.0f});
     write_camera(guest, context, s.camera1);
     write_floats(guest, context + camera::kProjection, s.projection);
     guest.call(fn::kLoadViewMtx);
     s.pass = 0u;
-    // The whole screen again for the 2D layer (HUD): the second half left the scissor on its side.
     guest.call(fn::kSetDefaultViewportAndScissor);
 }
 
 double fpr(const PpcContext* context, unsigned index) { return std::bit_cast<double>(context->fpr_bits[index]); }
-// GXSetScissor(left, top, width, height) in r3..r6, while a half is drawn: a scissor over the whole screen
-// keeps the half's draws on its side. Viewports stay full-screen (split_projection).
-void narrow_scissor(PpcContext* context, const State& s) {
-    coop::ScreenRect rect{static_cast<float>(context->gpr[3]), static_cast<float>(context->gpr[4]),
-                          static_cast<float>(context->gpr[5]), static_cast<float>(context->gpr[6])};
-    if (!coop::half_of(rect, right_half(s))) return;
-    context->gpr[3] = static_cast<std::uint32_t>(rect.left + 0.5f);
-    context->gpr[5] = static_cast<std::uint32_t>(rect.width + 0.5f);
+
+// After ShadowController::updateFarClipping: a shadow past the far clip from the first player's camera is
+// drawn again if it is near enough to the second player's, so their side of a split screen has shadows.
+void keep_second_player_shadow(const Guest& guest, State& s) {
+    const std::uint32_t controller = s.shadow_controller;
+    s.shadow_controller = 0u;
+    if (!plausible(controller) || guest.u8(controller + kShadowFarClipped) == 0u) return;
+    SavedContext saved(guest.context());
+    Guest::Frame frame(guest);
+    const std::uint32_t drop = frame.vec(0, {});
+    guest.call(fn::kShadowGetDropPos, controller, drop);
+    const coop::Vec3 position = guest.vec(drop);
+    const float depth = -coop::transform_point(s.camera2.view, position).z;
+    if (std::isfinite(depth) && depth < s.shadow_clip) guest.set_u8(controller + kShadowFarClipped, 0u);
 }
 
 void fill_partner_kpad(const Guest& guest, State& s) {
@@ -697,13 +783,15 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
     case call::kGameSceneDraw3D:
         begin_split_draw(Guest(context, memory, services, guest_pc), s);
         return;
-    case call::kGxSetScissor:
-        if (s.pass != 0u) narrow_scissor(context, s);
-        return;
     case call::kClipFrustum:
         // ClippingJudge::isJudgedToClipFrustum(this, const TVec3f& position, f32 radius, s32 level).
         s.clip_position = s.split.amount() > 0.0f && s.follow.started() ? context->gpr[4] : 0u;
         s.clip_radius = static_cast<float>(fpr(context, 1));
+        return;
+    case call::kShadowFarClipping:
+        // ShadowController::updateFarClipping(this, f32 clip).
+        s.shadow_controller = s.split.amount() > 0.0f && s.follow.started() ? context->gpr[3] : 0u;
+        s.shadow_clip = static_cast<float>(fpr(context, 1));
         return;
     default:
         return;
@@ -757,11 +845,14 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
         // Out of the first player's view but in the second's: not clipped, so it moves and is drawn.
         if (s.clip_position != 0u && (context->gpr[3] & 0xFFu) != 0u && plausible(s.clip_position)) {
             const coop::Vec3 position = guest.vec(s.clip_position);
-            if (coop::sphere_in_view(s.camera2.view, position, s.clip_radius, s.fovy, s.aspect * 0.5f, s.far_z)) {
+            if (coop::sphere_in_view(s.camera2.view, position, s.clip_radius, s.fovy, s.aspect, s.far_z)) {
                 context->gpr[3] = 0u;
             }
         }
         s.clip_position = 0u;
+        return;
+    case call::kShadowFarClipping:
+        if (s.shadow_controller != 0u) keep_second_player_shadow(guest, s);
         return;
     default:
         return;
@@ -769,6 +860,10 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
 }
 
 unsigned coop_split_pass() noexcept { return state().pass; }
+
+void coop_set_split_clip_sink(SplitClipSink sink, void* user) noexcept {
+    split_clip_sink() = {sink, user};
+}
 
 bool coop_is_second_player_mario(std::uint32_t mario) noexcept {
     const State& s = state();
