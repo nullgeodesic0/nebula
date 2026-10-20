@@ -60,7 +60,10 @@ with the stick bound to the pointer (usually the right stick; it has no pointer 
 and right orbit it around them, up and down raise or lower it; C puts it behind them again. It stops short of
 walls between it and the player (the game's `MR::getFirstPolyOnLineToMap`).
 
-While split, the second player's stick is relative to their own camera, things only the second player can
+A camera event the second player sets off (a warp, launch star or pipe) plays in their half with the game's
+own camera, and the first player's half follows them meanwhile; after it the halves go back to normal.
+Each half's EFB copies (the bloom, blur and final scene captures) are its own, so neither half's effects
+show the other's picture. While split, the second player's stick is relative to their own camera, things only the second player can
 see are not clipped (they move and are drawn), their side keeps its shadows (`ShadowController`'s far clip is
 measured from their camera too), and the HUD is drawn once over the whole screen.
 
@@ -83,8 +86,8 @@ These come from a game written for one player and are what the playtest should l
 - Domes, warps and cutscenes move the first player only; the second rejoins them at the next level start.
 - The Odyssey moves are the first player's only.
 - Split screen: mirror reflections follow the first player's camera only; the second player's camera has no
-  camera areas (the game's fixed and rail cameras are the first player's); a camera event the second player
-  sets off plays in the first player's half; the temporal upscaler and motion blur assume one camera a
+  camera areas (the game's fixed and rail cameras are the first player's); an event the second player starts
+  through an object (not their own move) plays in the first player's half; the temporal upscaler and motion blur assume one camera a
   frame, so turn them off while playing split. The 3D scene costs twice as much to draw while split.
 
 ## Playtest

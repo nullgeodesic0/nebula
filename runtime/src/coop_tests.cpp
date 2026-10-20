@@ -288,6 +288,10 @@ bool test_camera_player() {
     ok &= expect(camera_player(first, first, second) == first, "the first player stays");
     ok &= expect(camera_player(0x80C00000u, first, second) == 0x80C00000u, "an event's own target is left alone");
     ok &= expect(camera_player(0u, first, 0u) == 0u, "no second player: nothing changes");
+    ok &= expect(camera_event_is_second(second, second, true), "the second player's warp camera stays theirs while it plays");
+    ok &= expect(!camera_event_is_second(second, second, false), "and the camera is the first player's once it ends");
+    ok &= expect(!camera_event_is_second(first, second, true), "an event on the first player is theirs");
+    ok &= expect(!camera_event_is_second(0u, 0u, true), "no second player: no swap");
     return ok;
 }
 

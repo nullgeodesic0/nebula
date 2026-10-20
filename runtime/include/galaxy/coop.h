@@ -597,6 +597,14 @@ struct BodyTuning {
     return second != 0u && current == second ? first : current;
 }
 
+// A camera event the second player set off: the camera follows them while an event camera plays. Then their
+// half shows it (split screen) and the camera is left on them until it ends; after it, camera_player puts
+// the camera back on the first player.
+[[nodiscard]] constexpr bool camera_event_is_second(std::uint32_t current, std::uint32_t second,
+                                                    bool event_camera_active) noexcept {
+    return event_camera_active && second != 0u && current == second;
+}
+
 // Counts frames out of range; true on the frame the second player should be brought back.
 class LeashTimer {
 public:
