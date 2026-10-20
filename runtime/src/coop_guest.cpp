@@ -341,6 +341,15 @@ struct State {
     // The second player's half, eased from the event's camera into their own when their event ends;
     // `second_view` is what their half drew last frame.
     coop::CameraHandover second_handover;
+    // At the start of the second player's event the game camera travels over from the first player: their
+    // half keeps its own camera until the game camera has arrived, then eases into it.
+    bool second_awaits_event = false;
+    // The second player travels with the first (second_player_waits, the first player parked at the origin, a
+    // level start until the first has had control a moment); `controllable_frames` counts frames the first
+    // player has been in ordinary play.
+    bool travelling = false;
+    bool level_start = false;
+    unsigned controllable_frames = 0u;
     coop::CameraMatrices second_view;
     // Trace: frames of per-frame camera detail left after a camera change of hands.
     unsigned camera_trace_frames = 0u;
@@ -489,6 +498,10 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     s.kpad.reset();
     s.leash.reset();
     s.split.reset();
+    // Until the first player has landed and has control, the second waits where they were placed.
+    s.level_start = true;
+    s.travelling = true;
+    s.controllable_frames = 0u;
     s.follow.reset();
     const std::uint32_t first_mario = guest.u32(first + actor::kMario);
     if (!plausible(first_mario)) return;
@@ -496,6 +509,7 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     const coop::Vec3 rotation = guest.vec(first + actor::kRotation);
     const coop::Vec3 side = guest.vec(first_mario + kMarioSideVec);
     const coop::Vec3 beside = position + side * 120.0f;
+    s.parked_position = beside;
 
     // The actor's name: the debug name the game gives its own player is unknown, so the archive path does.
     ensure_archive_names(guest, s);
@@ -588,7 +602,7 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
             // game camera's view from before the event.
             // The event camera aims at the first player for its first frames (until it follows the second),
             // so their half keeps its own view a moment before easing in.
-            s.handover.start(s.camera2, true, &s.projection, coop::CameraHandover::kEventDelayFrames);
+            s.second_awaits_event = true;
             s.hold.start(s.last_camera1, s.last_origin, s.last_projection);
         } else if (!s.event_second && s.split.amount() > 0.0f) {
             // Their half eases from the event's camera back into their own.
@@ -716,7 +730,20 @@ void move_second_player(const Guest& guest, State& s) {
         s.second_waiting_input = first_held;
         s.second_waiting_demo = demo;
     }
-    const bool beside_first = coop::second_player_waits(first_held, demo);
+    const coop::Vec3 first_now = guest.vec(s.first + actor::kPosition);
+    // A puppeted first player's actor sits at the origin (a dome's galaxy selector).
+    const bool first_parked = !(coop::length(first_now) >= 1.0f);
+    const bool first_busy = coop::second_player_waits(first_held, demo) || first_parked;
+    s.controllable_frames = first_busy ? 0u : s.controllable_frames + 1u;
+    bool land_beside = false;
+    if (s.level_start && s.controllable_frames >= coop::kLevelStartSettleFrames) {
+        // The first player has landed and has control: the second joins them.
+        s.level_start = false;
+        land_beside = true;
+        trace("level start over: the second player joins the first");
+    }
+    s.travelling = coop::keep_travelling(s.travelling, s.level_start || first_busy, s.controllable_frames);
+    const bool beside_first = s.travelling;
 
     const coop::Character partner = coop::partner_of(s.own);
     s.moving_second = true;
@@ -731,11 +758,13 @@ void move_second_player(const Guest& guest, State& s) {
     if (camera_ctx != 0u) write_camera(guest, camera_ctx, s.camera2);
     guest.call(fn::kMarioActorMovement, s.second);
     if (camera_ctx != 0u) write_camera(guest, camera_ctx, first_camera);
-    if (beside_first && plausible(first_mario)) {
+    if ((beside_first || land_beside) && plausible(first_mario)) {
         // Still the second player's turn: MR::setPlayerPos moves the scene's player. A puppeted first player's
-        // actor sits at the origin: the second player then stays where they were.
-        const coop::Vec3 there = coop::travel_position(guest.vec(s.first + actor::kPosition),
-                                                       guest.vec(first_mario + kMarioSideVec), s.parked_position);
+        // actor sits at the origin, and at a level start the first is still flying in: the second player then
+        // stays where they were.
+        const coop::Vec3 there = s.level_start ? s.parked_position
+                                               : coop::travel_position(first_now, guest.vec(first_mario + kMarioSideVec),
+                                                                       s.parked_position);
         Guest::Frame frame(guest);
         guest.call(fn::kSetPlayerPos, frame.vec(0, there));
     }
@@ -827,9 +856,11 @@ void move_second_player(const Guest& guest, State& s) {
 }
 
 // The lens of a player's half: the game's, except the first player's while their view is held (the game's
-// lens is the other player's event camera's then) and as it eases back.
+// lens is the other player's event camera's then) and as it eases back, and the second player's while their
+// half waits for the event camera.
 std::array<float, 16> half_lens(const State& s, bool second) {
     if (!second && s.hold.active()) return s.hold.projection();
+    if (second && s.second_awaits_event && s.hold.active()) return s.hold.projection();
     return s.handover.projection(s.projection, second);
 }
 
@@ -906,6 +937,17 @@ void begin_split_draw(const Guest& guest, State& s) {
     // the first player's half holds its view until the game camera is back, then eases into it; at the start
     // of the event the second player's half eases from its own camera into the event's.
     coop::CameraMatrices game_half = s.camera1;
+    if (events_swapped(s) && s.second_awaits_event) {
+        const coop::Vec3 eye = coop::pose_of(s.camera1.inverse).eye;
+        if (coop::length(eye - second_position) < coop::length(eye - first_position)) {
+            const std::array<float, 16> lens = s.hold.projection();
+            s.handover.start(s.follow_view, true, &lens);
+            s.second_awaits_event = false;
+            trace("the event camera has reached the second player");
+        } else {
+            game_half = s.follow_view;
+        }
+    }
     if (s.hold.active() && !events_swapped(s)) {
         // The first player's half, held through the second player's flight and until the game camera is back.
         const coop::CameraMatrices held = s.hold.view(first_position);
@@ -944,7 +986,9 @@ void begin_split_draw(const Guest& guest, State& s) {
               other_eye.z, other_fwd.x, other_fwd.y, other_fwd.z, s.projection[0]);
     }
     write_floats(guest, context + camera::kProjection, half_projection(s, second_half(s)));
-    send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), 1u);
+    // The renderer keeps EFB copies per view: per player, so each half's effects see only its own picture
+    // whichever pass draws it.
+    send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), second_half(s) ? 2u : 1u);
 }
 
 // After the first half: the second, with the second player's camera, then the first player's camera back for
@@ -962,7 +1006,7 @@ void finish_split_draw(const Guest& guest, State& s) {
     write_floats(guest, context + camera::kProjection, half_projection(s, second_half(s)));
     guest.call(fn::kLoadViewMtx);
     guest.call(fn::kCalcViewAndEntry);
-    send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), 2u);
+    send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), second_half(s) ? 2u : 1u);
     guest.call(fn::kGameSceneDraw3D, s.draw_scene);
     // The whole screen again for the 2D layer (HUD), and the black line between the halves, fading in with
     // the split.

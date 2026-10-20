@@ -790,6 +790,15 @@ inline constexpr float kOtherPlayerCameraDistance = 2000.0f;
     return first_player_controls_held || cutscene;
 }
 
+// Travelling with the first player (second_player_waits, a parked first player, a level start) ends only
+// after the first player has been in ordinary play `kTravelReleaseFrames` in a row, so a flicker of their
+// controls does not pull the second player back and forth. A level start waits `kLevelStartSettleFrames`
+// (the first player flies in, then lands and gets control).
+inline constexpr unsigned kTravelReleaseFrames = 10u;
+inline constexpr unsigned kLevelStartSettleFrames = 20u;
+[[nodiscard]] constexpr bool keep_travelling(bool travelling, bool first_busy, unsigned controllable_frames) noexcept {
+    return first_busy || (travelling && controllable_frames < kTravelReleaseFrames);
+}
 // Where the second player goes while they travel with the first (second_player_waits): `kBesideDistance`
 // to the first player's side (`side`, Mario::mSideVec).
 inline constexpr float kBesideDistance = 150.0f;

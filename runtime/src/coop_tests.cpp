@@ -379,6 +379,10 @@ bool test_camera_player() {
     ok &= expect(near(parked.x, 500.0f) && near(parked.y, 10.0f), "the first player puppeted at the origin: stay put");
     ok &= expect(near(travel_position({1000.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {}).z, kBesideDistance),
                  "otherwise beside them");
+    ok &= expect(keep_travelling(false, true, 0u), "the first player busy: travel with them");
+    ok &= expect(keep_travelling(true, false, kTravelReleaseFrames - 1u), "a moment of control: still travelling");
+    ok &= expect(!keep_travelling(true, false, kTravelReleaseFrames), "control for a while: free again");
+    ok &= expect(!keep_travelling(false, false, 0u), "free stays free");
     ok &= expect(swap_for_entrance(true, false), "the second player at a door: swap places");
     ok &= expect(!swap_for_entrance(true, true) && !swap_for_entrance(false, true) && !swap_for_entrance(false, false),
                  "the first player there too, or nobody: no swap");
