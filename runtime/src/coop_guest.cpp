@@ -646,8 +646,11 @@ void update_second_camera(const Guest& guest, State& s, coop::Vec3 first_positio
         }
     }
 
-    const coop::Vec3 a = coop::transform_point(first_camera.view, first_position);
-    const coop::Vec3 b = coop::transform_point(first_camera.view, second_position);
+    // The line follows the first player's view as their half shows it: while it is held (the game camera is
+    // the second player's event or warp camera) the held view, so the line does not swing with that camera.
+    const coop::CameraMatrices layout_camera = s.hold.active() ? s.hold.view(first_position) : first_camera;
+    const coop::Vec3 a = coop::transform_point(layout_camera.view, first_position);
+    const coop::Vec3 b = coop::transform_point(layout_camera.view, second_position);
     s.layout.update(b.x - a.x, a.y - b.y);  // screen y runs down
 }
 
