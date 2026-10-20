@@ -191,11 +191,17 @@ private:
     std::uint32_t pc_;
 };
 
-// Restores the interrupted game call's registers when a hook has called into the game itself.
+// Restores the interrupted game call's registers when a hook has called into the game itself. The timer
+// state (time base, DEC) is the machine's, not the call's: the game's own calls move it, and rewinding it
+// makes the runtime's DEC tracker diverge from the guest.
 class SavedContext {
 public:
     explicit SavedContext(PpcContext* context) : context_(context), saved_(*context) {}
-    ~SavedContext() { *context_ = saved_; }
+    ~SavedContext() {
+        const PpcTimerState timer = capture_timer_state(context_);
+        *context_ = saved_;
+        restore_timer_state(context_, timer);
+    }
     SavedContext(const SavedContext&) = delete;
     SavedContext& operator=(const SavedContext&) = delete;
 
