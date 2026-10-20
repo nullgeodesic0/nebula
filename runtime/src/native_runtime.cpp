@@ -33211,6 +33211,7 @@ int wmain(int argc, wchar_t** argv) {
         return cleanup_failure;
     };
     auto finish_process = [](UINT exit_code) {
+        std::cerr << "[exit] process exit code " << exit_code << '\n';
         std::cout.flush();
         std::cerr.flush();
         ExitProcess(exit_code);

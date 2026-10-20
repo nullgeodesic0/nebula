@@ -2485,12 +2485,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (msg == WM_CLOSE) {
+        std::cerr << "[exit] window close requested (WM_CLOSE)\n";
         flush_native_settings_if_dirty();
         s_quit_requested.store(true, std::memory_order_release);
         DestroyWindow(hwnd);
         return 0;
     }
     if (msg == WM_DESTROY) {
+        std::cerr << "[exit] window destroyed (WM_DESTROY)\n";
         flush_native_settings_if_dirty();
         s_quit_requested.store(true, std::memory_order_release);
         hold_display_on(false);
