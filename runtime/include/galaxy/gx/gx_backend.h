@@ -240,13 +240,14 @@ public:
         }
         producer_scene_view_valid_ = false;
     }
-    // Simulation thread: a SplitClip marker; its plane rides in the marker's view slot (first three floats).
-    void attach_split_clip(const float plane[3], std::size_t fifo_offset) noexcept {
+    // Simulation thread: a SplitClip marker; its plane and pass ride in the marker's view slot.
+    void attach_split_clip(const float plane[3], unsigned pass, std::size_t fifo_offset) noexcept {
         if (producer_fifo_marker_count_ < producer_fifo_markers_.size()) {
             const std::uint8_t index = producer_fifo_marker_count_++;
             producer_fifo_markers_[index] = {fifo_offset, FifoMarker::SplitClip};
             producer_fifo_marker_views_[index] = {};
             for (unsigned i = 0; i < 3u; ++i) producer_fifo_marker_views_[index][i] = plane[i];
+            producer_fifo_marker_views_[index][3] = static_cast<float>(pass);
             producer_fifo_marker_view_mask_ |= static_cast<std::uint8_t>(1u << index);
         }
     }

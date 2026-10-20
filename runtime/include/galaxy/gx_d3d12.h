@@ -129,8 +129,9 @@ void attach_fifo_marker(FifoMarker marker, std::size_t fifo_offset) noexcept;
 // world-to-eye matrix (row-major 3x4) for that scene.
 void attach_scene_view(const float view[12]) noexcept;
 // Simulation thread: a SplitClip marker at `fifo_offset`. Full-screen draws after it keep the pixels where
-// plane[0] * x + plane[1] * y + plane[2] >= 0, x and y in logical EFB pixels; (0, 0, 0) keeps all.
-void attach_split_clip(const float plane[3], std::size_t fifo_offset) noexcept;
+// plane[0] * x + plane[1] * y + plane[2] >= 0, x and y in logical EFB pixels; (0, 0, 0) keeps all. `pass` is
+// 1 or 2 for the first or second player's half (EFB copies made in pass 2 go to their own textures), 0 after.
+void attach_split_clip(const float plane[3], unsigned pass, std::size_t fifo_offset) noexcept;
 void set_pointer_response(PointerResponseStamp stamp) noexcept;
 // Simulation producer; copied into each owned FIFO chunk and selected XFB.
 void set_prerecorded_movie_content(bool movie) noexcept;

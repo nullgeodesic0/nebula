@@ -6492,8 +6492,16 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
     if (marker == FifoMarker::SplitClip) {
         // Split screen: the following full-screen draws keep one side of the line (flush_constants).
         split_clip_ = {0.0f, 0.0f, 0.0f};
+        unsigned pass = 0u;
         if (view != nullptr) {
             for (unsigned i = 0; i < 3u; ++i) split_clip_[i] = (*view)[i];
+            pass = static_cast<unsigned>((*view)[3]);
+        }
+        // The second half's EFB copies are its own; the game's addresses point at each half's copies while it
+        // draws, and back at the first half's after.
+        for (const EfbCopyParams& params : renderer_.set_efb_copy_view(pass == 2u ? 1u : 0u, texture_cache_)) {
+            mark_texture_binding_alias_dirty(params);
+            texture_bindings_dirty_ = true;
         }
         return;
     }

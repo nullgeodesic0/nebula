@@ -571,6 +571,9 @@ public:
         const EfbCopyParams& params,
         TextureCache& textures,
         bool is_depth_copy);
+    // Split screen: view 1 while the second player's half is drawn, else 0. Re-registers that view's
+    // latest copies with `textures`; returns the copies whose alias changed (their bindings are stale).
+    [[nodiscard]] std::vector<EfbCopyParams> set_efb_copy_view(unsigned view, TextureCache& textures);
 
     // Stretch-blit `source` to the backbuffer. A null/invalid source is a
     // runtime bug: callers must keep the last valid swap-chain image instead
@@ -1227,6 +1230,16 @@ private:
     // either way. The bound exists because the map was unbounded, not because it
     // oversubscribes a reported 128 MB pool; there is no such pool.
     std::unordered_map<std::uint64_t, EfbCopyDest> efb_copy_dests_;
+    // Split screen: the second player's half copies into destinations of its own (a key bit), and each view
+    // remembers its latest copy per destination, so set_efb_copy_view can point the game's addresses back at
+    // that view's copies when its half starts. Effects that sample their own earlier copies (bloom, blur,
+    // the final scene capture) then never see the other half's picture.
+    struct ViewCopy {
+        EfbCopyParams params{};
+        Microsoft::WRL::ComPtr<ID3D12Resource> texture;
+    };
+    std::array<std::unordered_map<std::uint64_t, ViewCopy>, 2> efb_view_copies_;
+    unsigned efb_copy_view_ = 0;
     std::uint64_t efb_copy_dests_tick_ = 0;
     std::uint64_t efb_copy_dests_bytes_ = 0;
     // Render-owner-only aggregate work counts, reported once at shutdown.

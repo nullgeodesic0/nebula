@@ -8380,7 +8380,7 @@ bool RendererD3D12::copy_efb_to_texture(
 
     // Keyed by (addr, format, depth-source): SMG reuses one address with
     // different copy formats and each needs its own converted texture.
-    const std::uint64_t dest_key =
+    const std::uint64_t view_key =
         static_cast<std::uint64_t>(params.dest_addr) |
         (static_cast<std::uint64_t>(params.target_format) << 32) |
         (is_depth_copy ? (1ull << 40) : 0ull) |
@@ -8388,6 +8388,8 @@ bool RendererD3D12::copy_efb_to_texture(
         // final native bloom composite. Cache both resources to avoid
         // reallocating on every pass/frame; the latest alias still wins.
         (native_bloom ? (1ull << 41) : 0ull);
+    // Split screen's second view copies into destinations of its own.
+    const std::uint64_t dest_key = view_key | (efb_copy_view_ != 0u ? (1ull << 42) : 0ull);
 
     // Bound the destination map. Each entry is one copy's SCALED destination texture, so its size
     // scales with both the copy's logical extent and `efb_scale_`. At the full 640x456 EFB extent, RGBA8:
@@ -8536,6 +8538,7 @@ bool RendererD3D12::copy_efb_to_texture(
             dest.texture.Get(), *source_box);
         ++efb_identity_copies_;
         efb_identity_payload_bytes_ += static_cast<std::uint64_t>(w) * h * 4u;
+        efb_view_copies_[efb_copy_view_][view_key] = {params, dest.texture};
         return textures.register_efb_copy(params.dest_addr, params, dest.texture);
     }
 
@@ -8596,7 +8599,22 @@ bool RendererD3D12::copy_efb_to_texture(
     // textures one address can alternate between resources, and the alias
     // must always point at the most recent copy (register_efb_copy is a
     // cheap no-op when the resource is unchanged).
+    efb_view_copies_[efb_copy_view_][view_key] = {params, dest.texture};
     return textures.register_efb_copy(params.dest_addr, params, dest.texture);
+}
+
+std::vector<EfbCopyParams> RendererD3D12::set_efb_copy_view(unsigned view, TextureCache& textures) {
+    std::vector<EfbCopyParams> changed;
+    view = view != 0u ? 1u : 0u;
+    if (view == efb_copy_view_) return changed;
+    efb_copy_view_ = view;
+    for (const auto& [key, copy] : efb_view_copies_[view]) {
+        (void)key;
+        if (copy.texture && textures.register_efb_copy(copy.params.dest_addr, copy.params, copy.texture)) {
+            changed.push_back(copy.params);
+        }
+    }
+    return changed;
 }
 
 bool RendererD3D12::ensure_peek_resources() {
