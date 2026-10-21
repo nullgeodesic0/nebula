@@ -97,6 +97,7 @@ constexpr std::uint32_t kLoadViewMtx = 0x803C7394u;         // MR::loadViewMtx()
 constexpr std::uint32_t kSetDefaultViewportAndScissor = 0x803CA5F4u;  // MR::setDefaultViewportAndScissor()
 constexpr std::uint32_t kGetCameraDirector = 0x8009B08Cu;   // MR::getCameraDirector()
 constexpr std::uint32_t kIsEventCameraActive = 0x803C799Cu;  // MR::isEventCameraActive()
+constexpr std::uint32_t kIsOpeningCamera = 0x8033F9F4u;  // GameSceneFunction::isExecScenarioOpeningCamera()
 
 constexpr std::uint32_t kGetFrameBufferWidth = 0x802B5140u;   // MR::getFrameBufferWidth()
 constexpr std::uint32_t kGetFrameBufferHeight = 0x8034AFB0u;  // MR::getFrameBufferHeight()
@@ -350,6 +351,7 @@ struct State {
     std::uint32_t star_swapped = 0u;  // a launch star whose step runs with the second player as the game's
     bool miss_counted = false;
     bool second_riding = false;  // the second player on a launch star: the first flies beside them
+    bool second_hidden_for_start = false;
     std::uint32_t star_traced = 0u;
     bool hud_tried = false;
     std::uint32_t hit_point_name = 0u;  // "HitPointMeter" in the game's data
@@ -513,6 +515,7 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     s.second_meter = s.second_left = s.first_meter = s.first_left = 0u;
     s.hud_tried = false;
     s.star_swapped = 0u;
+    s.second_hidden_for_start = false;
     const std::uint32_t first_mario = guest.u32(first + actor::kMario);
     if (!plausible(first_mario)) return;
     const coop::Vec3 position = guest.vec(first + actor::kPosition);
@@ -607,7 +610,8 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
     const bool first_special = plausible(first_mario) && guest.u32(first_mario + kMarioState) != 0u;
     const bool second_special = plausible(s.second_mario) && guest.u32(s.second_mario + kMarioState) != 0u;
-    s.event_second = coop::camera_event_is_second(actor, s.second, event, second_special, first_special);
+    // At a level start every camera is the first player's (the intro ends where the second player waits).
+    s.event_second = !s.level_start && coop::camera_event_is_second(actor, s.second, event, second_special, first_special);
     const unsigned inputs = (event ? 1u : 0u) | (actor == s.second ? 2u : actor == s.first ? 4u : 0u) |
                             (second_special ? 8u : 0u) | (first_special ? 16u : 0u);
     if (inputs != s.event_inputs) {
@@ -1014,7 +1018,11 @@ void move_second_player(const Guest& guest, State& s) {
     // chosen galaxy (the dome floor no longer holds the second player): travel with them until the next scene.
     if (first_parked && !s.level_start) s.sticky_travel = true;
     const bool first_busy = coop::second_player_waits(first_held, demo) || first_parked || s.sticky_travel;
-    s.controllable_frames = first_busy ? 0u : s.controllable_frames + 1u;
+    // A level start lasts through the mission's opening camera and any event camera of the first player's
+    // arrival, not just until they look controllable.
+    const bool arriving = s.level_start && ((guest.call(fn::kIsOpeningCamera) & 0xFFu) != 0u ||
+                                            (guest.call(fn::kIsEventCameraActive) & 0xFFu) != 0u);
+    s.controllable_frames = first_busy || arriving ? 0u : s.controllable_frames + 1u;
     bool land_beside = false;
     if (s.level_start && s.controllable_frames >= coop::kLevelStartSettleFrames) {
         // The first player has landed and has control: the second joins them.
@@ -1050,8 +1058,16 @@ void move_second_player(const Guest& guest, State& s) {
     }
     // The second player down: they vanish, come back beside the first, or (out of lives) go along hidden.
     if (plausible(first_mario)) update_down_player(guest, s, 1u, first_now, guest.vec(first_mario + kMarioSideVec));
-    const bool second_down = s.down[1].down;
-    if ((beside_first || land_beside) && plausible(first_mario) && !second_down) {
+    // While the first player flies in at a level start, the second waits unseen and untouchable, out of the
+    // camera's picture; they appear beside the first as they land.
+    if (s.level_start != s.second_hidden_for_start && !s.down[1].down) {
+        s.second_hidden_for_start = s.level_start;
+        guest.call(s.level_start ? fn::kHideModel : fn::kShowModel, s.second);
+        guest.call(s.level_start ? fn::kInvalidateHitSensors : fn::kValidateHitSensors, s.second);
+    }
+    // Out of the picture: down, or waiting for the first player at a level start (still parked meanwhile).
+    const bool second_down = s.down[1].down || s.level_start;
+    if ((beside_first || land_beside) && plausible(first_mario) && !s.down[1].down) {
         // Still the second player's turn: MR::setPlayerPos moves the scene's player. A puppeted first player's
         // actor sits at the origin, and at a level start the first is still flying in: the second player then
         // stays where they were.
@@ -1075,7 +1091,10 @@ void move_second_player(const Guest& guest, State& s) {
         const float distance = coop::length(second_position - first_position);
         // While the second player's camera event plays the game camera is theirs, so it cannot tell whether
         // both fit one picture: the screen stays as it is until the event ends.
-        if (!s.event_second) {
+        if (s.level_start) {
+            // The level's intro and the first player's flight in: one screen, the game's camera.
+            s.split.reset();
+        } else if (!s.event_second) {
             s.split.update(shared_extent(guest, s, first_position, second_position), distance, tuning);
         }
         if (s.split.amount() == 0.0f) {
@@ -1225,7 +1244,8 @@ void begin_split_draw(const Guest& guest, State& s) {
     if (!events_swapped(s)) {
         // A game camera set up at the second player's warp while aiming at the first player is not the first
         // player's: their half holds its last good view until the game camera is back with them.
-        if (coop::camera_is_second_players(coop::pose_of(s.camera1.inverse).eye, first_position, second_position)) {
+        if (!s.level_start &&
+            coop::camera_is_second_players(coop::pose_of(s.camera1.inverse).eye, first_position, second_position)) {
             if (!s.hold.active()) {
                 s.hold.start(s.last_camera1, s.last_origin, s.last_projection);
                 trace("the game camera is at the second player: the first player's half holds");
