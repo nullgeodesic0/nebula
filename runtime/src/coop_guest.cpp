@@ -5,6 +5,7 @@
 #include "galaxy/coop.h"
 #include "galaxy/runtime_settings.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdarg>
@@ -14,6 +15,8 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace galaxy {
 namespace {
@@ -71,6 +74,9 @@ constexpr std::uint32_t kIncPlayerLife = 35u;
 // Launch stars: SuperSpinDriver then SpinDriver exeCapture, exeShootStart, exeShoot.
 constexpr std::uint32_t kStarStepFirst = 36u;
 constexpr std::uint32_t kStarStepLast = 41u;
+constexpr std::uint32_t kAddArchive = 42u;          // NameObjArchiveListCollector::addArchive(const char*)
+constexpr std::uint32_t kAttackFirst = 43u;         // 43-45: MarioActor::attackOrPushSensor*(HitSensor*, f32)
+constexpr std::uint32_t kAttackLast = 45u;
 }  // namespace call
 
 namespace fn {
@@ -124,6 +130,7 @@ constexpr std::uint32_t kChangeGameOverAnimation = 0x802AF7BCu;  // MarioActor::
 constexpr std::uint32_t kChangeAnimationNonStop = 0x802AF660u;  // MarioActor::changeAnimationNonStop(const char*)
 // HUD.
 constexpr std::uint32_t kGetLayoutHolder = 0x80361738u;  // MR::getGameSceneLayoutHolder()
+constexpr std::uint32_t kAddArchive = 0x8026158Cu;       // NameObjArchiveListCollector::addArchive(const char*)
 constexpr std::uint32_t kNewOnHeap = 0x80409B0Cu;        // operator new(u32 size, JKRHeap*, int align)
 constexpr std::uint32_t kInitWithoutIter = 0x8026120Cu;  // NameObj::initWithoutIter()
 constexpr std::uint32_t kMeterLayoutCtor = 0x8036C2BCu;  // MeterLayout::MeterLayout(const char*, const char*)
@@ -210,6 +217,7 @@ constexpr std::uint32_t kMarioState = 0x97Cu;     // Mario: MarioState* of a spe
 // (MarioActorDraw.cpp init*Mario).
 constexpr std::uint32_t kActorModels = 0xA28u;
 constexpr std::uint32_t kActorTeresaParts = 0x9A4u;  // MarioActor::_9A4: the Boo form's parts
+constexpr std::uint32_t kActorPlayerMode = 0x3D4u;  // MarioActor::mPlayerMode (u16)
 // ShadowController::_67 (u8): the shadow is past the far clip from the camera (updateFarClipping).
 constexpr std::uint32_t kShadowFarClipped = 0x67u;
 
@@ -363,6 +371,11 @@ struct State {
     bool heal_second_turn = false;
     std::uint32_t star_swapped = 0u;  // a launch star whose step runs with the second player as the game's
     bool miss_counted = false;
+    // NameObjArchiveListCollector::addArchive in flight, and the partner archives a collector already has.
+    std::uint32_t archive_collector = 0u;
+    std::uint32_t archive_name = 0u;
+    std::uint32_t partner_archives_collector = 0u;
+    std::vector<std::string> partner_archives;
     bool second_riding = false;  // the second player on a launch star: the first flies beside them
     bool second_hidden_for_start = false;
     std::uint32_t star_traced = 0u;
@@ -751,6 +764,49 @@ bool rides_star(const Guest& guest, std::uint32_t actor_address) {
     if (!plausible(host)) return false;
     const std::uint32_t vtable = guest.u32(host);
     return vtable == kSuperSpinDriverVtable || vtable == kSpinDriverVtable;
+}
+
+// A power-up archive of the first player's character added to a stage's archive list: the second player's
+// as well, so their power-up models are made (MarioActor::init*Mario, which want the archive loaded) and they
+// can take the power-up.
+constexpr std::array<std::pair<std::string_view, std::string_view>, 7> kPowerUpArchives = {{
+    {"BeeMario", "BeeLuigi"},
+    {"BoneMario", "BoneLuigi"},
+    {"HopperMario", "HopperLuigi"},
+    {"IceMario", "IceLuigi"},
+    {"InvincibleMario", "InvincibleLuigi"},
+    {"TeresaMario", "TeresaLuigi"},
+    {"MarioTornado", "LuigiTornado"},
+}};
+
+void add_partner_archive(const Guest& guest, State& s) {
+    const std::uint32_t collector = s.archive_collector;
+    const std::uint32_t name_address = s.archive_name;
+    s.archive_collector = s.archive_name = 0u;
+    if (!plausible(collector) || !plausible(name_address & ~3u)) return;
+    const std::string name = guest.string(name_address, 64u);
+    const bool own_mario = s.own == coop::Character::Mario;
+    for (const auto& [mario, luigi] : kPowerUpArchives) {
+        const std::string_view own = own_mario ? mario : luigi;
+        const std::string_view partner = own_mario ? luigi : mario;
+        if (name.size() < own.size() || std::string_view(name).substr(0u, own.size()) != own) continue;
+        const std::string wanted = std::string(partner) + name.substr(own.size());  // keeps a ".arc"
+        if (s.partner_archives_collector != collector) {
+            s.partner_archives_collector = collector;
+            s.partner_archives.clear();
+        }
+        if (std::find(s.partner_archives.begin(), s.partner_archives.end(), wanted) != s.partner_archives.end()) return;
+        s.partner_archives.push_back(wanted);
+        const std::uint32_t partner_name = guest.find_string(wanted);
+        if (partner_name == 0u) {
+            trace("partner power-up archive %s: name not in the game's data", wanted.c_str());
+            return;
+        }
+        SavedContext saved(guest.context());
+        guest.call(fn::kAddArchive, collector, partner_name);
+        trace("stage archives: %s with %s", wanted.c_str(), name.c_str());
+        return;
+    }
 }
 
 // Makes the second player (or the first again) the game's player: MarioHolder, gIsLuigi and the channel 0 and 1
@@ -1537,6 +1593,23 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         }
         return;
     }
+    if (id == call::kAddArchive) {
+        s.archive_collector = context->gpr[3];
+        s.archive_name = context->gpr[4];
+        return;
+    }
+    if (id >= call::kAttackFirst && id <= call::kAttackLast) {
+        // MarioActor::attackSensor's attacks and pushes on another player: a landing on the partner was a
+        // stomp, and its bounce landed on them again, forever. The players push each other aside instead
+        // (bump_players).
+        const Guest guest(context, memory, services, guest_pc);
+        const std::uint32_t sensor = context->gpr[4];
+        const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
+        if (plausible(s.second) && host != context->gpr[3] && (host == s.first || host == s.second)) {
+            context->pc = kCoopSkipCall;
+        }
+        return;
+    }
     if (id == call::kGetPlayerLeft) return;
     switch (id) {
     case call::kKpadRead:
@@ -1600,16 +1673,24 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         // MarioActor::setPlayerMode(this, u16 mode, bool): the second player stays as they are rather than
         // take a power-up whose model was not loaded for their character (the game loads only the first
         // player's character's power-up archives; the empty model crashed).
-        if (plausible(s.second) && context->gpr[3] == s.second) {
+        // Nor do both players become Boos: the second's Boo parts draw in the first's Boo draw buffer, which
+        // holds one (DrawBuffer::add overran it). Either way the player keeps the form they have.
+        if (plausible(s.second) && (context->gpr[3] == s.second || context->gpr[3] == s.first)) {
+            const std::uint32_t player = context->gpr[3];
+            const std::uint32_t other = player == s.second ? s.first : s.second;
             const auto mode = static_cast<std::uint16_t>(context->gpr[4] & 0xFFFFu);
             const int slot = coop::power_up_model_slot(mode);
             const Guest guest(context, memory, services, guest_pc);
-            const bool missing = slot == coop::kTeresaParts ? guest.u32(s.second + kActorTeresaParts) == 0u
-                                 : slot >= 0 ? guest.u32(s.second + kActorModels + 4u * static_cast<std::uint32_t>(slot)) == 0u
-                                             : false;
-            if (missing) {
-                trace("second player's power-up %u has no model: not taken", mode);
-                context->gpr[4] = 0u;
+            const bool missing = player == s.second &&
+                                 (slot == coop::kTeresaParts ? guest.u32(s.second + kActorTeresaParts) == 0u
+                                  : slot >= 0 ? guest.u32(s.second + kActorModels + 4u * static_cast<std::uint32_t>(slot)) == 0u
+                                              : false);
+            const bool both_boo = slot == coop::kTeresaParts && (guest.u32(other + kActorPlayerMode) >> 16u) == mode;
+            if (missing || both_boo) {
+                const std::uint32_t current = guest.u32(player + kActorPlayerMode) >> 16u;
+                trace("%s player's power-up %u not taken (%s)", player == s.second ? "second" : "first", mode,
+                      missing ? "no model" : "the other is a Boo");
+                context->gpr[4] = current;
             }
         }
         return;
@@ -1658,6 +1739,10 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
             SavedContext saved(context);
             guest.call(fn::kMarioIncLife, other, s.heal_amount);
         }
+        return;
+    }
+    if (id == call::kAddArchive) {
+        add_partner_archive(guest, s);
         return;
     }
     if (id >= call::kStarStepFirst && id <= call::kStarStepLast) {

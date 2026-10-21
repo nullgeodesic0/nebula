@@ -120,9 +120,11 @@ These come from a game written for one player and are what the playtest should l
   move the first player only; the second rejoins them at the next level start.
 - The Odyssey moves are the first player's only.
 - While the game has the first player's controls (a dome's Pull Star, the flight into a galaxy) or a
-  cutscene plays, the second player travels beside the first; otherwise they are free. The second player cannot take a power-up whose model the game did
-  not load for their character (it loads only the first player's character's power-up archives): they stay
-  as they are.
+  cutscene plays, the second player travels beside the first; otherwise they are free.
+- Power-ups: a stage loads the second player's power-up archives (BeeLuigi, IceLuigi, ...) with the first
+  player's, so both can take every power-up. Both cannot be Boos at once (the second's Boo parts share the
+  first's Boo draw buffer): whoever becomes a Boo second keeps their form.
+- The players push each other aside; neither stomps the other (a landing on the partner bounced forever).
 - Split screen: mirror reflections follow the first player's camera only; the second player's camera has no
   camera areas (the game's fixed and rail cameras are the first player's); an event the second player starts
   through an object (not their own move) plays in the first player's half; the temporal upscaler and motion blur assume one camera a

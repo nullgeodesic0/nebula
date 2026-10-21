@@ -7997,7 +7997,7 @@ fn site_hook_call(pc: u32, kind: &str, argument: u32) -> String {
 /// Co-op calls the runtime may skip from CoopBeforeCall (a player down while the other plays on, the second
 /// player's 2D updates).
 fn coop_call_skippable(id: u32) -> bool {
-    matches!(id, 19..=25)
+    matches!(id, 19..=25 | 43..=45)
 }
 
 /// Game calls the Mario and Luigi co-op watches (CoopBeforeCall/CoopAfterCall, argument the id). The ids
@@ -8051,6 +8051,12 @@ fn coop_call_id(target: u32) -> Option<u32> {
         0x8023_5294 => Some(39), // SpinDriver::exeCapture()
         0x8023_53B4 => Some(40), // SpinDriver::exeShootStart()
         0x8023_5608 => Some(41), // SpinDriver::exeShoot()
+        // The second player's power-up archives join the stage's when the first player's do.
+        0x8026_158C => Some(42), // NameObjArchiveListCollector::addArchive(const char*)
+        // The players do not stomp each other (skippable): MarioActor::attackSensor's attacks and pushes.
+        0x802C_4FFC => Some(43), // MarioActor::attackOrPushSensor(HitSensor*, f32)
+        0x802C_56DC => Some(44), // MarioActor::attackOrPushSensorInDamage(HitSensor*, f32)
+        0x802C_58EC => Some(45), // MarioActor::attackOrPushSensorInRush(HitSensor*, f32)
         _ => None,
     }
 }

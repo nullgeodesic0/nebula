@@ -431,6 +431,11 @@ void run(Agent& a, const Guest& guest, const agent::Command& command) {
         if (!has_arg(command, "force") && !has_power_up_model(guest, target, *mode)) {
             return fail(a, command, "that power-up's model is not loaded in this stage (add force to try anyway)");
         }
+        // As in play (coop_guest.cpp): never both players Boos.
+        const std::uint32_t other = *player == 0u ? coop_second_player(first) : first;
+        if (*mode == 6u && plausible(other) && (guest.u32(other + actor::kPlayerMode) >> 16u) == 6u) {
+            return fail(a, command, "the other player is a Boo");
+        }
         if (*mode < fn::kPowerUpSeen.size() && fn::kPowerUpSeen[*mode] != 0u) guest.call(fn::kPowerUpSeen[*mode]);
         if (*player == 0u) {
             guest.call(fn::kSetPlayerMode, target, *mode, 1u);
