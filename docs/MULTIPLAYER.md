@@ -87,7 +87,7 @@ and 2600 units, and the second player is brought back after two seconds past 260
 Lives work as in New Super Mario Bros. Wii, without the bubble:
 
 - Each player has their own lives and life meter. The first player's lives are the game's own (in the save);
-  the second player's are kept in `coop_lives.txt` next to the save and start as many as the first player has.
+  the second player's are kept in `coop_lives.txt` beside the save folder and start as many as the first player has.
 - A player who goes down (no health left, a fall, a crush) while the other plays on spends one of their lives,
   vanishes after their fall and comes back beside the other about two seconds later, with full health. The
   game's own miss (the "Too Bad!", the restart from the checkpoint) does not happen.

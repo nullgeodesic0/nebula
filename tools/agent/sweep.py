@@ -71,6 +71,9 @@ def main():
     parser.add_argument('--only', nargs='*')
     parser.add_argument('--out', default=os.path.join(nebula_agent.DEFAULT_ROOT, 'sweep'))
     parser.add_argument('--instance', default='sweep')
+    parser.add_argument('--all', action='store_true',
+                        help='include the missions the direct jump cannot start (hidden stars 6-7, the Observatory '
+                             'beyond mission 1)')
     parser.add_argument('--retry', help='a results.json: run only its missions that did not load')
     parser.add_argument('--run', default=nebula_agent.DEFAULT_RUN, help='the build folder')
     args = parser.parse_args()
@@ -78,6 +81,9 @@ def main():
     plan = missions(nebula_agent.DEFAULT_CONTENT)
     if args.only:
         plan = {k: v for k, v in plan.items() if k in args.only}
+    if not args.all:
+        # Hidden stars need their own entrance and the Observatory follows the story: not reachable by a jump.
+        plan = {k: [m for m in v if m < 6 and (k != 'AstroGalaxy' or m == 1)] for k, v in plan.items()}
     if args.retry:
         with open(args.retry) as f:
             failed = {(e['stage'], e['mission']) for e in json.load(f) if e['result'] != 'ok'}

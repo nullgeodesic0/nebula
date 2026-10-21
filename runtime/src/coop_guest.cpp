@@ -830,7 +830,11 @@ std::string second_lives_path() {
     std::size_t length = 0u;
     std::string path;
     if (_dupenv_s(&value, &length, "GALAXY_NAND_ROOT") == 0 && value != nullptr && value[0] != '\0') {
-        path = std::string(value) + "\\coop_lives.txt";
+        // Beside the NAND folder, not in it: the runtime's NAND clears files it does not know at boot.
+        std::string root(value);
+        while (!root.empty() && (root.back() == '\\' || root.back() == '/')) root.pop_back();
+        const std::size_t slash = root.find_last_of("\\/");
+        path = (slash == std::string::npos ? std::string(".") : root.substr(0u, slash)) + "\\coop_lives.txt";
     }
     std::free(value);
     return path;
@@ -850,12 +854,22 @@ void ensure_second_lives(const Guest& guest, State& s) {
     const std::string path = second_lives_path();
     FILE* file = nullptr;
     int lives = -1;
-    if (!path.empty() && fopen_s(&file, path.c_str(), "r") == 0 && file != nullptr) {
-        if (fscanf_s(file, "%d", &lives) != 1) lives = -1;
+    int error = 0;
+    if (!path.empty()) error = static_cast<int>(fopen_s(&file, path.c_str(), "rb"));
+    if (file != nullptr) {
+        char text[16]{};
+        const std::size_t got = std::fread(text, 1u, sizeof(text) - 1u, file);
         std::fclose(file);
+        char* end = nullptr;
+        const long value = std::strtol(text, &end, 10);
+        if (got > 0u && end != text && value >= 0) lives = static_cast<int>(value);
+    } else if (!path.empty()) {
+        trace("second player's lives file not read (error %d)", error);
     }
+    const bool from_file = lives >= 0;
     if (lives < 0) lives = static_cast<int>(guest.call(fn::kGetPlayerLeft));
     s.second_lives = std::clamp(lives, 0, 99);
+    trace("second player's lives: %d (%s %s)", s.second_lives, from_file ? "from" : "no", path.c_str());
     save_second_lives(s);
 }
 
