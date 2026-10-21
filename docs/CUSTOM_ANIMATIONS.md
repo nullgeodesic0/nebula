@@ -165,7 +165,10 @@ animate. The animations set every joint's offset, so each limb and spine segment
 along its bone onto Galaxy's joint spacing (legs 0.70 to 0.84, arms up to 1.42, neck 1.33); across the bone
 one overall scale holds. The export wrote its normals Z-up while the positions are Y-up; the builder picks
 the frame in which the normals agree with the triangles' winding. glTF's texture v runs downward, Blender's
-up. The closed eyelids are left out; the cap-off hair stays (it is also the hair below the cap).
+up. The closed eyelids are left out; the cap-off hair stays (it is also the hair below the cap). The atlas
+is opaque, and Luigi's pupil sheet covers the whole eye but is about 82% see-through around the iris, so it
+is composited over an eye white instead of filled with its average colour, which made the eyes solid blue
+(Mario's pupil sheet is opaque and needs neither).
 
 ## Voices (F1 > General > Custom voice)
 

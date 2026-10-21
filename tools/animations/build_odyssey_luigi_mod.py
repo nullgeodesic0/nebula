@@ -49,6 +49,7 @@ SEGMENTS = {'LegL1': 'LegL2', 'LegL2': 'FootL', 'LegR1': 'LegR2', 'LegR2': 'Foot
 # Meshes left out: the closed eyelids (Galaxy does not blink this model). The hair mesh (HairCapOff) stays:
 # it is also the hair below the cap.
 SKIP = ('Eyelid',)
+EYE_WHITE = np.array([246.0, 246.0, 240.0])  # under the pupil's see-through texels
 # texture (image name without _alb.png) -> atlas region x, y, w, h (the layout of the Mario model's atlas)
 REGIONS = {
     'LuigiBody': (0, 0, 256, 128), 'LuigiHairFace': (256, 0, 256, 256), 'LuigiCap': (0, 128, 128, 128),
@@ -146,7 +147,11 @@ def main():
         im = Image.open(io.BytesIO(model.image_bytes(i))).convert('RGBA').resize((w, h), Image.LANCZOS)
         px = np.asarray(im).astype(np.float32)
         alpha = px[..., 3] / 255.0
-        if alpha.min() < 0.5 and (alpha >= 0.5).any():
+        if 'EyePupil' in key:
+            # The pupil sheet covers the whole eye and is mostly see-through around the iris: the eye white
+            # shows there, not the iris's average colour.
+            px[..., :3] = px[..., :3] * alpha[..., None] + EYE_WHITE * (1.0 - alpha[..., None])
+        elif alpha.min() < 0.5 and (alpha >= 0.5).any():
             px[alpha < 0.5, :3] = px[alpha >= 0.5][:, :3].mean(0)
         px[..., 3] = 255
         atlas[y:y + h, x:x + w] = np.clip(px, 0, 255).astype(np.uint8)
