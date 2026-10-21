@@ -1,5 +1,7 @@
 #include "galaxy/coop_guest.h"
 
+#include "guest_access.h"
+
 #include "galaxy/coop.h"
 #include "galaxy/runtime_settings.h"
 
@@ -15,6 +17,10 @@
 
 namespace galaxy {
 namespace {
+
+using guest_access::Guest;
+using guest_access::plausible;
+using guest_access::SavedContext;
 
 // Mario and Luigi co-op on one screen, in one world (docs/MULTIPLAYER.md).
 //
@@ -58,6 +64,7 @@ constexpr std::uint32_t kGetMarioActor = 0x802E1520u;        // MarioHolder::get
 constexpr std::uint32_t kSetCameraTargetToPlayer = 0x803C8ACCu;  // MR::setGameCameraTargetToPlayer()
 constexpr std::uint32_t kGetWPadHolder = 0x803AB558u;        // (WPadHolder.cpp) getWPadHolder(): +0 WPad* mPad[2]
 constexpr std::uint32_t kSetPlayerPos = 0x803F1F80u;         // MR::setPlayerPos(const TVec3f&)
+constexpr std::uint32_t kSetPlayerMode = 0x802C42C0u;        // MarioActor::setPlayerMode(u16, bool)
 constexpr std::uint32_t kMountArchive = 0x803CDDD4u;         // MR::mountArchive(const char*, JKRHeap*)
 constexpr std::uint32_t kCreateAndAddStationed = 0x803A6A70u;  // ResourceHolderManager::createAndAddStationed(const char*)
 // Mario::push(const TVec3f&): added to the velocity on Mario's next move (Mario::tryPushToVelocity), which
@@ -118,10 +125,6 @@ constexpr std::uint32_t kActorTeresaParts = 0x9A4u;  // MarioActor::_9A4: the Bo
 // ShadowController::_67 (u8): the shadow is past the far clip from the camera (updateFarClipping).
 constexpr std::uint32_t kShadowFarClipped = 0x67u;
 
-bool plausible(std::uint32_t address) {
-    return address >= 0x80000000u && address < 0x81800000u && (address & 3u) == 0u;
-}
-
 bool trace_enabled() {
     static const bool enabled = [] {
         char* value = nullptr;
@@ -143,124 +146,6 @@ void trace(const char* format, ...) {
     std::fputc('\n', stderr);
     va_end(args);
 }
-
-class Guest {
-public:
-    Guest(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t pc)
-        : context_(context), memory_(memory), services_(services), pc_(pc) {}
-
-    std::uint32_t u32(std::uint32_t address) const { return guest_load_u32(memory_, address, services_, pc_); }
-    std::uint8_t u8(std::uint32_t address) const { return guest_load_u8(memory_, address, services_, pc_); }
-    float f32(std::uint32_t address) const { return std::bit_cast<float>(u32(address)); }
-    coop::Vec3 vec(std::uint32_t address) const { return {f32(address), f32(address + 4u), f32(address + 8u)}; }
-    void set_u32(std::uint32_t address, std::uint32_t value) const {
-        guest_store_u32(memory_, address, value, services_, pc_);
-    }
-    void set_u8(std::uint32_t address, std::uint8_t value) const {
-        const std::uint32_t word = address & ~3u;
-        const unsigned shift = (3u - (address & 3u)) * 8u;
-        set_u32(word, (u32(word) & ~(0xFFu << shift)) | (static_cast<std::uint32_t>(value) << shift));
-    }
-    void set_f32(std::uint32_t address, float value) const { set_u32(address, std::bit_cast<std::uint32_t>(value)); }
-    void set_vec(std::uint32_t address, coop::Vec3 v) const {
-        set_f32(address, v.x);
-        set_f32(address + 4u, v.y);
-        set_f32(address + 8u, v.z);
-    }
-
-    // A game function with up to four integer arguments; returns r3. Callers save and restore the context.
-    std::uint32_t call(std::uint32_t function, std::uint32_t r3 = 0u, std::uint32_t r4 = 0u, std::uint32_t r5 = 0u,
-                       std::uint32_t r6 = 0u) const {
-        context_->gpr[3] = r3;
-        context_->gpr[4] = r4;
-        context_->gpr[5] = r5;
-        context_->gpr[6] = r6;
-        services_->call_guest(services_->user, function, context_, memory_);
-        return context_->gpr[3];
-    }
-
-    // Guest stack room below the caller's frame for vectors passed by reference; r1 moves under it for the
-    // calls made while the frame lives and is restored with the context.
-    class Frame {
-    public:
-        explicit Frame(const Guest& guest) : guest_(guest), sp_(guest.context_->gpr[1]) {
-            base_ = (sp_ - 0x140u) & ~0xFu;
-            guest_.set_u32(base_, sp_);  // back chain
-            guest_.context_->gpr[1] = base_;
-        }
-        ~Frame() { guest_.context_->gpr[1] = sp_; }
-        Frame(const Frame&) = delete;
-        Frame& operator=(const Frame&) = delete;
-        // Slot 0..3, 16 bytes each.
-        std::uint32_t vec(unsigned slot, coop::Vec3 value) const {
-            const std::uint32_t at = base_ + 0x10u + slot * 0x10u;
-            guest_.set_vec(at, value);
-            return at;
-        }
-        // 0xC0 bytes of scratch after the vector slots (an out structure such as a Triangle).
-        std::uint32_t scratch() const { return base_ + 0x60u; }
-
-    private:
-        const Guest& guest_;
-        std::uint32_t sp_;
-        std::uint32_t base_ = 0u;
-    };
-
-    std::string string(std::uint32_t address, std::size_t limit = 96u) const {
-        std::string text;
-        if (!plausible(address & ~3u)) return text;
-        for (std::size_t i = 0; i < limit; ++i) {
-            const std::uint8_t c = u8(address + static_cast<std::uint32_t>(i));
-            if (c == 0u) break;
-            text.push_back(static_cast<char>(c));
-        }
-        return text;
-    }
-
-    // The address of a NUL-terminated string in the game's data, or 0.
-    std::uint32_t find_string(std::string_view text) const {
-        constexpr std::uint32_t kBegin = 0x80004000u;
-        constexpr std::uint32_t kEnd = 0x80700000u;
-        const auto first = static_cast<std::uint8_t>(text[0]);
-        for (std::uint32_t at = kBegin + 1u; at + text.size() + 1u < kEnd; ++at) {
-            if (u8(at) != first || u8(at - 1u) != 0u) continue;
-            bool same = true;
-            for (std::size_t i = 1; i < text.size() && same; ++i) {
-                same = u8(at + static_cast<std::uint32_t>(i)) == static_cast<std::uint8_t>(text[i]);
-            }
-            if (same && u8(at + static_cast<std::uint32_t>(text.size())) == 0u) return at;
-        }
-        return 0u;
-    }
-
-    PpcContext* context() const { return context_; }
-
-private:
-    PpcContext* context_;
-    GuestMemoryV1* memory_;
-    const NativeServicesV1* services_;
-    std::uint32_t pc_;
-};
-
-// Restores the interrupted game call's registers when a hook has called into the game itself. The timer
-// state (time base, DEC) is the machine's, not the call's: the game's own calls move it, and rewinding it
-// makes the runtime's DEC tracker diverge from the guest.
-class SavedContext {
-public:
-    explicit SavedContext(PpcContext* context) : context_(context), saved_(*context) {}
-    ~SavedContext() {
-        const PpcTimerState timer = capture_timer_state(context_);
-        *context_ = saved_;
-        restore_timer_state(context_, timer);
-    }
-    SavedContext(const SavedContext&) = delete;
-    SavedContext& operator=(const SavedContext&) = delete;
-
-private:
-    PpcContext* context_;
-    PpcContext saved_;
-};
-
 
 // Guest addresses of the strings the archive calls take, found once.
 struct ArchiveNames {
@@ -368,6 +253,10 @@ struct State {
     std::uint32_t clip_position = 0u;
     float clip_radius = 0.0f;
     float clip_far = 0.0f;
+    // The agent's requests for the second player (coop_request_second_player_*), done in their turn.
+    bool agent_teleport = false;
+    coop::Vec3 agent_position{};
+    int agent_mode = -1;
     // The first player's camera and projection as the game made them, restored after the second half.
     coop::CameraMatrices camera1;
     std::array<float, 16> projection{};
@@ -772,6 +661,16 @@ void move_second_player(const Guest& guest, State& s) {
     if (camera_ctx != 0u) write_camera(guest, camera_ctx, s.camera2);
     guest.call(fn::kMarioActorMovement, s.second);
     if (camera_ctx != 0u) write_camera(guest, camera_ctx, first_camera);
+    if (s.agent_mode >= 0) {
+        guest.call(fn::kSetPlayerMode, s.second, static_cast<std::uint32_t>(s.agent_mode), 1u);
+        trace("agent: second player's power-up %d", s.agent_mode);
+        s.agent_mode = -1;
+    }
+    if (s.agent_teleport) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, s.agent_position));
+        s.agent_teleport = false;
+    }
     if ((beside_first || land_beside) && plausible(first_mario)) {
         // Still the second player's turn: MR::setPlayerPos moves the scene's player. A puppeted first player's
         // actor sits at the origin, and at a level start the first is still flying in: the second player then
@@ -1065,6 +964,10 @@ void fill_partner_kpad(const Guest& guest, State& s) {
 
 void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
                       std::uint32_t guest_pc) {
+    // KPADRead(chan, ...): the agent's frame, at the first player's controller read.
+    if (id == call::kKpadRead && context->gpr[3] == 0u && services != nullptr && services->call_guest != nullptr) {
+        agent_frame(context, memory, services, guest_pc);
+    }
     if (services == nullptr || services->call_guest == nullptr || !coop_for_boot()) return;
     State& s = state();
     (void)memory;
@@ -1220,5 +1123,20 @@ bool coop_is_second_player_mario(std::uint32_t mario) noexcept {
     return mario != 0u && mario == s.second_mario;
 }
 
+
+std::uint32_t coop_second_player(std::uint32_t first) noexcept {
+    const State& s = state();
+    return first != 0u && s.first == first ? s.second : 0u;
+}
+
+void coop_request_second_player_teleport(coop::Vec3 position) noexcept {
+    State& s = state();
+    s.agent_position = position;
+    s.agent_teleport = true;
+}
+
+void coop_request_second_player_mode(std::uint16_t mode) noexcept {
+    state().agent_mode = mode;
+}
 
 }  // namespace galaxy

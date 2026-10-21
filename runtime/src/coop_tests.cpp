@@ -1,8 +1,10 @@
+#include "galaxy/agent.h"
 #include "galaxy/coop.h"
 #include "galaxy/gx/split_clip.h"
 
 #include <cmath>
 #include <iostream>
+#include <string>
 
 namespace {
 
@@ -437,6 +439,29 @@ bool test_leash() {
 
 }  // namespace
 
+bool test_agent_commands() {
+    using namespace galaxy::agent;
+    bool ok = true;
+    const auto command = parse_command("12 press 2 A+Z 30 nowait\r");
+    ok &= expect(command && command->id == 12u && command->verb == Verb::Press && command->args.size() == 4u &&
+                     command->args[1] == "A+Z",
+                 "agent: a command line");
+    ok &= expect(!parse_command("# a note") && !parse_command("x state") && !parse_command("7"),
+                 "agent: notes and malformed lines are not commands");
+    ok &= expect(parse_command("3 dance")->verb == Verb::Unknown, "agent: an unknown verb is kept, to be answered");
+    namespace b = galaxy::coop::button;
+    ok &= expect(parse_buttons("A+B+Z") == (b::kA | b::kB | b::kZ) && parse_buttons("none") == 0u &&
+                     !parse_buttons("A+Q"),
+                 "agent: buttons");
+    ok &= expect(parse_power_up("bee") == 4u && parse_power_up("fly") == 7u && !parse_power_up("cape") &&
+                     std::string(power_up_name(4u)) == "bee",
+                 "agent: power-ups");
+    ok &= expect(parse_player("1") == 0u && parse_player("2") == 1u && !parse_player("3"), "agent: players");
+    ok &= expect(parse_float("-0.5") == -0.5f && !parse_float("x") && parse_int("120") == 120, "agent: numbers");
+    ok &= expect(json_escape("a\"b\\c\n") == "a\\\"b\\\\c\\u000a", "agent: JSON strings");
+    return ok;
+}
+
 int main() {
     bool passed = true;
     passed &= test_characters_and_archives();
@@ -449,6 +474,7 @@ int main() {
     passed &= test_camera_player();
     passed &= test_split_clip_vs_words();
     passed &= test_leash();
+    passed &= test_agent_commands();
     if (!passed) {
         return 1;
     }

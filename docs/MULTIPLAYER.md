@@ -118,3 +118,6 @@ Run with `GALAXY_TRACE_COOP=1` to log each co-op step to the console. Things to 
 6. Dying with either player, and leaving a level.
 
 A crash or a missing character, with the trace's last lines, is the most useful report.
+
+An agent can run most of these unattended with the play-testing tools (docs/AGENT_TESTING.md): a test copy
+that jumps straight into a galaxy mission, gives either player power-ups, moves them and reports crashes.

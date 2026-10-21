@@ -61,11 +61,15 @@
 #include <mutex>
 #include <span>
 #include <thread>
+#include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
 
 namespace galaxy::gx {
+
+// The next presented frame read back to `path` (a .ppm), once: the agent's screenshot (docs/AGENT_TESTING.md).
+void request_present_snapshot(std::string path);
 class DependencyEventSink;
 
 struct GuestMemoryRange {

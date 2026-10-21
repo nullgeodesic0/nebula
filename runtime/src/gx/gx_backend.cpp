@@ -48,6 +48,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -297,7 +298,22 @@ bool capture_pixel_frame_requested(std::uint64_t frame) {
 // Test aid for runs without a display: every Nth swap-chain present is read
 // back and written to GALAXY_PRESENT_SNAPSHOT_DIR\present_<n>.ppm, limited to
 // presents GALAXY_PRESENT_SNAPSHOT_FIRST..GALAXY_PRESENT_SNAPSHOT_LAST.
+// One present read back on request (request_present_snapshot: the agent's screenshot, docs/AGENT_TESTING.md).
+std::mutex& requested_snapshot_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::string& requested_snapshot() {
+    static std::string path;
+    return path;
+}
+
 std::string present_snapshot_path() {
+    {
+        std::lock_guard lock(requested_snapshot_mutex());
+        if (!requested_snapshot().empty()) return std::exchange(requested_snapshot(), std::string{});
+    }
     const auto read_u64 = [](const char* name, std::uint64_t fallback) {
         char value[32]{};
         std::size_t length = 0;
@@ -12865,6 +12881,11 @@ void GxBackend::on_invalidate_vertex_cache() {
     // array memory. Decoded host vertices use dirty-write invalidation plus an
     // exact dependency-byte check before every hit; clearing the whole cache
     // here would discard otherwise-valid display-list reuse.
+}
+
+void request_present_snapshot(std::string path) {
+    std::lock_guard lock(requested_snapshot_mutex());
+    requested_snapshot() = std::move(path);
 }
 
 }  // namespace galaxy::gx

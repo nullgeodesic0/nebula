@@ -3,6 +3,7 @@
 #include "galaxy/ai_dma_timing.h"
 #include "galaxy/native_audio_anomaly.h"
 #include "galaxy/native_audio_queue.h"
+#include "galaxy/agent.h"
 #include "galaxy/button_prompts.h"
 #include "galaxy/controller_hid.h"
 #include "galaxy/coop.h"
@@ -8020,6 +8021,36 @@ void apply_diagnostic_stick_command_file(NativeInputScriptOverlay& overlay) {
     }
 }
 
+// The agent's controller for the first player (agent.h, docs/AGENT_TESTING.md).
+void apply_agent_pad(NativeInputScriptOverlay& overlay) {
+    const agent::Pad pad = agent_pad(0u);
+    if (!pad.active) return;
+    namespace b = coop::button;
+    galaxy::input::WiimoteButtons& buttons = overlay.buttons;
+    buttons.left = buttons.left || (pad.buttons & b::kLeft) != 0u;
+    buttons.right = buttons.right || (pad.buttons & b::kRight) != 0u;
+    buttons.down = buttons.down || (pad.buttons & b::kDown) != 0u;
+    buttons.up = buttons.up || (pad.buttons & b::kUp) != 0u;
+    buttons.plus = buttons.plus || (pad.buttons & b::kPlus) != 0u;
+    buttons.two = buttons.two || (pad.buttons & b::kTwo) != 0u;
+    buttons.one = buttons.one || (pad.buttons & b::kOne) != 0u;
+    buttons.b = buttons.b || (pad.buttons & b::kB) != 0u;
+    buttons.a = buttons.a || (pad.buttons & b::kA) != 0u;
+    buttons.minus = buttons.minus || (pad.buttons & b::kMinus) != 0u;
+    buttons.home = buttons.home || (pad.buttons & b::kHome) != 0u;
+    overlay.nunchuk_c = overlay.nunchuk_c || (pad.buttons & b::kC) != 0u;
+    overlay.nunchuk_z = overlay.nunchuk_z || (pad.buttons & b::kZ) != 0u;
+    overlay.has_stick = true;
+    overlay.stick_x = pad.stick_x;
+    overlay.stick_y = pad.stick_y;
+    overlay.shake = overlay.shake || pad.shake;
+    if (pad.has_pointer) {
+        overlay.has_pointer = true;
+        overlay.pointer_x = pad.pointer_x;
+        overlay.pointer_y = pad.pointer_y;
+    }
+}
+
 void apply_shake_script_env(
     NativeInputScriptOverlay& overlay,
     std::uint64_t current_vi,
@@ -8183,6 +8214,7 @@ NativeInputScriptOverlay build_native_input_script_overlay(
         first_mario_control_vi,
         "GALAXY_INPUT_STICK_SCRIPT");
     apply_diagnostic_stick_command_file(overlay);
+    apply_agent_pad(overlay);
     apply_shake_script_env(
         overlay, current_vi, "GALAXY_INPUT_SHAKE_SCRIPT");
     apply_pointer_script_envs(overlay, current_vi);

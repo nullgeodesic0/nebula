@@ -29,6 +29,17 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
 using SplitClipSink = void (*)(void* user, const float plane[3], unsigned pass, const float separator[4]);
 void coop_set_split_clip_sink(SplitClipSink sink, void* user) noexcept;
 
+// The second player's MarioActor beside `first` (the scene's player), or 0: none, or one left from the last scene
+// (the agent's state and commands, agent_guest.cpp).
+[[nodiscard]] std::uint32_t coop_second_player(std::uint32_t first) noexcept;
+// Done in the second player's own turn after their next move, where MR::setPlayerPos and the player's calls act on
+// them: the agent's teleport and power-up for the second player (agent_guest.cpp).
+void coop_request_second_player_teleport(coop::Vec3 position) noexcept;
+void coop_request_second_player_mode(std::uint16_t mode) noexcept;
+
+// The agent's per-frame step (agent_guest.cpp), at the first player's controller read: with or without co-op.
+void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc);
+
 // The second player's controller, published by the input thread and read once a game frame.
 void coop_publish_partner_input(const coop::PartnerInput& input) noexcept;
 [[nodiscard]] coop::PartnerInput coop_partner_input();
