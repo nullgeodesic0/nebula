@@ -127,6 +127,16 @@ beside the first). A pipe the second player goes through runs with him as the ga
 do. Hooks: `EarthenPipe::exeReady/exePlayerIn/exeTargetPipeShowUp/exePlayerOut` (`pipe_holds`,
 `pipe_after_exit`).
 
+Talks: the brother nearest an NPC gets its A prompt, and his A starts the talk, which plays on him (the NPC
+turns to him; lines that ask whether the player is Luigi answer for him). Talks do not freeze the world: there
+is no talk cutscene (scene stop, player hold), talk pose or talk camera, so both brothers keep moving and the
+world keeps running while the talk window shows. Either brother's A pages the text (A does not jump while a talk
+window is open), and either chooses yes or no, with A or the pointer. A cutscene the talk sets off (a Power Star
+appearing, a Luma turning into a launch star) waits for the talk's end and plays as usual. Talks inside a
+cutscene and the short walk-by balloons are unchanged. Star bunnies run their code as the nearer brother, so
+their talk, chase and caught scene are whoever comes up to them; the caught scene binds that brother. Hooks:
+`talk_begin`, `talk_director_begin`, `talk_calm_skips`, `nearer_player_code` (ids 53-71).
+
 Items: coins, purple coins and star chips are collected by whichever brother touches them (checked with the
 agent's `actors` command). `MR::isNearPlayer` and `isNearPlayerAnyTime` count either brother; switch areas
 (`SwitchArea`, which let star bunnies out, start events and the like) see the second player when he is inside
@@ -141,9 +151,10 @@ These come from a game written for one player and are what the playtest should l
 
 - Enemies, doors and stars act on the first player. The second player can stomp, spin and collect: coins,
   purple coins (Battlerock's), star chips and star bunnies (Gusty Garden's) were checked with the agent. A
-  star bunny the second player catches counts, but its caught scene plays on the first player, who is moved
-  to the bunny (the scene makes the game's player puppetable). A bunny's opening talk starts from the game's
-  player too.
+  bunny's talk and caught scene play on whichever brother comes up to it.
+- Talks: not yet checked in game are NPC actions after a non-freezing talk (a Luma becoming a launch star, a
+  Power Star presented, a Hungry Luma's transformation) and the yes/no choice; the A that starts a talk may
+  also make the talker hop.
 - Rumble goes to the first player's controller.
 - The Observatory's doors and domes (AstroChangeStageCube areas) test the game's player, the first: when the
   second player walks into one the first is not in, the players swap places, so the game takes them through

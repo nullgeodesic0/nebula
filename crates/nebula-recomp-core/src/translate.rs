@@ -7997,7 +7997,7 @@ fn site_hook_call(pc: u32, kind: &str, argument: u32) -> String {
 /// Co-op calls the runtime may skip from CoopBeforeCall (a player down while the other plays on, the second
 /// player's 2D updates).
 fn coop_call_skippable(id: u32) -> bool {
-    matches!(id, 19..=25 | 43..=45 | 47)
+    matches!(id, 19..=25 | 43..=45 | 47 | 63..=68)
 }
 
 /// Game calls the Mario and Luigi co-op watches (CoopBeforeCall/CoopAfterCall, argument the id). The ids
@@ -8082,6 +8082,18 @@ fn coop_call_id(target: u32) -> Option<u32> {
         0x803D_25CC => Some(60), // MR::testCorePadTriggerA(s32)
         0x803F_A9EC => Some(61), // MR::isStarPointerPointingPane(const LayoutActor*, const char*, s32, bool, const char*)
         0x803D_2B6C => Some(62), // MR::testDPDMenuPadDecideTrigger()
+        // Co-op talks do not freeze the world (skippable, by call site in TalkDirector): no talk demo (scene
+        // stop, player hold), talk pose or talk camera; the window opens at once; demos the talk sets off wait
+        // for its end; A pages instead of jumping.
+        0x803C_9470 => Some(63), // MR::tryStartDemoMarioPuppetable(LiveActor*, const char*)
+        0x803F_32AC => Some(64), // MR::startPlayerTalk(const LiveActor*)
+        0x803F_32B0 => Some(65), // MR::endPlayerTalk()
+        0x803C_9B04 => Some(66), // MR::endDemo(NameObj*, const char*)
+        0x802A_0BE8 => Some(67), // TalkMessageCtrl::startCamera(s32)
+        0x803E_D48C | 0x803B_CB9C => Some(68), // MR::endNPCTalkCamera, MR::endMultiActorCamera
+        0x803C_8784 => Some(69), // MR::isCameraInterpolatingNearlyEnd()
+        0x803C_9F18 => Some(70), // MR::canStartDemo()
+        0x802B_B6A0 => Some(71), // MarioActor::checkButtonType(u16 button, bool)
         _ => None,
     }
 }

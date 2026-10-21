@@ -96,6 +96,16 @@ constexpr std::uint32_t kPadButtonA = 59u;           // MR::testCorePadButtonA(s
 constexpr std::uint32_t kPadTriggerA = 60u;          // MR::testCorePadTriggerA(s32)
 constexpr std::uint32_t kPointingPane = 61u;         // MR::isStarPointerPointingPane(layout, pane, s32 chan, bool, name)
 constexpr std::uint32_t kMenuDecide = 62u;           // MR::testDPDMenuPadDecideTrigger()
+// Talks that do not freeze the world (63-68 skippable, by call site in TalkDirector).
+constexpr std::uint32_t kTalkDemoStart = 63u;        // MR::tryStartDemoMarioPuppetable (prepTalk)
+constexpr std::uint32_t kStartPlayerTalk = 64u;      // MR::startPlayerTalk (prepTalk)
+constexpr std::uint32_t kEndPlayerTalk = 65u;        // MR::endPlayerTalk (termTalk)
+constexpr std::uint32_t kEndDemo = 66u;              // MR::endDemo (termTalk)
+constexpr std::uint32_t kTalkCamera = 67u;           // TalkMessageCtrl::startCamera (TalkStateEvent::open)
+constexpr std::uint32_t kTalkCameraEnd = 68u;        // MR::endNPCTalkCamera, MR::endMultiActorCamera (termTalk)
+constexpr std::uint32_t kCameraNearlyEnd = 69u;      // MR::isCameraInterpolatingNearlyEnd (TalkBalloonEvent::exeWait)
+constexpr std::uint32_t kCanStartDemo = 70u;         // MR::canStartDemo()
+constexpr std::uint32_t kCheckButton = 71u;          // MarioActor::checkButtonType(u16 button, bool)
 }  // namespace call
 
 namespace fn {
@@ -448,6 +458,8 @@ struct State {
         bool end_swapped = false;      // endRemoteDemo in flight run as the talker
         bool end_back_to_second = false;
         std::uint32_t end_info = 0u;
+        bool calm = false;             // a talk under way without the world frozen (talk_calm)
+        std::uint32_t button = 0u;     // MarioActor::checkButtonType's button, for after it
         std::uint32_t pad_channel = 0u;   // testCorePad*A's channel, for after it
         std::array<std::uint32_t, 5> pane_args{};  // isStarPointerPointingPane's arguments
     } talk;
@@ -1152,6 +1164,43 @@ void talk_either_choice(const Guest& guest, const State& s, PpcContext* context,
         }
     }
     context->gpr[3] = other;
+}
+
+// Co-op talks do not freeze the world (docs/MULTIPLAYER.md "Talks"). A normal talk's freeze is its demo, started
+// in TalkDirector::prepTalk (the scene stopped but for the player, the HUD away, the player held), the talker's
+// talk pose and the talk camera; the talk window, its pages, choices and the NPC's event callbacks need none of
+// them. So, by call site: no demo, pose or camera (and none of their ends), the window opens at once, demos the
+// talk sets off (a Power Star appearing, a Luma turning into a launch star) wait for its end as they would have,
+// and A pages instead of jumping. Talks inside a cutscene (pauseTimeKeepDemo) and short balloons are left alone.
+bool talk_calm_skips(State& s, std::uint32_t id, std::uint32_t guest_pc) {
+    switch (id) {
+    case call::kTalkDemoStart:
+        if (guest_pc != 0x8029EF08u) return false;
+        if (!s.talk.calm) trace("talk: the world keeps going");
+        s.talk.calm = true;
+        return true;
+    case call::kStartPlayerTalk: return s.talk.calm && guest_pc == 0x8029EF34u;
+    case call::kEndPlayerTalk: return s.talk.calm && guest_pc == 0x8029EFE4u;
+    case call::kEndDemo:
+        if (!s.talk.calm || guest_pc != 0x8029F01Cu) return false;
+        s.talk.calm = false;  // termTalk's last step: the talk is over
+        return true;
+    case call::kTalkCamera: return s.talk.calm && guest_pc == 0x802A2544u;
+    case call::kTalkCameraEnd: return s.talk.calm && (guest_pc == 0x8029EF90u || guest_pc == 0x8029EFC0u);
+    default: return false;
+    }
+}
+
+// After MR::canStartDemo, from the demo request paths (DemoDirector::tryStartDemoRequested, requestStartDemo,
+// requestStartTimeKeepDemo): not while a calm talk is open, so its demos come after it.
+bool demo_request_site(std::uint32_t guest_pc) {
+    switch (guest_pc) {
+    case 0x800BA61Cu: case 0x800BE10Cu: case 0x800BE23Cu: case 0x800BE370u:
+    case 0x800BE48Cu: case 0x800BE5A8u: case 0x800BE6BCu:
+        return true;
+    default:
+        return false;
+    }
 }
 
 // After MR::getPlayerPos in SwitchArea::movement (its `this` in r31), which turns its switch on with the player
@@ -2093,6 +2142,15 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         return;
     }
     if (id == call::kMenuDecide) return;
+    if (id >= call::kTalkDemoStart && id <= call::kTalkCameraEnd) {
+        if (talk_calm_skips(s, id, guest_pc)) context->pc = kCoopSkipCall;
+        return;
+    }
+    if (id == call::kCheckButton) {
+        s.talk.button = context->gpr[4];
+        return;
+    }
+    if (id == call::kCameraNearlyEnd || id == call::kCanStartDemo) return;
     if (id == call::kGetPlayerPos) return;
     if (id == call::kAddArchive) {
         s.archive_collector = context->gpr[3];
@@ -2293,6 +2351,19 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
     }
     if (id == call::kPointingPane || id == call::kMenuDecide) {
         talk_either_choice(guest, s, context, id == call::kPointingPane, guest_pc);
+        return;
+    }
+    if (id >= call::kTalkDemoStart && id <= call::kTalkCameraEnd) return;
+    if (id == call::kCameraNearlyEnd) {
+        if (s.talk.calm && guest_pc == 0x8029D968u) context->gpr[3] = 1u;  // no talk camera to wait for
+        return;
+    }
+    if (id == call::kCanStartDemo) {
+        if (s.talk.calm && demo_request_site(guest_pc)) context->gpr[3] = 0u;
+        return;
+    }
+    if (id == call::kCheckButton) {
+        if (s.talk.calm && s.talk.button == 3u) context->gpr[3] = 0u;  // A (MarioModule::checkTrgA's 3) pages
         return;
     }
     if (id == call::kNearerPlayerCode) {
