@@ -344,33 +344,38 @@ void trace_pointer(const Guest& guest, std::uint32_t self) {
 
 void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
                           std::uint32_t guest_pc) {
-    static moveset::Moveset s_moveset;
+    // One moveset state per player: the first, and the co-op second (coop_guest.cpp), whose turn runs this hook
+    // with their own Mario and controller.
+    static moveset::Moveset s_movesets[2];
     static GuestNames s_names;
-    static bool s_active = false;
+    static bool s_actives[2] = {false, false};
     static bool s_in_tick = false;
     static std::uint32_t s_frame = 0u;
-    static std::uint8_t s_last_run_anim = 0u;
+    static std::uint8_t s_last_run_anims[2] = {0u, 0u};
     if (s_in_tick || services == nullptr || services->call_guest == nullptr) return;
 
+    const std::uint32_t self = context->gpr[3];
+    if (!plausible_mario(self)) return;
+    const unsigned slot = coop_is_second_player_mario(self) ? 1u : 0u;
+    moveset::Moveset& s_moveset = s_movesets[slot];
+    bool& s_active = s_actives[slot];
+    std::uint8_t& s_last_run_anim = s_last_run_anims[slot];
     const OdysseyMovesetSettings settings = get_runtime_settings().moveset;
-    if (!settings.enabled) {
+    const bool enabled = settings.enabled && (slot == 0u || settings.second_player);
+    if (!enabled) {
         if (s_active) {
             s_moveset.reset();
             s_active = false;
         }
         if (!pointer_trace_enabled()) return;
     }
-    const std::uint32_t self = context->gpr[3];
-    if (!plausible_mario(self)) return;
-    // One moveset state follows one Mario: the co-op second player keeps Galaxy's moves.
-    if (coop_is_second_player_mario(self)) return;
 
     s_in_tick = true;
     const PpcContext saved = *context;
     Guest guest(context, memory, services, guest_pc);
     do {
         if (pointer_trace_enabled()) trace_pointer(guest, self);
-        if (!settings.enabled) break;
+        if (!enabled) break;
         const std::uint32_t actor = guest.u32(self + mario::kActor);
         if (!plausible_mario(actor)) break;
         s_active = true;
@@ -404,7 +409,8 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
             view.trig_z = (guest.call(kCheckTrgZ, self) & 0xFFu) != 0u;
             view.lvl_z = (guest.call(kCheckLvlZ, self) & 0xFFu) != 0u;
             // The cap button: Wii 1 pressed this frame (bound to the left stick click and the C key in
-            // runtime_settings.ini; F1 > Controls > 1 rebinds it).
+            // runtime_settings.ini; F1 > Controls > 1 rebinds it). Channel 0 is the player moving: during the co-op
+            // second player's turn coop_guest.cpp swaps the WPads, so it is his controller.
             const std::uint32_t wpad = guest.call(kGetWPad, 0u);
             const std::uint32_t button = plausible_mario(wpad) ? guest.u32(wpad + kWPadButton) : 0u;
             if ((view.jumping && !view.grounded) || s_moveset.rolling()) {
@@ -412,6 +418,7 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
             }
             view.trig_c = plausible_mario(button) &&
                           (guest.u32(button + kWPadButtonTrigger) & kWPadButton1) != 0u;
+            if (view.trig_c && trace_enabled()) std::fprintf(stderr, "[moveset] p%u f%u cap button\n", slot + 1u, s_frame);
 
             // Mario's constant table: MarioActor::mConst -> mTable[mCurrentTable].
             const std::uint32_t constants = guest.u32(actor + kActorConst);
@@ -652,9 +659,9 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
         if (trace_enabled()) {
             if (s_moveset.rolling() != was_rolling || s_moveset.diving() != was_diving || edit.set_jump_vec) {
                 std::fprintf(stderr,
-                             "[moveset] f%u %s roll %d->%d dive %d->%d jt %u walk %.2f jump (%.1f %.1f %.1f) "
+                             "[moveset] p%u f%u %s roll %d->%d dive %d->%d jt %u walk %.2f jump (%.1f %.1f %.1f) "
                              "stick %.2f grounded %d jumping %d hipdrop %d squat %d%s%s\n",
-                             s_frame, edit.set_jump_vec ? "set-jump" : "event", was_rolling, s_moveset.rolling(),
+                             slot + 1u, s_frame, edit.set_jump_vec ? "set-jump" : "event", was_rolling, s_moveset.rolling(),
                              was_diving, s_moveset.diving(), view.jump_type, static_cast<double>(view.walk_speed),
                              static_cast<double>(view.jump_vec.x), static_cast<double>(view.jump_vec.y),
                              static_cast<double>(view.jump_vec.z), static_cast<double>(view.stick_mag),
@@ -663,9 +670,9 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
                              was_rolling && !s_moveset.rolling() ? s_moveset.roll_end_reason() : "");
             } else if (s_frame % 60u == 0u) {
                 std::fprintf(stderr,
-                             "[moveset] f%u elig %d mode %u walk %.2f jt %u g%d j%d hd%d sq%d stick %.2f "
+                             "[moveset] p%u f%u elig %d mode %u walk %.2f jt %u g%d j%d hd%d sq%d stick %.2f "
                              "jv (%.1f %.1f %.1f) front (%.2f %.2f %.2f) down (%.2f %.2f %.2f)\n",
-                             s_frame, view.eligible, mode, static_cast<double>(view.walk_speed), view.jump_type,
+                             slot + 1u, s_frame, view.eligible, mode, static_cast<double>(view.walk_speed), view.jump_type,
                              view.grounded, view.jumping, view.hip_drop, view.squat,
                              static_cast<double>(view.stick_mag), static_cast<double>(view.jump_vec.x),
                              static_cast<double>(view.jump_vec.y), static_cast<double>(view.jump_vec.z),

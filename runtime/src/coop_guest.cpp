@@ -1535,6 +1535,57 @@ void borrow_from_mem2(PpcContext* context, GuestMemoryV1* memory, const NativeSe
     }
 }
 
+// The save-select screen's switches (docs/MULTIPLAYER.md), read from the first player's controller: Wii 1 turns
+// co-op on or off for the save about to be chosen, + the Odyssey moveset (on release, and only pressed alone: - and
+// + together open the settings). The renderer draws the panel; co-op stays as chosen once a save loads.
+struct FileSelectMenu {
+    std::uint32_t kpad_buffer = 0u;  // KPADRead's status buffer for channel 0, between its before and after hooks
+    std::uint32_t hold = 0u;
+    bool plus_alone = false;
+    bool shown = false;
+};
+FileSelectMenu s_menu;
+
+void file_select_frame(const Guest& guest, std::uint32_t samples) {
+    const std::uint32_t system = guest.u32(kGameSystem);
+    const std::uint32_t controller = plausible(system) ? guest.u32(system + 0x24u) : 0u;
+    const bool shown = plausible(controller) && guest.string(controller + 0x00u, 31u) == "Game" &&
+                       guest.string(controller + 0x20u, 31u) == "FileSelect";
+    if (shown != s_menu.shown) {
+        s_menu.shown = shown;
+        set_file_select_options_shown(shown);
+        s_menu.hold = 0u;
+        s_menu.plus_alone = false;
+    }
+    if (!shown) return;
+    RuntimeSettings settings = get_runtime_settings();
+    if (!coop_enabled() != !settings.coop) set_coop_session(settings.coop);
+    if (samples == 0u || samples > 0x10u) return;
+    const std::uint32_t hold = guest.u32(s_menu.kpad_buffer);  // KPADStatus::hold, the newest sample
+    const std::uint32_t pressed = hold & ~s_menu.hold;
+    const std::uint32_t released = s_menu.hold & ~hold;
+    s_menu.hold = hold;
+    namespace b = coop::button;
+    bool changed = false;
+    if ((pressed & b::kOne) != 0u) {
+        settings.coop = !settings.coop;
+        set_coop_session(settings.coop);
+        changed = true;
+        trace("save select: multiplayer %s", settings.coop ? "on" : "off");
+    }
+    if ((pressed & b::kPlus) != 0u) s_menu.plus_alone = (hold & b::kMinus) == 0u;
+    if ((hold & b::kMinus) != 0u) s_menu.plus_alone = false;
+    if ((released & b::kPlus) != 0u && s_menu.plus_alone) {
+        s_menu.plus_alone = false;
+        settings.moveset.enabled = !settings.moveset.enabled;
+        changed = true;
+        trace("save select: odyssey moves %s", settings.moveset.enabled ? "on" : "off");
+    }
+    if (!changed) return;
+    set_runtime_settings(settings);
+    if (!save_runtime_settings_to_file()) trace("save select: the settings file could not be written");
+}
+
 void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
                       std::uint32_t guest_pc) {
     if (id == call::kSolidHeapAllocHead || id == call::kSolidHeapAllocTail) {
@@ -1544,8 +1595,9 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
     // KPADRead(chan, ...): the agent's frame, at the first player's controller read.
     if (id == call::kKpadRead && context->gpr[3] == 0u && services != nullptr && services->call_guest != nullptr) {
         agent_frame(context, memory, services, guest_pc);
+        s_menu.kpad_buffer = context->gpr[4];
     }
-    if (services == nullptr || services->call_guest == nullptr || !coop_for_boot()) return;
+    if (services == nullptr || services->call_guest == nullptr || !coop_enabled()) return;
     State& s = state();
     (void)memory;
     (void)guest_pc;
@@ -1696,7 +1748,11 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
 
 void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
                      std::uint32_t guest_pc) {
-    if (services == nullptr || services->call_guest == nullptr || !coop_for_boot()) return;
+    if (id == call::kKpadRead && s_menu.kpad_buffer != 0u && services != nullptr && services->call_guest != nullptr) {
+        file_select_frame(Guest(context, memory, services, guest_pc), context->gpr[3]);
+        s_menu.kpad_buffer = 0u;
+    }
+    if (services == nullptr || services->call_guest == nullptr || !coop_enabled()) return;
     State& s = state();
     const Guest guest(context, memory, services, guest_pc);
     if (id >= call::kMeterRequestFirst && id <= call::kPlayerLeftLast) {

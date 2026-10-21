@@ -8793,7 +8793,7 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     constexpr std::size_t kNoPartnerPad = static_cast<std::size_t>(-1);
     std::size_t partner_pad = kNoPartnerPad;
     galaxy::coop::PartnerInput partner_input{};
-    if (galaxy::coop_for_boot() && use_pads) {
+    if (galaxy::coop_enabled() && use_pads) {
         std::size_t connected = 0u;
         for (std::size_t index = 0; index < live_pads.size(); ++index) {
             if (!live_pads[index].sample.connected) continue;
@@ -8860,7 +8860,7 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     } else {
         s_pad_previous_pressed = {};
     }
-    if (galaxy::coop_for_boot()) galaxy::coop_publish_partner_input(partner_input);
+    if (galaxy::coop_enabled()) galaxy::coop_publish_partner_input(partner_input);
     galaxy::input::LogicalInput keyboard_logic{};
     if (use_keyboard) {
         keyboard_logic = galaxy::input::evaluate_keyboard_bindings(keyboard_table, keyboard_levels);

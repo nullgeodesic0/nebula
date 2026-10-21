@@ -433,6 +433,29 @@ bool coop_for_boot() noexcept {
     return mod_for_boot(s_running_coop, &RuntimeSettings::coop);
 }
 
+namespace {
+// 0 until the save-select screen first shows, then 1 (off) or 2 (on).
+std::atomic<std::uint8_t> s_coop_session{0u};
+std::atomic<bool> s_file_select_options_shown{false};
+}  // namespace
+
+bool coop_enabled() noexcept {
+    const std::uint8_t session = s_coop_session.load(std::memory_order_acquire);
+    return session == 0u ? coop_for_boot() : session == 2u;
+}
+
+void set_coop_session(bool enabled) noexcept {
+    s_coop_session.store(enabled ? 2u : 1u, std::memory_order_release);
+}
+
+void set_file_select_options_shown(bool shown) noexcept {
+    s_file_select_options_shown.store(shown, std::memory_order_release);
+}
+
+bool file_select_options_shown() noexcept {
+    return s_file_select_options_shown.load(std::memory_order_acquire);
+}
+
 const char* game_language_key(GameLanguage language) noexcept {
     switch (language) {
     case GameLanguage::French: return "french";
@@ -542,7 +565,11 @@ bool reload_runtime_audio_settings_if_changed() noexcept {
         input::ControlsConfig controls = input::default_controls_config();
         parse_settings_file(parsed, controls);
         const RuntimeInputMode file_mode = sanitize_settings(parsed).input_mode;
+        // Co-op as the file has it: GALAXY_TWO_PLAYERS picks the start-up value, and the save-select switch
+        // writes the file after that; re-applying the variable here would undo the switch.
+        const bool file_coop = parsed.coop;
         apply_env_overrides(parsed);
+        parsed.coop = file_coop;
         RuntimeSettings settings = get_runtime_settings();
         settings.audio = parsed.audio;
         settings.text_speed = parsed.text_speed;
@@ -601,6 +628,7 @@ bool save_runtime_settings_to_file() {
                  << "moveset_ground_pound_jump=" << (settings.moveset.ground_pound_jump ? "on" : "off") << '\n'
                  << "moveset_dive=" << (settings.moveset.dive ? "on" : "off") << '\n'
                  << "moveset_turn_boost=" << (settings.moveset.turn_boost ? "on" : "off") << '\n'
+                 << "moveset_second_player=" << (settings.moveset.second_player ? "on" : "off") << '\n'
                  << "coop=" << (settings.coop ? "on" : "off") << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {

@@ -18,7 +18,17 @@ There are three steps:
 ## Switching it on
 
 Nebula Settings > General > "Two players: Mario and Luigi", or `coop=on` in `runtime_settings.ini`
-(`GALAXY_TWO_PLAYERS=1`; not `GALAXY_COOP`, which is the cooperative thread scheduler). It is read when the`r`ngame starts.
+(`GALAXY_TWO_PLAYERS=1`; not `GALAXY_COOP`, which is the cooperative thread scheduler) picks the value at
+start-up. On the save-select screen, a panel in the bottom-right corner switches it as well:
+
+| Button (first controller) | Switch |
+| --- | --- |
+| Wii 1 (Xbox X, DualSense square, keyboard 1) | Multiplayer on or off, for the save about to be chosen |
+| Wii + (Menu / Options, keyboard + or P), pressed alone | Odyssey moves on or off (both players) |
+
+Both are written to `runtime_settings.ini` at once. Co-op follows the switch while that screen is up and stays as
+chosen once a save loads; − and + together still open the settings. The panel shows the buttons of the
+controller in use. `moveset_second_player=off` keeps the Odyssey moves for Mario only.
 
 ## Controllers
 

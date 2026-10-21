@@ -44,6 +44,7 @@ struct OdysseyMovesetSettings {
     bool ground_pound_jump = true;
     bool dive = true;
     bool turn_boost = true;
+    bool second_player = true;  // co-op: the second player has the moveset too
     friend bool operator==(const OdysseyMovesetSettings&, const OdysseyMovesetSettings&) = default;
 };
 
@@ -96,6 +97,13 @@ struct RuntimeSettings {
 [[nodiscard]] bool running_custom_model(bool& enabled) noexcept;
 // The same for co-op: the setting when the game first asks (as the player's archives load), then fixed.
 [[nodiscard]] bool coop_for_boot() noexcept;
+// Co-op for the game being played: coop_for_boot() until the save-select screen first shows, then the setting as
+// it stands while that screen is up (its Multiplayer switch, coop_guest.cpp), fixed again once a save is chosen.
+[[nodiscard]] bool coop_enabled() noexcept;
+void set_coop_session(bool enabled) noexcept;
+// Whether the save-select screen is up, for its Multiplayer / Odyssey moves panel (renderer_d3d12.cpp).
+void set_file_select_options_shown(bool shown) noexcept;
+[[nodiscard]] bool file_select_options_shown() noexcept;
 
 // A coherent input-source snapshot. The generation changes only when the selected input mode changes,
 // so device FIFOs can reject reports acquired under an older source. Unrelated audio-setting writes are

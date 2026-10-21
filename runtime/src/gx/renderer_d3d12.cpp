@@ -9,6 +9,7 @@
 #include "galaxy/gx/render_config.h"
 #include "galaxy/gx/texture_cache.h"
 #include "galaxy/runtime_settings.h"
+#include "galaxy/button_prompts.h"
 #include "galaxy/scope_exit.h"
 #include "galaxy/native_host.h"
 #include "galaxy/frame_timeline.h"
@@ -10258,6 +10259,74 @@ void draw_native_settings_hint(RendererD3D12& renderer) {
             {0.88f, 0.94f, 0.96f, 1.0f});
 }
 
+// The save-select screen's switches (coop_guest.cpp file_select_frame): Multiplayer and the Odyssey moveset, each
+// with the button that flips it, at the bottom right.
+void draw_file_select_options(RendererD3D12& renderer) {
+    if (!file_select_options_shown() || s_native_settings_visible.load(std::memory_order_relaxed) ||
+        s_bb_width < 427u || s_bb_height < 240u) {
+        return;
+    }
+    const RuntimeSettings settings = get_runtime_settings();
+    const galaxy::prompts::PromptSet prompts = galaxy::prompts::published();
+    const auto button = [&](galaxy::prompts::Slot slot, const char* wii) {
+        const auto label = prompts.labels[static_cast<std::size_t>(slot)];
+        if (prompts.family == galaxy::prompts::Family::None || label == galaxy::prompts::Label::None) {
+            return std::string(wii);
+        }
+        return upper_ascii(galaxy::prompts::label_name(prompts.family, label));
+    };
+    struct Row {
+        std::string button;
+        const char* name;
+        bool on;
+    };
+    const Row rows[] = {
+        {button(galaxy::prompts::Slot::One, "1"), "MULTIPLAYER", settings.coop},
+        {button(galaxy::prompts::Slot::Plus, "+"), "ODYSSEY MOVES", settings.moveset.enabled},
+    };
+    const int scale = s_bb_height >= 1440u ? 3 : (s_bb_height >= 720u ? 2 : 1);
+    const auto width_of = [scale](const std::string& text) {
+        int w = 0;
+        for (const char ch : text) w += (ch == ' ' ? 4 : 6) * scale;
+        return w - scale;
+    };
+    int button_w = 0;
+    int name_w = 0;
+    for (const Row& row : rows) {
+        button_w = std::max(button_w, width_of(row.button));
+        name_w = std::max(name_w, width_of(row.name));
+    }
+    const int pad = 10 * scale;
+    const int gap = 8 * scale;
+    const int chip_pad = 3 * scale;
+    const int row_h = 7 * scale + chip_pad * 2;
+    const int row_step = row_h + 4 * scale;
+    const int state_w = width_of("OFF");
+    const int panel_w = pad * 2 + button_w + chip_pad * 2 + gap + name_w + gap * 2 + state_w;
+    const int panel_h = pad * 2 + row_step * 2 - 4 * scale;
+    const int panel_x = static_cast<int>(s_bb_width) - panel_w - 16 * scale;
+    const int panel_y = static_cast<int>(s_bb_height) - panel_h - 16 * scale;
+    const std::array<float, 4> panel{0.02f, 0.025f, 0.035f, 0.86f};
+    const std::array<float, 4> text{0.88f, 0.94f, 0.96f, 1.0f};
+    const std::array<float, 4> muted{0.42f, 0.48f, 0.50f, 1.0f};
+    const std::array<float, 4> chip{0.15f, 0.72f, 0.85f, 1.0f};
+    const std::array<float, 4> chip_text{0.02f, 0.025f, 0.035f, 1.0f};
+    const std::array<float, 4> on{0.45f, 0.90f, 0.45f, 1.0f};
+    ui_rect(renderer, panel_x, panel_y, panel_w, panel_h, panel);
+    ui_rect(renderer, panel_x, panel_y, 2 * scale, panel_h, chip);
+    int y = panel_y + pad;
+    for (const Row& row : rows) {
+        const int chip_w = width_of(row.button) + chip_pad * 2;
+        const int chip_x = panel_x + pad + (button_w + chip_pad * 2 - chip_w) / 2;
+        ui_rect(renderer, chip_x, y, chip_w, row_h, chip);
+        ui_text(renderer, chip_x + chip_pad, y + chip_pad, scale, row.button, chip_text);
+        const int name_x = panel_x + pad + button_w + chip_pad * 2 + gap;
+        ui_text(renderer, name_x, y + chip_pad, scale, row.name, text);
+        ui_text(renderer, name_x + name_w + gap * 2, y + chip_pad, scale, row.on ? "ON" : "OFF", row.on ? on : muted);
+        y += row_step;
+    }
+}
+
 bool RendererD3D12::present(
     const XfbTexture* source, bool capture_backbuffer) {
     // Diagnostic stall watch, gated on its own opt-in flag. GALAXY_TRACE_STALL_WATCH is unset in the
@@ -10492,6 +10561,7 @@ bool RendererD3D12::present(
         const auto stall_watch_overlay_start = stall_watch_overlay
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
+        draw_file_select_options(*this);
         draw_native_settings_overlay(*this);
         draw_native_settings_hint(*this);
         if (stall_watch_overlay) {
