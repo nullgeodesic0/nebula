@@ -27,7 +27,7 @@ enum class Verb {
     Wait,        // wait <frames>: answered after that many frames
     Press,       // press <player 1|2> <buttons A+B+Z..> <frames>: held, then released; answered when released
     Stick,       // stick <player> <x> <y> <frames>: the Nunchuk stick (-1..1, up positive)
-    Pointer,     // pointer <x> <y> | pointer off: the first player's Wii Remote pointer, -1..1 across the screen (y down)
+    Pointer,     // pointer [1|2] <x> <y> | pointer [1|2] off: a player's Star Pointer, -1..1 across the screen (y down)
     Release,     // release <player>: the player's controller back to the person playing
     PowerUp,     // powerup <player> <normal|rainbow|fire|ice|bee|spring|boo|fly> [force]
     Teleport,    // teleport <player> <x> <y> <z>
@@ -53,7 +53,7 @@ struct Pad {
     float stick_x = 0.0f;
     float stick_y = 0.0f;
     bool shake = false;
-    bool has_pointer = false;  // the first player's only
+    bool has_pointer = false;
     float pointer_x = 0.0f;
     float pointer_y = 0.0f;
 };

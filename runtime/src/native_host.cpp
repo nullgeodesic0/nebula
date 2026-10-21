@@ -8021,6 +8021,56 @@ void apply_diagnostic_stick_command_file(NativeInputScriptOverlay& overlay) {
     }
 }
 
+// Co-op: the second player's Star Pointer, the game's orange one on Wii Remote channel 1 (coop.h KpadSynth). It
+// moves as the first player's does (pointer_control.h): the gyro aims it while the stick bound to the pointer
+// keeps turning their camera, or else that stick aims it and the D-pad turns the camera; recenter centres it,
+// and a still pointer hides.
+void update_partner_pointer(galaxy::coop::PartnerInput& input, const LivePad& pad,
+                            const galaxy::input::LogicalInput& logic, const galaxy::input::SchemeTuning& tuning,
+                            bool gyro_pointing) {
+    static float s_x = 0.0f;
+    static float s_y = 0.0f;
+    static std::uint64_t s_clock_us = 0u;
+    static galaxy::input::RecenterHold s_recenter{};
+    static galaxy::input::PointerRestHide s_rest_hide{};
+    const std::uint64_t now_us = controller_hid_now_us();
+    const float dt = s_clock_us == 0u || now_us <= s_clock_us
+        ? 0.0f : std::min(static_cast<float>(now_us - s_clock_us) * 1e-6f, 0.05f);
+    s_clock_us = now_us;
+    const galaxy::input::RecenterHold::Output recenter =
+        s_recenter.update(logic.held(galaxy::input::WiiTarget::PointerRecenter));
+    bool pushed = false;
+    float limit = galaxy::input::kStickPointerLimit;
+    if (gyro_pointing) {
+        limit = galaxy::input::kGyroPointerLimit;
+        s_x += pad.gyro_x;
+        s_y -= tuning.invert_pointer_y ? -pad.gyro_y : pad.gyro_y;
+    } else {
+        const float speed = pad.sample.scheme == galaxy::input::ControlScheme::Xbox
+            ? xinput_pointer_speed_or(tuning.pointer_speed) : tuning.pointer_speed;
+        const float stick_y = tuning.invert_pointer_y ? -logic.pointer_y : logic.pointer_y;
+        const galaxy::input::StickVector velocity =
+            galaxy::input::stick_pointer_velocity({logic.pointer_x, stick_y}, speed);
+        pushed = velocity.x != 0.0f || velocity.y != 0.0f;
+        s_x += velocity.x * dt;
+        s_y -= velocity.y * dt;
+        input.camera_x = 0.0f;
+        input.camera_y = 0.0f;
+    }
+    s_x = std::clamp(s_x, -limit, limit);
+    s_y = std::clamp(s_y, -limit, limit);
+    if (recenter.pinned) {
+        s_x = 0.0f;
+        s_y = 0.0f;
+    }
+    const bool hidden = s_rest_hide.update(s_x, s_y, now_us, true, recenter.pinned || recenter.released || pushed,
+                                           gyro_pointing, tuning.pointer_hide_seconds, tuning.pointer_hide_radius);
+    input.pointer_valid = !hidden && std::fabs(s_x) <= galaxy::input::kPointerVisibleLimit &&
+                          std::fabs(s_y) <= galaxy::input::kPointerVisibleLimit;
+    input.pointer_x = s_x;
+    input.pointer_y = s_y;
+}
+
 // The agent's controller for the first player (agent.h, docs/AGENT_TESTING.md).
 void apply_agent_pad(NativeInputScriptOverlay& overlay) {
     const agent::Pad pad = agent_pad(0u);
@@ -8833,6 +8883,7 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
             s_pad_previous_pressed[index] = pad_logic.pressed;
             if (index == partner_pad) {
                 partner_input = galaxy::coop::partner_input_from(pad_logic, pad.shake_remote || pad.shake_nunchuk);
+                update_partner_pointer(partner_input, pad, pad_logic, tuning, gyro_pointing);
                 continue;
             }
             const float speed = pad.sample.scheme == galaxy::input::ControlScheme::Xbox

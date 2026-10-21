@@ -49,6 +49,9 @@ coop::PartnerInput coop_partner_input() {
         input.stick_x = pad.stick_x;
         input.stick_y = pad.stick_y;
         input.shake = pad.shake;
+        input.pointer_valid = pad.has_pointer;
+        input.pointer_x = pad.pointer_x;
+        input.pointer_y = pad.pointer_y;
         return input;
     }
     PartnerInputSlot& slot = partner_input_slot();

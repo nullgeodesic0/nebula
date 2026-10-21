@@ -81,8 +81,9 @@ inline constexpr std::uint32_t kHome = 0x8000u;
 }  // namespace button
 
 // The second player's controller, as a Wii Remote and Nunchuk: buttons (button::k*), the Nunchuk stick
-// (-1..1, up positive) and a shake (the spin). `camera_x`/`camera_y` are the stick bound to the pointer
-// (usually the right stick): the second player does not aim, so it turns their split-screen camera.
+// (-1..1, up positive) and a shake (the spin). `camera_x`/`camera_y` turn their split-screen camera (the stick
+// bound to the pointer while a gyro aims; native_host.cpp clears them when that stick aims). The pointer is the
+// game's orange second Star Pointer, -1..1 across the picture (y down), shown while `pointer_valid`.
 struct PartnerInput {
     bool connected = false;
     std::uint32_t buttons = 0u;
@@ -91,6 +92,9 @@ struct PartnerInput {
     bool shake = false;
     float camera_x = 0.0f;
     float camera_y = 0.0f;
+    bool pointer_valid = false;
+    float pointer_x = 0.0f;
+    float pointer_y = 0.0f;
 };
 
 // The second player's Wii Remote and Nunchuk from their controller's bindings (the same tables as the first
@@ -126,6 +130,7 @@ inline constexpr std::size_t kRelease = 0x08u;
 inline constexpr std::size_t kAcc = 0x0Cu;
 inline constexpr std::size_t kAccValue = 0x18u;
 inline constexpr std::size_t kAccSpeed = 0x1Cu;
+inline constexpr std::size_t kPos = 0x20u;
 inline constexpr std::size_t kDist = 0x48u;
 inline constexpr std::size_t kDevType = 0x5Cu;
 inline constexpr std::size_t kWpadErr = 0x5Du;
@@ -136,6 +141,7 @@ inline constexpr std::size_t kFsAcc = 0x68u;
 inline constexpr std::size_t kFsAccValue = 0x74u;
 inline constexpr std::uint8_t kDevFreestyle = 1u;    // WPAD_DEV_FREESTYLE: Remote and Nunchuk
 inline constexpr std::uint8_t kFormatFreestyleAcc = 3u;  // WPAD_FMT_FREESTYLE_ACC
+inline constexpr std::uint8_t kFormatFreestyleAccDpd = 5u;  // WPAD_FMT_FREESTYLE_ACC_DPD
 }  // namespace kpad
 
 inline void put_u32(KpadStatusBytes& bytes, std::size_t at, std::uint32_t value) noexcept {
@@ -185,11 +191,17 @@ public:
         put_f32(bytes, kpad::kAccValue, length(acc));
         put_f32(bytes, kpad::kAccSpeed, length(acc - previous_acc_));
         previous_acc_ = acc;
-        put_f32(bytes, kpad::kDist, 0.0f);
+        // The pointer as the first player's synthetic Remote reports it (native_runtime.cpp): the position and
+        // a sensor bar a metre away, or nothing.
+        const bool aiming = input.connected && input.pointer_valid && std::isfinite(input.pointer_x) &&
+                            std::isfinite(input.pointer_y);
+        put_f32(bytes, kpad::kPos, aiming ? std::clamp(input.pointer_x, -1.5f, 1.5f) : 0.0f);
+        put_f32(bytes, kpad::kPos + 4u, aiming ? std::clamp(input.pointer_y, -1.5f, 1.5f) : 0.0f);
+        put_f32(bytes, kpad::kDist, aiming ? 1.0f : 0.0f);
         bytes[kpad::kDevType] = kpad::kDevFreestyle;
         bytes[kpad::kWpadErr] = 0u;
-        bytes[kpad::kDpdValid] = 0u;  // no pointer: the second player does not aim
-        bytes[kpad::kDataFormat] = kpad::kFormatFreestyleAcc;
+        bytes[kpad::kDpdValid] = aiming ? 2u : 0u;
+        bytes[kpad::kDataFormat] = kpad::kFormatFreestyleAccDpd;
         put_f32(bytes, kpad::kFsStick, input.connected ? std::clamp(input.stick_x, -1.0f, 1.0f) : 0.0f);
         put_f32(bytes, kpad::kFsStick + 4u, input.connected ? std::clamp(input.stick_y, -1.0f, 1.0f) : 0.0f);
         put_f32(bytes, kpad::kFsAcc, 0.0f);
@@ -739,11 +751,13 @@ inline constexpr unsigned kRespawnFrames = 150u;  // and reappears beside the ot
     return true;
 }
 
-// Where the life meters and the second player's lives counter stand in co-op, from the first player's own
-// places (layout units, y up): the second player's meter on the right, the first's left of it.
+// Where the life meters and lives counters stand in co-op, from the first player's own places (layout units,
+// y up): the second player's meter on the right, the first's left of it; the second player's lives counter where
+// the first's stands alone, the first's above it (comet timers use the bottom centre).
 inline constexpr float kSecondMeterOffset[2] = {0.0f, 0.0f};   // where the first player's stands alone
-inline constexpr float kFirstMeterOffset[2] = {-105.0f, 0.0f};  // the first player's, moved left beside it
-inline constexpr float kSecondLivesOffset[2] = {0.0f, 46.0f};  // above (comet timers use the bottom centre)
+inline constexpr float kFirstMeterOffset[2] = {-85.0f, 0.0f};  // the first player's, moved left beside it
+inline constexpr float kSecondLivesOffset[2] = {0.0f, 0.0f};
+inline constexpr float kFirstLivesOffset[2] = {0.0f, 46.0f};
 // The second player's life meter rings, as vertex colour (Luigi green).
 inline constexpr std::uint32_t kSecondMeterTint[3] = {90u, 255u, 90u};
 

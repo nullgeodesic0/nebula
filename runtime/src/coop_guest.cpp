@@ -1104,6 +1104,9 @@ void place_hud(const Guest& guest, const State& s) {
     // The meter's own animations (damage, recovery, breaking) set its colours as it moves: its tint after them.
     tint_second_meter(guest, s);
     follow(s.second_left, s.first_left, coop::kSecondLivesOffset[0], coop::kSecondLivesOffset[1]);
+    if (plausible(s.second_left)) {
+        follow(s.first_left, s.first_left, coop::kFirstLivesOffset[0], coop::kFirstLivesOffset[1]);
+    }
 }
 
 void move_second_player(const Guest& guest, State& s) {
@@ -1506,7 +1509,15 @@ void fill_partner_kpad(const Guest& guest, State& s) {
                       (static_cast<std::uint32_t>(bytes[at]) << 24u) | (static_cast<std::uint32_t>(bytes[at + 1u]) << 16u) |
                           (static_cast<std::uint32_t>(bytes[at + 2u]) << 8u) | bytes[at + 3u]);
     }
-    guest.context()->gpr[3] = 1u;  // one status read
+    // The orange Star Pointer (port 1) moves, shows and collects only on a connected Remote: WPad::mIsConnected
+    // (+0x35, MR::isConnectedWPad), which only WPAD's connect callback sets. Both of WPadHolder's pads, as
+    // swap_pads may have them either way round.
+    const std::uint32_t holder = guest.call(fn::kGetWPadHolder);
+    for (std::uint32_t at = 0u; plausible(holder) && at < 8u; at += 4u) {
+        const std::uint32_t pad = guest.u32(holder + at);
+        if (plausible(pad)) guest.set_u8(pad + 0x35u, 1u);
+    }
+    guest.context()->gpr[3] = 1u;  // one status read (after the call above, which returns in r3)
 }
 
 }  // namespace

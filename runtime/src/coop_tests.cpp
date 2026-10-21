@@ -67,6 +67,19 @@ bool test_kpad_layout_and_edges() {
     ok &= expect(get_u32(gone, kpad::kHold) == 0u, "no controller holds nothing");
     ok &= expect(get_u32(gone, kpad::kRelease) == button::kA, "and releases what was held");
     ok &= expect(near(get_f32(gone, kpad::kFsStick), 0.0f), "a centred stick");
+
+    input.connected = true;
+    input.pointer_valid = true;
+    input.pointer_x = 0.25f;
+    input.pointer_y = -0.5f;
+    KpadStatusBytes aiming = synth.next(input);
+    ok &= expect(aiming[kpad::kDpdValid] == 2u, "the second player's pointer is on the screen");
+    ok &= expect(aiming[kpad::kDataFormat] == kpad::kFormatFreestyleAccDpd, "with pointer data");
+    ok &= expect(near(get_f32(aiming, kpad::kPos), 0.25f), "pointer x");
+    ok &= expect(near(get_f32(aiming, kpad::kPos + 4u), -0.5f), "pointer y");
+    ok &= expect(near(get_f32(aiming, kpad::kDist), 1.0f), "a sensor bar a metre away");
+    input.pointer_valid = false;
+    ok &= expect(synth.next(input)[kpad::kDpdValid] == 0u, "a hidden pointer reports nothing");
     return ok;
 }
 

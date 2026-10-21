@@ -38,8 +38,12 @@ The first player plays whichever character the save file plays; the second playe
   second player's. Keyboard and mouse stay the first player's.
 - One controller: the keyboard and mouse are the first player's, the controller is the second player's.
 
-The second player uses their controller's own bindings (F1 > Controls). Their pointer is not used; the
-spin is the shake binding or a real shake.
+The second player uses their controller's own bindings (F1 > Controls); the spin is the shake binding or a
+real shake. They have the game's orange second Star Pointer ("P2", Co-Star's): it collects Star Bits, grabs
+Pull Stars and stops enemies with A, and shoots Star Bits with B. A gyro controller (DualSense, Switch) aims it
+while the right stick turns their camera; otherwise the right stick aims it and the D-pad turns their camera.
+The recenter button centres it, and it hides when left still. The game counts it as a connected second Remote
+(WPad::mIsConnected, set by coop_guest.cpp each frame). In split screen it points across the whole picture.
 
 ## What happens in game
 
@@ -106,7 +110,8 @@ Lives work as in New Super Mario Bros. Wii, without the bubble:
 - A coin heals both players.
 
 HUD: the second player's life meter, tinted green, stands where the first player's would (top right), the first player's just left of it; the second player's lives counter,
-with their face, above the first player's (comet timers use the bottom centre). They are the game's own layouts
+with their face, stands where the first player's would (bottom left), the first player's above it (comet timers
+use the bottom centre). They are the game's own layouts
 (HitPointMeter, PlayerLeft), made with the stage's HUD and shown, hidden and killed with the first player's; a
 life lost alone shows on the counter.
 

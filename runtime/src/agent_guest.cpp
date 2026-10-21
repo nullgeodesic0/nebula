@@ -357,19 +357,26 @@ void run(Agent& a, const Guest& guest, const agent::Command& command) {
         return;
     }
     case Verb::Pointer: {
-        PadTimer& timer = a.pads[0];
-        if (args.size() == 1u && args[0] == "off") {
+        // "pointer [2] <x> <y>" | "pointer [2] off": the second player's is their orange Star Pointer.
+        std::vector<std::string> rest(args.begin(), args.end());
+        unsigned player = 0u;
+        if ((rest.size() == 3u || (rest.size() == 2u && rest[1] == "off")) && (rest[0] == "1" || rest[0] == "2")) {
+            player = rest[0] == "2" ? 1u : 0u;
+            rest.erase(rest.begin());
+        }
+        PadTimer& timer = a.pads[player];
+        if (rest.size() == 1u && rest[0] == "off") {
             timer.pad.has_pointer = false;
         } else {
-            const auto x = args.size() == 2u ? agent::parse_float(args[0]) : std::nullopt;
-            const auto y = args.size() == 2u ? agent::parse_float(args[1]) : std::nullopt;
-            if (!x || !y) return fail(a, command, "pointer <x> <y> (-1..1) | pointer off");
+            const auto x = rest.size() == 2u ? agent::parse_float(rest[0]) : std::nullopt;
+            const auto y = rest.size() == 2u ? agent::parse_float(rest[1]) : std::nullopt;
+            if (!x || !y) return fail(a, command, "pointer [1|2] <x> <y> (-1..1) | pointer [1|2] off");
             timer.pad.has_pointer = true;
             timer.pad.pointer_x = std::clamp(*x, -1.0f, 1.0f);
             timer.pad.pointer_y = std::clamp(*y, -1.0f, 1.0f);
         }
         timer.pad.active = true;
-        agent_set_pad(0u, timer.pad);
+        agent_set_pad(player, timer.pad);
         reply(a, command.id, true, "");
         return;
     }
