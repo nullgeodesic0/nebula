@@ -758,6 +758,12 @@ inline constexpr float kSecondMeterOffset[2] = {0.0f, 0.0f};   // where the firs
 inline constexpr float kFirstMeterOffset[2] = {-85.0f, 0.0f};  // the first player's, moved left beside it
 inline constexpr float kSecondLivesOffset[2] = {0.0f, 0.0f};
 inline constexpr float kFirstLivesOffset[2] = {0.0f, 46.0f};
+// NSMBW-style pipes: the first brother in waits inside up to kPipeWaitFrames (6 s) for the other to reach the
+// mouth (within kPipeJoinDistance of it); then both go through, the other right behind.
+inline constexpr std::uint32_t kPipeWaitFrames = 360u;
+inline constexpr float kPipeJoinDistance = 160.0f;
+// A pipe re-armed for the other brother gives up on him after this long (he could not be put on its mouth).
+inline constexpr std::uint32_t kPipeFollowFrames = 240u;
 // The second player's life meter rings, as vertex colour (Luigi green).
 inline constexpr std::uint32_t kSecondMeterTint[3] = {90u, 255u, 90u};
 

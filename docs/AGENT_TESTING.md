@@ -63,11 +63,12 @@ and each player's position, power-up, health, lives, `down`/`out` (co-op lives) 
 | `wait <frames>` | Answered after that many frames; later commands wait for it |
 | `press <1\|2> <A+B..> <frames> [nowait]` | Buttons held, then released (A B 1 2 PLUS MINUS UP DOWN LEFT RIGHT C Z HOME; SHAKE spins) |
 | `stick <1\|2> <x> <y> <frames> [nowait]` | The Nunchuk stick, -1..1, y up |
-| `pointer <x> <y>`, `pointer off` | The first player's pointer, -1..1 across the screen, y down |
+| `pointer [1\|2] <x> <y>`, `pointer [1\|2] off` | A player's Star Pointer (the second's is the orange co-op one), -1..1 across the screen, y down |
 | `release <1\|2>` | The controller back to the person playing |
 | `powerup <1\|2> <normal\|rainbow\|fire\|ice\|bee\|spring\|boo\|fly> [force]` | Refused when the form's model is not loaded in the stage, unless `force` |
 | `teleport <1\|2> <x> <y> <z>` | `MR::setPlayerPos` (the second player's in their own turn) |
 | `kill <1\|2>` | Health to 0 and down (`MarioActor::forceGameOver`), as a hit would |
+| `actors <name part \| .> [max]` | Live actors (`MR::getAllLiveActorGroup`) whose name contains it: name (Shift-JIS shows as `?`), address, vtable (the class: see Petari's symbols), position, dead |
 | `peek <address> [words]`, `poke <address> <word>` | Guest memory (development) |
 | `call <address> [r3 r4 r5 r6]` | A game function on the game thread; its r3 back (development) |
 | `screenshot <path.ppm>` | The next presented frame |

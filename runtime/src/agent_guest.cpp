@@ -35,6 +35,8 @@ namespace fn {
 constexpr std::uint32_t kGetMarioHolder = 0x802E1528u;   // MR::getMarioHolder()
 constexpr std::uint32_t kGetMarioActor = 0x802E1520u;    // MarioHolder::getMarioActor() const
 constexpr std::uint32_t kSetPlayerPos = 0x803F1F80u;     // MR::setPlayerPos(const TVec3f&)
+constexpr std::uint32_t kGetAllLiveActorGroup = 0x8015CDB8u;  // MR::getAllLiveActorGroup()
+constexpr std::uint32_t kIsDead = 0x803DD748u;                // MR::isDead(const LiveActor*)
 constexpr std::uint32_t kSetPlayerMode = 0x802C42C0u;    // MarioActor::setPlayerMode(u16, bool)
 constexpr std::uint32_t kForceGameOver = 0x802B4EB8u;    // MarioActor::forceGameOver()
 constexpr std::uint32_t kGetPlayerLeft = 0x803CC3CCu;    // MR::getPlayerLeft()
@@ -499,6 +501,41 @@ void run(Agent& a, const Guest& guest, const agent::Command& command) {
             words += text;
         }
         reply(a, command.id, true, "\"words\":[" + words + "]");
+        return;
+    }
+    case Verb::Actors: {
+        // MR::getAllLiveActorGroup(): NameObjGroup +0x10 count, +0x14 NameObj**; NameObj +0x4 name,
+        // LiveActor +0xC position. Names are the game's (Shift-JIS shows as '?').
+        if (args.empty()) return fail(a, command, "actors <name part> [max]");
+        const auto most = args.size() >= 2u ? agent::parse_word(args[1]) : std::optional<std::uint32_t>{40u};
+        if (!most) return fail(a, command, "actors <name part> [max]");
+        SavedContext saved(guest.context());
+        const std::uint32_t group = guest.call(fn::kGetAllLiveActorGroup);
+        if (!plausible(group)) return fail(a, command, "no actor group (not in a stage?)");
+        const std::uint32_t count = std::min(guest.u32(group + 0x10u), 4096u);
+        const std::uint32_t objects = guest.u32(group + 0x14u);
+        if (!plausible(objects)) return fail(a, command, "no actor list");
+        std::string list;
+        std::uint32_t listed = 0u;
+        for (std::uint32_t i = 0u; i < count && listed < *most; ++i) {
+            const std::uint32_t actor = guest.u32(objects + 4u * i);
+            if (!plausible(actor)) continue;
+            const std::uint32_t name_at = guest.u32(actor + 4u);
+            std::string name = plausible(name_at) ? guest.string(name_at, 47u) : std::string{};
+            for (char& c : name) {
+                if (static_cast<unsigned char>(c) >= 0x80u) c = '?';
+            }
+            if (args[0] != "." && name.find(args[0]) == std::string::npos) continue;
+            const coop::Vec3 at = guest.vec(actor + 0xCu);
+            char text[64];
+            std::snprintf(text, sizeof(text), "\",\"address\":\"%08X\",\"vtable\":\"%08X\",\"x\":", actor,
+                          guest.u32(actor));
+            list += std::string(listed == 0u ? "" : ",") + "{\"name\":\"" + agent::json_escape(name) + text +
+                    number(at.x) + ",\"y\":" + number(at.y) + ",\"z\":" + number(at.z) + ",\"dead\":" +
+                    ((guest.call(fn::kIsDead, actor) & 0xFFu) != 0u ? "true" : "false") + "}";
+            ++listed;
+        }
+        reply(a, command.id, true, "\"actors\":[" + list + "]");
         return;
     }
     case Verb::Poke: {

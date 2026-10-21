@@ -77,6 +77,14 @@ constexpr std::uint32_t kStarStepLast = 41u;
 constexpr std::uint32_t kAddArchive = 42u;          // NameObjArchiveListCollector::addArchive(const char*)
 constexpr std::uint32_t kAttackFirst = 43u;         // 43-45: MarioActor::attackOrPushSensor*(HitSensor*, f32)
 constexpr std::uint32_t kAttackLast = 45u;
+// EarthenPipe exeReady, exePlayerIn (skippable), exeTargetPipeShowUp, exePlayerOut.
+constexpr std::uint32_t kPipeStepFirst = 46u;
+constexpr std::uint32_t kPipePlayerIn = 47u;
+constexpr std::uint32_t kPipePlayerOut = 49u;
+constexpr std::uint32_t kPipeStepLast = 49u;
+constexpr std::uint32_t kIsNearPlayer = 50u;         // MR::isNearPlayer(const LiveActor*, f32)
+constexpr std::uint32_t kIsNearPlayerAnyTime = 51u;  // MR::isNearPlayerAnyTime(const LiveActor*, f32)
+constexpr std::uint32_t kGetPlayerPos = 52u;         // MR::getPlayerPos()
 }  // namespace call
 
 namespace fn {
@@ -128,6 +136,10 @@ constexpr std::uint32_t kInvalidateHitSensors = 0x803C27CCu;  // MR::invalidateH
 constexpr std::uint32_t kMarioIncLife = 0x802B1CE4u;     // MarioActor::incLife(u32)
 constexpr std::uint32_t kChangeGameOverAnimation = 0x802AF7BCu;  // MarioActor::changeGameOverAnimation()
 constexpr std::uint32_t kChangeAnimationNonStop = 0x802AF660u;  // MarioActor::changeAnimationNonStop(const char*)
+// Pipes (EarthenPipe.cpp).
+constexpr std::uint32_t kIsBckStopped = 0x803DB2B0u;     // MR::isBckStopped(const LiveActor*)
+constexpr std::uint32_t kPipeNrvWait = 0x806A06D0u;      // NrvEarthenPipe::EarthenPipeNrvWait::sInstance
+constexpr std::uint32_t kAreaIsInVolume = 0x8001E1A0u;   // AreaObj::isInVolume(const TVec3f&) const
 // HUD.
 constexpr std::uint32_t kGetLayoutHolder = 0x80361738u;  // MR::getGameSceneLayoutHolder()
 constexpr std::uint32_t kAddArchive = 0x8026158Cu;       // NameObjArchiveListCollector::addArchive(const char*)
@@ -204,6 +216,11 @@ constexpr std::uint32_t kSuperSpinDriverVtable = 0x8058FF8Cu;
 constexpr std::uint32_t kSpinDriverVtable = 0x8058C5ACu;
 // Star-shaped launchers (SuperSpinDriver, SpinDriver): the actor riding them.
 constexpr std::uint32_t kStarBindActor = 0x8Cu;
+// EarthenPipe (Petari EarthenPipe.hpp): its up vector, the top joint's matrix (the mouth at column 3) and the
+// player riding it.
+constexpr std::uint32_t kPipeUp = 0x98u;
+constexpr std::uint32_t kPipeTopMtx = 0xB4u;
+constexpr std::uint32_t kPipeRider = 0xECu;
 
 namespace actor {
 constexpr std::uint32_t kPosition = 0x00Cu;     // LiveActor::mPosition
@@ -372,6 +389,24 @@ struct State {
     std::uint32_t heal_amount = 0u;
     bool heal_second_turn = false;
     std::uint32_t star_swapped = 0u;  // a launch star whose step runs with the second player as the game's
+    std::uint32_t pipe_swapped = 0u;  // the same for a pipe the second player goes through
+    std::uint32_t pipe_out = 0u;      // the pipe of the exePlayerOut in flight
+    std::uint32_t pipe_traced = 0u;
+    std::uint32_t pipe_traced_step = 0u;
+    // NSMBW-style pipes (pipe_holds): the pipe whose first rider waits inside for the other, and the pipe re-armed
+    // for the other to follow through.
+    struct Pipe {
+        std::uint32_t waiting = 0u;
+        std::uint32_t rider = 0u;
+        std::uint32_t frames = 0u;
+        bool partner_in = false;
+        std::uint32_t follow_pipe = 0u;
+        std::uint32_t follower = 0u;
+        std::uint32_t follow_frames = 0u;
+    } pipe;
+    // MR::isNearPlayer* in flight: its actor and distance.
+    std::uint32_t near_actor = 0u;
+    float near_distance = 0.0f;
     bool miss_counted = false;
     std::string last_stage;  // the previous scene's stage, to see a save loaded (on_stage_start)
     // NameObjArchiveListCollector::addArchive in flight, and the partner archives a collector already has.
@@ -547,6 +582,8 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     s.second_meter = s.second_left = s.first_meter = s.first_left = 0u;
     s.hud_tried = false;
     s.star_swapped = 0u;
+    s.pipe_swapped = 0u;
+    s.pipe = {};
     s.second_hidden_for_start = false;
     const std::uint32_t first_mario = guest.u32(first + actor::kMario);
     if (!plausible(first_mario)) return;
@@ -825,6 +862,129 @@ void set_game_player(const Guest& guest, State& s, bool second) {
     guest.call(fn::kSetMarioActor, holder, second ? s.second : s.first);
     if (pads) swap_pads(guest, pad_holder);
     s.moving_second = second;
+}
+
+// Puts a player (0 the first, 1 the second) at a position, made the game's player for MR::setPlayerPos.
+void place_player(const Guest& guest, State& s, unsigned who, coop::Vec3 at) {
+    SavedContext saved(guest.context());
+    const bool was_second = s.moving_second;
+    const bool second = who == 1u;
+    if (second != was_second) set_game_player(guest, s, second);
+    {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, at));
+    }
+    if (second != was_second) set_game_player(guest, s, was_second);
+}
+
+// ---- NSMBW-style pipes (docs/MULTIPLAYER.md "Pipes") ----
+// An EarthenPipe takes one rider through: Ready, PlayerIn (in, then over to its partner pipe), PlayerOut (out).
+// The first brother in waits inside, his PlayerIn held, until the other reaches the mouth or kPipeWaitFrames
+// pass; once he is out the pipe takes riders again with the other on its mouth, who goes through right behind.
+
+coop::Vec3 pipe_mouth(const Guest& guest, std::uint32_t pipe) {
+    const std::uint32_t mtx = guest.u32(pipe + kPipeTopMtx);
+    if (!plausible(mtx)) return guest.vec(pipe + actor::kPosition);
+    return {guest.f32(mtx + 0x0Cu), guest.f32(mtx + 0x1Cu), guest.f32(mtx + 0x2Cu)};
+}
+
+// Before exePlayerIn: whether its rider, in and still (the enter animation done), waits for the other.
+bool pipe_holds(const Guest& guest, State& s, std::uint32_t pipe, std::uint32_t rider) {
+    if (rider != s.first && rider != s.second) return false;
+    if (s.pipe.follow_pipe == pipe && rider == s.pipe.follower) return false;  // the other's own way through
+    const unsigned other = rider == s.second ? 0u : 1u;
+    if (s.down[other].down) return false;
+    bool inside = false;
+    {
+        SavedContext saved(guest.context());  // the step's own arguments stay
+        inside = (guest.call(fn::kIsBckStopped, rider) & 0xFFu) != 0u;
+    }
+    if (!inside) return false;
+    if (s.pipe.waiting != pipe) {
+        s.pipe.waiting = pipe;
+        s.pipe.rider = rider;
+        s.pipe.frames = 0u;
+        s.pipe.partner_in = false;
+        trace("pipe %08X: the %s player waits inside for the other", pipe, other == 1u ? "first" : "second");
+    }
+    if (s.pipe.partner_in) return false;
+    const coop::Vec3 at = guest.vec((other == 1u ? s.second : s.first) + actor::kPosition);
+    const bool arrived = coop::length(at - pipe_mouth(guest, pipe)) < coop::kPipeJoinDistance;
+    if (!arrived && ++s.pipe.frames < coop::kPipeWaitFrames) return true;
+    s.pipe.partner_in = true;  // either way the other follows through
+    trace("pipe %08X: %s; through", pipe, arrived ? "the other is at the mouth" : "waited long enough");
+    return false;
+}
+
+// After exePlayerOut: once the rider is out, the other goes in after him.
+void pipe_after_exit(const Guest& guest, State& s, std::uint32_t pipe) {
+    if (guest.u32(pipe + kPipeRider) != 0u) return;
+    if (s.pipe.follow_pipe == pipe) {
+        s.pipe.follow_pipe = s.pipe.follower = 0u;
+        trace("pipe %08X: both through", pipe);
+        return;
+    }
+    if (s.pipe.waiting != pipe) return;
+    const unsigned other = s.pipe.rider == s.second ? 0u : 1u;
+    s.pipe.waiting = 0u;
+    const std::uint32_t follower = other == 1u ? s.second : s.first;
+    if (s.down[other].down || !plausible(follower)) return;
+    SavedContext saved(guest.context());
+    guest.call(fn::kSetNerve, pipe, fn::kPipeNrvWait);
+    guest.call(fn::kValidateHitSensors, pipe);
+    place_player(guest, s, other, pipe_mouth(guest, pipe) + guest.vec(pipe + kPipeUp) * 20.0f);
+    s.pipe.follow_pipe = pipe;
+    s.pipe.follower = follower;
+    s.pipe.follow_frames = 0u;
+    trace("pipe %08X: the %s player follows", pipe, other == 1u ? "second" : "first");
+}
+
+// After MR::isNearPlayer*: the other brother near counts too.
+bool near_other_player(const Guest& guest, const State& s) {
+    if (!plausible(s.near_actor) || !plausible(s.first) || !plausible(s.second)) return false;
+    const unsigned other = s.moving_second ? 0u : 1u;
+    if (s.down[other].down) return false;
+    const coop::Vec3 at = guest.vec(s.near_actor + actor::kPosition);
+    const coop::Vec3 player = guest.vec((other == 1u ? s.second : s.first) + actor::kPosition);
+    return std::isfinite(s.near_distance) && coop::length(player - at) < s.near_distance;
+}
+
+// After MR::getPlayerPos in SwitchArea::movement (its `this` in r31), which turns its switch on with the player
+// inside it: the second player inside, the first not, answers with the second's position. Areas that let star
+// bunnies out of hiding, start events and so on then see either brother.
+void switch_area_player_pos(const Guest& guest, const State& s, PpcContext* context) {
+    const std::uint32_t area = context->gpr[31];
+    if (!plausible(area) || !plausible(s.first) || !plausible(s.second) || s.down[1].down) return;
+    bool first_in = false;
+    bool second_in = false;
+    {
+        SavedContext saved(context);
+        Guest::Frame frame(guest);
+        first_in = (guest.call(fn::kAreaIsInVolume, area, frame.vec(0, guest.vec(s.first + actor::kPosition))) & 0xFFu) != 0u;
+        second_in = !first_in &&
+            (guest.call(fn::kAreaIsInVolume, area, frame.vec(1, guest.vec(s.second + actor::kPosition))) & 0xFFu) != 0u;
+    }
+    if (second_in) context->gpr[3] = s.second + actor::kPosition;
+}
+
+// After MR::getPlayerPos from a star bunny (TrickRabbit, RunawayRabbit and their kin, whose `this` is in
+// r29-r31): the nearer brother's position, so it runs from either.
+void bunny_player_pos(const Guest& guest, const State& s, PpcContext* context, std::uint32_t guest_pc) {
+    const bool trick = guest_pc >= 0x802938E0u && guest_pc < 0x80299824u;
+    const bool runaway = guest_pc >= 0x80284A58u && guest_pc < 0x80286A54u;
+    if (!trick && !runaway) return;
+    if (!plausible(s.first) || !plausible(s.second) || s.down[0].down || s.down[1].down) return;
+    std::uint32_t bunny = 0u;
+    for (unsigned r = 31u; r >= 29u && bunny == 0u; --r) {
+        const std::uint32_t candidate = context->gpr[r];
+        const std::uint32_t vtable = plausible(candidate) ? guest.u32(candidate) : 0u;
+        if (vtable >= 0x8059E000u && vtable < 0x805A2000u) bunny = candidate;  // the rabbits' vtables
+    }
+    if (bunny == 0u) return;
+    const coop::Vec3 at = guest.vec(bunny + actor::kPosition);
+    const float first = coop::length(guest.vec(s.first + actor::kPosition) - at);
+    const float second = coop::length(guest.vec(s.second + actor::kPosition) - at);
+    context->gpr[3] = (second < first ? s.second : s.first) + actor::kPosition;
 }
 
 // ---- Co-op lives, respawn and HUD (docs/MULTIPLAYER.md "Lives") ----
@@ -1146,7 +1306,15 @@ void move_second_player(const Guest& guest, State& s) {
     // Once a dome's galaxy selector has puppeted the first player, the rest of the scene is the flight into the
     // chosen galaxy (the dome floor no longer holds the second player): travel with them until the next scene.
     if (first_parked && !s.level_start) s.sticky_travel = true;
-    const bool first_busy = coop::second_player_waits(first_held, demo) || first_parked || s.sticky_travel;
+    // A brother waiting inside a pipe, or a pipe taking the other through after him (pipe_holds): the other
+    // stays free to walk to it and go through himself, rather than wait and land beside the first.
+    if (s.pipe.follow_pipe != 0u && ++s.pipe.follow_frames > coop::kPipeFollowFrames) {
+        trace("pipe %08X: the other did not go in; given up", s.pipe.follow_pipe);
+        s.pipe.follow_pipe = s.pipe.follower = 0u;
+    }
+    const bool piping = s.pipe.waiting != 0u || s.pipe.follow_pipe != 0u;
+    const bool first_busy =
+        !piping && (coop::second_player_waits(first_held, demo) || first_parked || s.sticky_travel);
     // A level start lasts through the mission's opening camera and any event camera of the first player's
     // arrival, not just until they look controllable.
     const bool arriving = s.level_start && ((guest.call(fn::kIsOpeningCamera) & 0xFFu) != 0u ||
@@ -1159,7 +1327,7 @@ void move_second_player(const Guest& guest, State& s) {
         land_beside = true;
         trace("level start over: the second player joins the first");
     }
-    s.travelling = coop::keep_travelling(s.travelling, s.level_start || first_busy, s.controllable_frames);
+    s.travelling = !piping && coop::keep_travelling(s.travelling, s.level_start || first_busy, s.controllable_frames);
     const bool beside_first = s.travelling;
 
     const coop::Character partner = coop::partner_of(s.own);
@@ -1265,7 +1433,7 @@ void move_second_player(const Guest& guest, State& s) {
         guest.call(fn::kSetPlayerPos, frame.vec(0, first_position));
         s.entrance_wait = 120u;
         trace("second player at an entrance: the players swap places");
-    } else if (!beside_first && s.leash.update(too_far, coop::CameraTuning{}.warp_frames)) {
+    } else if (!piping && !beside_first && s.leash.update(too_far, coop::CameraTuning{}.warp_frames)) {
         // Still the second player's turn: MR::setPlayerPos moves the scene's player.
         Guest::Frame frame(guest);
         guest.call(fn::kSetPlayerPos, frame.vec(0, first_position));
@@ -1646,6 +1814,37 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         }
         return;
     }
+    if (id >= call::kPipeStepFirst && id <= call::kPipeStepLast) {
+        // A pipe step: the first brother in waits inside for the other (exePlayerIn skipped); the second
+        // player's run with him as the game's player, as launch stars do.
+        const Guest guest(context, memory, services, guest_pc);
+        const std::uint32_t pipe = context->gpr[3];
+        if (!plausible(pipe) || !plausible(s.first) || !plausible(s.second)) return;
+        const std::uint32_t rider = guest.u32(pipe + kPipeRider);
+        if (pipe != s.pipe_traced || id != s.pipe_traced_step) {
+            s.pipe_traced = pipe;
+            s.pipe_traced_step = id;
+            trace("pipe %08X step %u, rider %s", pipe, id - call::kPipeStepFirst,
+                  rider == s.first ? "first" : rider == s.second ? "second" : "none");
+        }
+        if (id == call::kPipePlayerOut) s.pipe_out = pipe;  // for after it (its r3 is gone by then)
+        if (id == call::kPipePlayerIn && pipe_holds(guest, s, pipe, rider)) {
+            context->pc = kCoopSkipCall;
+            return;
+        }
+        if (!s.moving_second && rider == s.second) {
+            SavedContext saved(context);
+            set_game_player(guest, s, true);
+            s.pipe_swapped = pipe;
+        }
+        return;
+    }
+    if (id == call::kIsNearPlayer || id == call::kIsNearPlayerAnyTime) {
+        s.near_actor = context->gpr[3];
+        s.near_distance = static_cast<float>(fpr(context, 1));
+        return;
+    }
+    if (id == call::kGetPlayerPos) return;
     if (id == call::kAddArchive) {
         s.archive_collector = context->gpr[3];
         s.archive_name = context->gpr[4];
@@ -1807,6 +2006,31 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
             SavedContext saved(context);
             set_game_player(guest, s, false);
             s.star_swapped = 0u;
+        }
+        return;
+    }
+    if (id >= call::kPipeStepFirst && id <= call::kPipeStepLast) {
+        if (s.pipe_swapped != 0u) {
+            SavedContext saved(context);
+            set_game_player(guest, s, false);
+            s.pipe_swapped = 0u;
+        }
+        if (id == call::kPipePlayerOut && s.pipe_out != 0u) {
+            pipe_after_exit(guest, s, s.pipe_out);
+            s.pipe_out = 0u;
+        }
+        return;
+    }
+    if (id == call::kIsNearPlayer || id == call::kIsNearPlayerAnyTime) {
+        if ((context->gpr[3] & 0xFFu) == 0u && near_other_player(guest, s)) context->gpr[3] = 1u;
+        s.near_actor = 0u;
+        return;
+    }
+    if (id == call::kGetPlayerPos) {
+        if (guest_pc >= 0x8002574Cu && guest_pc < 0x80025814u) {
+            switch_area_player_pos(guest, s, context);  // SwitchArea::movement
+        } else {
+            bunny_player_pos(guest, s, context, guest_pc);
         }
         return;
     }

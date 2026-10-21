@@ -7997,7 +7997,7 @@ fn site_hook_call(pc: u32, kind: &str, argument: u32) -> String {
 /// Co-op calls the runtime may skip from CoopBeforeCall (a player down while the other plays on, the second
 /// player's 2D updates).
 fn coop_call_skippable(id: u32) -> bool {
-    matches!(id, 19..=25 | 43..=45)
+    matches!(id, 19..=25 | 43..=45 | 47)
 }
 
 /// Game calls the Mario and Luigi co-op watches (CoopBeforeCall/CoopAfterCall, argument the id). The ids
@@ -8057,6 +8057,16 @@ fn coop_call_id(target: u32) -> Option<u32> {
         0x802C_4FFC => Some(43), // MarioActor::attackOrPushSensor(HitSensor*, f32)
         0x802C_56DC => Some(44), // MarioActor::attackOrPushSensorInDamage(HitSensor*, f32)
         0x802C_58EC => Some(45), // MarioActor::attackOrPushSensorInRush(HitSensor*, f32)
+        // NSMBW-style pipes: a brother's EarthenPipe steps (the second's run with him as the game's player); the
+        // first in waits inside (exePlayerIn skippable) for the other.
+        0x801D_1B74 => Some(46), // EarthenPipe::exeReady()
+        0x801D_1C04 => Some(47), // EarthenPipe::exePlayerIn()
+        0x801D_1CCC => Some(48), // EarthenPipe::exeTargetPipeShowUp()
+        0x801D_1D44 => Some(49), // EarthenPipe::exePlayerOut()
+        // Either brother counts as near; star bunnies run from the nearer one.
+        0x803B_D544 => Some(50), // MR::isNearPlayer(const LiveActor*, f32)
+        0x803B_D598 => Some(51), // MR::isNearPlayerAnyTime(const LiveActor*, f32)
+        0x803F_1F34 => Some(52), // MR::getPlayerPos()
         _ => None,
     }
 }

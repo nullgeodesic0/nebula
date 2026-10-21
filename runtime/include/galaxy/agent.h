@@ -33,6 +33,7 @@ enum class Verb {
     Teleport,    // teleport <player> <x> <y> <z>
     Kill,        // kill <player>: health to 0 and down (MarioActor::forceGameOver), as a hit would
     Peek,        // peek <address> [words]: guest memory, hex (development)
+    Actors,      // actors <name part or .> [max]: live actors whose name contains it, with addresses and positions
     Poke,        // poke <address> <word>: one guest word (development)
     Call,        // call <address> [r3 r4 r5 r6]: a game function on the game thread, its r3 back (development)
     Screenshot,  // screenshot <path.ppm>: the next presented frame
@@ -72,6 +73,7 @@ struct Pad {
     if (name == "teleport") return Verb::Teleport;
     if (name == "kill") return Verb::Kill;
     if (name == "peek") return Verb::Peek;
+    if (name == "actors") return Verb::Actors;
     if (name == "poke") return Verb::Poke;
     if (name == "call") return Verb::Call;
     if (name == "screenshot") return Verb::Screenshot;

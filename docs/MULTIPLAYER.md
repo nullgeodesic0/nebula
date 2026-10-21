@@ -119,6 +119,19 @@ Launch stars: the player on a launch star (either one) flies, and the other flie
 star's camera; both land together. A launch star ridden by the second player runs with them as the game's
 player, so the flight's animations and its end are theirs.
 
+Pipes work as in New Super Mario Bros. Wii. The first brother into a green pipe (EarthenPipe) waits inside,
+held before he crosses over, until the other reaches its mouth or 6 seconds pass. Then he comes out of the
+other end, and the pipe takes the other in right behind him (put on its mouth if he did not come): both play
+the pipe's own enter and exit, and arrive together. While one waits, the other moves freely (no travelling
+beside the first). A pipe the second player goes through runs with him as the game's player, as launch stars
+do. Hooks: `EarthenPipe::exeReady/exePlayerIn/exeTargetPipeShowUp/exePlayerOut` (`pipe_holds`,
+`pipe_after_exit`).
+
+Items: coins, purple coins and star chips are collected by whichever brother touches them (checked with the
+agent's `actors` command). `MR::isNearPlayer` and `isNearPlayerAnyTime` count either brother; switch areas
+(`SwitchArea`, which let star bunnies out, start events and the like) see the second player when he is inside
+and the first is not; star bunnies (`TrickRabbit`, `RunawayRabbit`) run from the nearer brother.
+
 The runtime side is in `coop_guest.cpp` (`on_game_over_call`, `update_down_player`, `create_hud`,
 `rides_star`); the rules are `coop::go_down_alone` and `coop::respawn_due`, tested in `coop_tests.cpp`.
 
@@ -126,14 +139,15 @@ The runtime side is in `coop_guest.cpp` (`on_game_over_call`, `update_down_playe
 
 These come from a game written for one player and are what the playtest should look at:
 
-- Enemies, doors and stars act on the first player. The second player can stomp and spin; pickups other than
-  coins may count for the first player.
+- Enemies, doors and stars act on the first player. The second player can stomp, spin and collect. A star
+  bunny the second player catches still plays its caught scene on the first player (it makes the game's
+  player puppetable); catching by the second player is not yet tested in game (Gateway's bunnies need
+  their story switch, which a direct jump does not set).
 - Rumble goes to the first player's controller.
 - The Observatory's doors and domes (AstroChangeStageCube areas) test the game's player, the first: when the
   second player walks into one the first is not in, the players swap places, so the game takes them through
   (and both arrive in the next scene). Warps, launch stars and cutscenes the game starts for the first player
   move the first player only; the second rejoins them at the next level start.
-- The Odyssey moves are the first player's only.
 - While the game has the first player's controls (a dome's Pull Star, the flight into a galaxy) or a
   cutscene plays, the second player travels beside the first; otherwise they are free.
 - Power-ups: a stage loads the second player's power-up archives (BeeLuigi, IceLuigi, ...) with the first
