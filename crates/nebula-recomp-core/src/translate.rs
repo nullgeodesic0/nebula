@@ -8067,6 +8067,21 @@ fn coop_call_id(target: u32) -> Option<u32> {
         0x803B_D544 => Some(50), // MR::isNearPlayer(const LiveActor*, f32)
         0x803B_D598 => Some(51), // MR::isNearPlayerAnyTime(const LiveActor*, f32)
         0x803F_1F34 => Some(52), // MR::getPlayerPos()
+        // Star bunnies' code runs with the brother nearer the bunny as the game's player.
+        0x8029_38E0..=0x8029_9823 => Some(53), // TrickRabbit and its kin
+        0x8028_4A58..=0x8028_6A53 => Some(53), // RunawayRabbit, RunawayRabbitCollect
+        // Multiplayer talks: the brother nearest an NPC talks to it (its talk calls and the talk director run
+        // with him as the game's player), either brother's A pages and either chooses, and the other waits.
+        0x803F_E18C..=0x803F_E61F => Some(54), // MR::tryTalk*(TalkMessageCtrl*, ...)
+        0x803E_E020..=0x803E_E157 => Some(55), // MR::tryTalk*AndStartTalkAction(NPCActor*, ...)
+        0x8029_ED3C | 0x8036_60E4 => Some(56), // TalkDirector::updateMessage, LayoutActor::movement (from
+                                               // TalkDirector::movement only, by call site)
+        0x8030_4538 => Some(57), // MarioAccess::endRemoteDemo(const RushEndInfo*)
+        0x8030_3B5C => Some(58), // MarioAccess::readyRemoteDemo()
+        0x803D_2244 => Some(59), // MR::testCorePadButtonA(s32)
+        0x803D_25CC => Some(60), // MR::testCorePadTriggerA(s32)
+        0x803F_A9EC => Some(61), // MR::isStarPointerPointingPane(const LayoutActor*, const char*, s32, bool, const char*)
+        0x803D_2B6C => Some(62), // MR::testDPDMenuPadDecideTrigger()
         _ => None,
     }
 }

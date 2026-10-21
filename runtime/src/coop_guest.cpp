@@ -85,6 +85,17 @@ constexpr std::uint32_t kPipeStepLast = 49u;
 constexpr std::uint32_t kIsNearPlayer = 50u;         // MR::isNearPlayer(const LiveActor*, f32)
 constexpr std::uint32_t kIsNearPlayerAnyTime = 51u;  // MR::isNearPlayerAnyTime(const LiveActor*, f32)
 constexpr std::uint32_t kGetPlayerPos = 52u;         // MR::getPlayerPos()
+constexpr std::uint32_t kNearerPlayerCode = 53u;     // any function of the star bunnies (TrickRabbit, RunawayRabbit)
+// Multiplayer talks (talk_begin).
+constexpr std::uint32_t kTryTalk = 54u;              // MR::tryTalk*(TalkMessageCtrl*, ...)
+constexpr std::uint32_t kTryTalkNpc = 55u;           // MR::tryTalk*AndStartTalkAction(NPCActor*, ...)
+constexpr std::uint32_t kTalkDirectorStep = 56u;     // TalkDirector::movement's updateMessage and LayoutActor::movement
+constexpr std::uint32_t kEndRemoteDemo = 57u;        // MarioAccess::endRemoteDemo(const RushEndInfo*)
+constexpr std::uint32_t kReadyRemoteDemo = 58u;      // MarioAccess::readyRemoteDemo()
+constexpr std::uint32_t kPadButtonA = 59u;           // MR::testCorePadButtonA(s32)
+constexpr std::uint32_t kPadTriggerA = 60u;          // MR::testCorePadTriggerA(s32)
+constexpr std::uint32_t kPointingPane = 61u;         // MR::isStarPointerPointingPane(layout, pane, s32 chan, bool, name)
+constexpr std::uint32_t kMenuDecide = 62u;           // MR::testDPDMenuPadDecideTrigger()
 }  // namespace call
 
 namespace fn {
@@ -140,6 +151,14 @@ constexpr std::uint32_t kChangeAnimationNonStop = 0x802AF660u;  // MarioActor::c
 constexpr std::uint32_t kIsBckStopped = 0x803DB2B0u;     // MR::isBckStopped(const LiveActor*)
 constexpr std::uint32_t kPipeNrvWait = 0x806A06D0u;      // NrvEarthenPipe::EarthenPipeNrvWait::sInstance
 constexpr std::uint32_t kAreaIsInVolume = 0x8001E1A0u;   // AreaObj::isInVolume(const TVec3f&) const
+// Talks.
+constexpr std::uint32_t kIsSystemTalking = 0x803CA334u;  // MR::isSystemTalking()
+constexpr std::uint32_t kReadyRemoteDemo = 0x80303B5Cu;  // MarioAccess::readyRemoteDemo(): the game's player held
+constexpr std::uint32_t kEndRemoteDemo = 0x80304538u;    // MarioAccess::endRemoteDemo(const RushEndInfo*)
+constexpr std::uint32_t kTestPadButtonA = 0x803D2244u;   // MR::testCorePadButtonA(s32 channel)
+constexpr std::uint32_t kTestPadTriggerA = 0x803D25CCu;  // MR::testCorePadTriggerA(s32 channel)
+constexpr std::uint32_t kPointingPane = 0x803FA9ECu;     // MR::isStarPointerPointingPane(...)
+constexpr std::uint32_t kMenuDecide = 0x803D2B6Cu;       // MR::testDPDMenuPadDecideTrigger(): channel 0's A
 // HUD.
 constexpr std::uint32_t kGetLayoutHolder = 0x80361738u;  // MR::getGameSceneLayoutHolder()
 constexpr std::uint32_t kAddArchive = 0x8026158Cu;       // NameObjArchiveListCollector::addArchive(const char*)
@@ -404,6 +423,34 @@ struct State {
         std::uint32_t follower = 0u;
         std::uint32_t follow_frames = 0u;
     } pipe;
+    // Star bunny code run with the brother nearer the bunny as the game's player (nearer_player_code): the
+    // nesting depth of calls into it, whether the outermost one swapped, and to whom it gives back.
+    std::uint32_t nearer_depth = 0u;
+    bool nearer_swapped = false;
+    bool nearer_back_to_second = false;
+    // Frames left of a scene (a talk, a bunny's catch) a brother other than the first alone is in: the second is
+    // not taken along with the first, who the scene holds.
+    std::uint32_t second_scene = 0u;
+    // Multiplayer talks (talk_begin): the brother nearest an NPC talks to it; the other waits in place.
+    struct Talk {
+        std::uint32_t depth = 0u;      // talk calls (54-56) in flight
+        bool swapped = false;          // the outermost made the talker the game's player
+        bool back_to_second = false;
+        bool talker_second = false;    // who the outermost runs as
+        bool locked = false;           // a talk under way, and who has it
+        bool locked_second = false;
+        std::uint32_t candidate_frames = 0u;  // the brother an NPC last asked about, for the talk director
+        bool candidate_second = false;
+        bool held = false;             // a brother held by the game (readyRemoteDemo), and which
+        bool held_second = false;
+        bool other_held = false;       // the other brother held (readyRemoteDemo) with the talker
+        bool held_talker_second = false;
+        bool end_swapped = false;      // endRemoteDemo in flight run as the talker
+        bool end_back_to_second = false;
+        std::uint32_t end_info = 0u;
+        std::uint32_t pad_channel = 0u;   // testCorePad*A's channel, for after it
+        std::array<std::uint32_t, 5> pane_args{};  // isStarPointerPointingPane's arguments
+    } talk;
     // MR::isNearPlayer* in flight: its actor and distance.
     std::uint32_t near_actor = 0u;
     float near_distance = 0.0f;
@@ -584,6 +631,10 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     s.star_swapped = 0u;
     s.pipe_swapped = 0u;
     s.pipe = {};
+    s.nearer_depth = 0u;
+    s.nearer_swapped = false;
+    s.second_scene = 0u;
+    s.talk = {};
     s.second_hidden_for_start = false;
     const std::uint32_t first_mario = guest.u32(first + actor::kMario);
     if (!plausible(first_mario)) return;
@@ -949,6 +1000,160 @@ bool near_other_player(const Guest& guest, const State& s) {
     return std::isfinite(s.near_distance) && coop::length(player - at) < s.near_distance;
 }
 
+// A call into a star bunny's code from outside it (its nerve steps, sensor answers, catch): the code runs with the
+// brother nearer the bunny as the game's player, so the one who comes up to it is the one it talks to, runs
+// from and is caught by (the caught scene binds him), and the other is left where he is.
+void nearer_player_code(const Guest& guest, State& s) {
+    const std::uint32_t actor = guest.context()->gpr[3];
+    if (!plausible(actor) || !plausible(s.first) || !plausible(s.second) || s.down[1].down) return;
+    const std::uint32_t vtable = guest.u32(actor);
+    if (vtable < 0x8059E000u || vtable >= 0x805A2000u) return;  // the rabbits' vtables (not a constructor)
+    const coop::Vec3 at = guest.vec(actor + actor::kPosition);
+    const bool second = s.down[0].down ||
+        coop::length(guest.vec(s.second + actor::kPosition) - at) < coop::length(guest.vec(s.first + actor::kPosition) - at);
+    if (second) s.second_scene = 30u;
+    if (second == s.moving_second) return;
+    SavedContext saved(guest.context());
+    s.nearer_back_to_second = s.moving_second;
+    set_game_player(guest, s, second);
+    s.nearer_swapped = true;
+}
+
+// ---- Multiplayer talks (docs/MULTIPLAYER.md "Talks") ----
+// The brother nearest an NPC is the one it offers a talk to (the A prompt is his, and his A starts it); the talk
+// then plays on him: the NPC turns to him, he takes the talk pose, the camera frames him, and lines that ask
+// whether the player is Luigi answer for him. Either brother's A pages the text, and either chooses yes or no.
+// The other brother is held where he stands for the talk (readyRemoteDemo, as the game holds its player) and
+// let go with the talker.
+
+bool second_nearer(const Guest& guest, const State& s, std::uint32_t actor) {
+    if (s.down[1].down) return false;
+    if (s.down[0].down) return true;
+    const coop::Vec3 at = guest.vec(actor + actor::kPosition);
+    return coop::length(guest.vec(s.second + actor::kPosition) - at) <
+           coop::length(guest.vec(s.first + actor::kPosition) - at);
+}
+
+// Before an outermost talk call: run it as `second` (or the first), recording how to give the game back.
+void talk_swap(const Guest& guest, State& s, bool second) {
+    s.talk.talker_second = second;
+    if (second) s.second_scene = 30u;
+    if (second == s.moving_second) return;
+    SavedContext saved(guest.context());
+    s.talk.back_to_second = s.moving_second;
+    set_game_player(guest, s, second);
+    s.talk.swapped = true;
+}
+
+// Before MR::tryTalk* (the NPC's own talk calls; `host` the NPC): the talker under way, or the nearer brother.
+void talk_begin(const Guest& guest, State& s, std::uint32_t host) {
+    if (!plausible(s.first) || !plausible(s.second)) return;
+    bool second = false;
+    if (s.talk.locked) {
+        second = s.talk.locked_second;
+    } else if (plausible(host)) {
+        second = second_nearer(guest, s, host);
+        s.talk.candidate_second = second;
+        s.talk.candidate_frames = 2u;
+    } else {
+        return;
+    }
+    talk_swap(guest, s, second);
+}
+
+// Before TalkDirector::movement's steps (the A prompt, the talk's start, paging, its end): its talker.
+void talk_director_begin(const Guest& guest, State& s) {
+    if (!plausible(s.first) || !plausible(s.second)) return;
+    if (s.talk.locked) {
+        s.second_scene = 30u;  // nobody is taken along while a talk is under way
+        talk_swap(guest, s, s.talk.locked_second);
+    } else if (s.talk.candidate_frames != 0u) {
+        talk_swap(guest, s, s.talk.candidate_second);
+    }
+}
+
+// After the outermost talk call: the game back as it was; a talk that has started is locked to its talker, one
+// that has ended is let go.
+void talk_end(const Guest& guest, State& s) {
+    SavedContext saved(guest.context());
+    if (s.talk.swapped) {
+        set_game_player(guest, s, s.talk.back_to_second);
+        s.talk.swapped = false;
+    }
+    const bool talking = (guest.call(fn::kIsSystemTalking) & 0xFFu) != 0u;
+    if (talking && !s.talk.locked) {
+        s.talk.locked = true;
+        s.talk.locked_second = s.talk.talker_second;
+        trace("talk: the %s player talks", s.talk.locked_second ? "second" : "first");
+    } else if (!talking && s.talk.locked) {
+        s.talk.locked = false;
+        trace("talk over");
+    }
+}
+
+// After MarioAccess::readyRemoteDemo inside a talk call: the other brother is held too.
+void talk_hold_other(const Guest& guest, State& s) {
+    if (s.talk.depth == 0u || s.talk.other_held || !plausible(s.first) || !plausible(s.second)) return;
+    SavedContext saved(guest.context());
+    const bool talker = s.moving_second;
+    set_game_player(guest, s, !talker);
+    guest.call(fn::kReadyRemoteDemo);
+    set_game_player(guest, s, talker);
+    s.talk.other_held = true;
+    s.talk.held_talker_second = talker;
+}
+
+// After MarioAccess::endRemoteDemo (run as the talker, see coop_before_call): the other brother let go too.
+void talk_release_other(const Guest& guest, State& s) {
+    SavedContext saved(guest.context());
+    if (s.talk.end_swapped) {
+        set_game_player(guest, s, s.talk.end_back_to_second);
+        s.talk.end_swapped = false;
+    }
+    if (!s.talk.other_held) return;
+    s.talk.other_held = false;
+    const bool was = s.moving_second;
+    set_game_player(guest, s, !s.talk.held_talker_second);
+    guest.call(fn::kEndRemoteDemo, s.talk.end_info);
+    set_game_player(guest, s, was);
+}
+
+// After MR::testCorePadButtonA/TriggerA(0) from TalkStateEvent::talk (paging): the other brother's A too.
+// Channel 1 is the other brother's however the pads are swapped.
+void talk_either_a(const Guest& guest, const State& s, PpcContext* context, std::uint32_t function,
+                   std::uint32_t guest_pc) {
+    if (guest_pc < 0x802A25A0u || guest_pc >= 0x802A2700u || s.talk.pad_channel != 0u) return;
+    if ((context->gpr[3] & 0xFFu) != 0u) return;
+    std::uint32_t other = 0u;
+    {
+        SavedContext saved(context);
+        other = guest.call(function, 1u) & 0xFFu;
+    }
+    context->gpr[3] = other;
+}
+
+// After the yes/no choice's pointer and A tests (ButtonPaneController), during a talk: the other brother's too.
+void talk_either_choice(const Guest& guest, const State& s, PpcContext* context, bool pane, std::uint32_t guest_pc) {
+    if (guest_pc < 0x8034BE84u || guest_pc >= 0x8034C770u || (context->gpr[3] & 0xFFu) != 0u) return;
+    if (pane && s.talk.pane_args[2] != 0u) return;
+    std::uint32_t other = 0u;
+    {
+        SavedContext saved(context);
+        if ((guest.call(fn::kIsSystemTalking) & 0xFFu) == 0u) return;
+        if (pane) {
+            const auto& a = s.talk.pane_args;
+            other = guest.call(fn::kPointingPane, a[0], a[1], 1u, a[3], a[4]) & 0xFFu;
+        } else {
+            const std::uint32_t pad_holder = guest.call(fn::kGetWPadHolder);
+            if (!plausible(pad_holder) || !plausible(guest.u32(pad_holder)) || !plausible(guest.u32(pad_holder + 4u))) return;
+            swap_pads(guest, pad_holder);
+            other = guest.call(fn::kMenuDecide) & 0xFFu;
+            swap_pads(guest, pad_holder);
+        }
+    }
+    context->gpr[3] = other;
+}
+
 // After MR::getPlayerPos in SwitchArea::movement (its `this` in r31), which turns its switch on with the player
 // inside it: the second player inside, the first not, answers with the second's position. Areas that let star
 // bunnies out of hiding, start events and so on then see either brother.
@@ -1312,7 +1517,9 @@ void move_second_player(const Guest& guest, State& s) {
         trace("pipe %08X: the other did not go in; given up", s.pipe.follow_pipe);
         s.pipe.follow_pipe = s.pipe.follower = 0u;
     }
-    const bool piping = s.pipe.waiting != 0u || s.pipe.follow_pipe != 0u;
+    if (s.second_scene != 0u) --s.second_scene;
+    if (s.talk.candidate_frames != 0u) --s.talk.candidate_frames;
+    const bool piping = s.pipe.waiting != 0u || s.pipe.follow_pipe != 0u || s.second_scene != 0u;
     const bool first_busy =
         !piping && (coop::second_player_waits(first_held, demo) || first_parked || s.sticky_travel);
     // A level start lasts through the mission's opening camera and any event camera of the first player's
@@ -1844,6 +2051,48 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         s.near_distance = static_cast<float>(fpr(context, 1));
         return;
     }
+    if (id == call::kNearerPlayerCode) {
+        if (s.nearer_depth++ == 0u) nearer_player_code(Guest(context, memory, services, guest_pc), s);
+        return;
+    }
+    if (id == call::kTryTalk || id == call::kTryTalkNpc ||
+        (id == call::kTalkDirectorStep && guest_pc >= 0x8029E8ECu && guest_pc < 0x8029E920u)) {
+        if (s.talk.depth++ != 0u) return;
+        const Guest guest(context, memory, services, guest_pc);
+        if (id == call::kTalkDirectorStep) {
+            talk_director_begin(guest, s);
+        } else {
+            const std::uint32_t arg = context->gpr[3];  // TalkMessageCtrl (its NPC at +0xC), or the NPC
+            talk_begin(guest, s, id == call::kTryTalkNpc ? arg : plausible(arg) ? guest.u32(arg + 0xCu) : 0u);
+        }
+        return;
+    }
+    if (id == call::kTalkDirectorStep) return;
+    if (id == call::kEndRemoteDemo) {
+        // A talk's hold may end later (DemoDirector), with the first player as the game's: it ends on the talker.
+        s.talk.end_info = context->gpr[3];
+        // Any hold ends on the brother it was put on (a demo the second player started may end with the first
+        // as the game's player), and a talk's on its talker.
+        if (s.talk.held && s.talk.held_second != s.moving_second && plausible(s.first) && plausible(s.second)) {
+            const Guest guest(context, memory, services, guest_pc);
+            SavedContext saved(context);
+            s.talk.end_back_to_second = s.moving_second;
+            set_game_player(guest, s, s.talk.held_second);
+            s.talk.end_swapped = true;
+        }
+        s.talk.held = false;
+        return;
+    }
+    if (id == call::kReadyRemoteDemo) return;
+    if (id == call::kPadButtonA || id == call::kPadTriggerA) {
+        s.talk.pad_channel = context->gpr[3];
+        return;
+    }
+    if (id == call::kPointingPane) {
+        for (unsigned i = 0; i < 5u; ++i) s.talk.pane_args[i] = context->gpr[3 + i];
+        return;
+    }
+    if (id == call::kMenuDecide) return;
     if (id == call::kGetPlayerPos) return;
     if (id == call::kAddArchive) {
         s.archive_collector = context->gpr[3];
@@ -2019,6 +2268,38 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
             pipe_after_exit(guest, s, s.pipe_out);
             s.pipe_out = 0u;
         }
+        return;
+    }
+    if (id == call::kTryTalk || id == call::kTryTalkNpc ||
+        (id == call::kTalkDirectorStep && guest_pc >= 0x8029E8ECu && guest_pc < 0x8029E920u)) {
+        if (s.talk.depth == 0u || --s.talk.depth != 0u) return;
+        talk_end(guest, s);
+        return;
+    }
+    if (id == call::kTalkDirectorStep) return;
+    if (id == call::kReadyRemoteDemo) {
+        s.talk.held = true;
+        s.talk.held_second = s.moving_second;
+        talk_hold_other(guest, s);
+        return;
+    }
+    if (id == call::kEndRemoteDemo) {
+        talk_release_other(guest, s);
+        return;
+    }
+    if (id == call::kPadButtonA || id == call::kPadTriggerA) {
+        talk_either_a(guest, s, context, id == call::kPadButtonA ? fn::kTestPadButtonA : fn::kTestPadTriggerA, guest_pc);
+        return;
+    }
+    if (id == call::kPointingPane || id == call::kMenuDecide) {
+        talk_either_choice(guest, s, context, id == call::kPointingPane, guest_pc);
+        return;
+    }
+    if (id == call::kNearerPlayerCode) {
+        if (s.nearer_depth == 0u || --s.nearer_depth != 0u || !s.nearer_swapped) return;
+        SavedContext saved(context);
+        set_game_player(guest, s, s.nearer_back_to_second);
+        s.nearer_swapped = false;
         return;
     }
     if (id == call::kIsNearPlayer || id == call::kIsNearPlayerAnyTime) {

@@ -40,13 +40,14 @@ public:
         set_f32(address + 8u, v.z);
     }
 
-    // A game function with up to four integer arguments; returns r3. Callers save and restore the context.
+    // A game function with up to five integer arguments; returns r3. Callers save and restore the context.
     std::uint32_t call(std::uint32_t function, std::uint32_t r3 = 0u, std::uint32_t r4 = 0u, std::uint32_t r5 = 0u,
-                       std::uint32_t r6 = 0u) const {
+                       std::uint32_t r6 = 0u, std::uint32_t r7 = 0u) const {
         context_->gpr[3] = r3;
         context_->gpr[4] = r4;
         context_->gpr[5] = r5;
         context_->gpr[6] = r6;
+        context_->gpr[7] = r7;
         services_->call_guest(services_->user, function, context_, memory_);
         return context_->gpr[3];
     }
