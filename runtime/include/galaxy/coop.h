@@ -707,6 +707,42 @@ inline constexpr float kSteerDeadZone = 0.2f;
     return level >= 1u && level < 8u ? kDistances[level] : far_z;
 }
 
+// Co-op lives, as in New Super Mario Bros. Wii without the bubble (docs/MULTIPLAYER.md): each player has their
+// own lives and life meter. A player who goes down while the other plays on spends one of their lives and
+// reappears beside the other; with none left they sit out until the stage reloads. Both down is the game's
+// own miss (a restart from the checkpoint), or its game over.
+struct DownState {
+    bool down = false;  // went down and has not come back
+    bool out = false;   // no lives left: back only when the stage reloads
+    unsigned frames = 0u;
+};
+inline constexpr unsigned kDownHideFrames = 90u;  // the fallen player vanishes after their fall
+inline constexpr unsigned kRespawnFrames = 150u;  // and reappears beside the other this long after going down
+
+// A player goes down. False: the game's own miss (the partner is down too). True: alone; `lives` (that player's)
+// pays for the comeback, or the player is out with none left.
+[[nodiscard]] inline bool go_down_alone(DownState& self, const DownState& partner, int& lives) noexcept {
+    if (partner.down) return false;
+    self.down = true;
+    self.frames = 0u;
+    self.out = lives <= 0;
+    if (lives > 0) --lives;
+    return true;
+}
+
+// Once a frame for a player down alone: true on the frame they come back beside the partner (who must be up).
+[[nodiscard]] inline bool respawn_due(DownState& self, const DownState& partner) noexcept {
+    if (!self.down) return false;
+    ++self.frames;
+    if (self.out || self.frames < kRespawnFrames || partner.down) return false;
+    self = DownState{};
+    return true;
+}
+
+// Where the second player's life meter and lives counter stand, from the first player's (layout units, y down).
+inline constexpr float kSecondMeterOffset[2] = {-150.0f, 0.0f};
+inline constexpr float kSecondLivesOffset[2] = {150.0f, 0.0f};
+
 // Whether an allocation of `size` bytes aligned to `align` from the stage's full MEM1 heap (JKRSolidHeap,
 // `mem1_free` bytes left) goes to its MEM2 heap (`mem2_free` left) instead: only when MEM1 cannot hold it and MEM2
 // can, so it changes nothing but an allocation that would have stopped the game (HeapMemoryWatcher's error

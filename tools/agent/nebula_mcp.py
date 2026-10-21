@@ -37,7 +37,8 @@ def shot(game):
 def tool_launch(args):
     game = instance(args)
     pid = game.launch(coop=not args.get('solo', False), split=args.get('split', True),
-                      audio=args.get('audio', False), fresh_saves=args.get('fresh_saves', False))
+                      audio=args.get('audio', False), fresh_saves=args.get('fresh_saves', False),
+                      show=args.get('show', False))
     if not args.get('boot', True):
         return text('launched, pid %d' % pid)
     return text({'pid': pid, 'status': game.boot(int(args.get('file', 1)))})
@@ -147,11 +148,12 @@ def schema(properties, required=()):
 
 PLAYER = {'type': 'integer', 'enum': [1, 2], 'description': '1 Mario (first player), 2 Luigi (second player)'}
 TOOLS = [
-    ('game_launch', tool_launch, 'Start a test copy of the game in its own folder (copied saves, no audio, window '
-     'opens without focus) and, by default, load save file 1 straight away (no menus) until the player can move.',
+    ('game_launch', tool_launch, 'Start a test copy of the game in its own folder (copied saves, no audio, no window '
+     'unless show) and, by default, load save file 1 straight away (no menus) until the player can move.',
      schema({'solo': {'type': 'boolean', 'description': 'One player (co-op off)'},
              'split': {'type': 'boolean', 'description': 'Split screen (default true)'},
              'audio': {'type': 'boolean'},
+             'show': {'type': 'boolean', 'description': 'Open a window (default: none; screenshots see it)'},
              'fresh_saves': {'type': 'boolean', 'description': 'Recopy the saves from the run folder'},
              'boot': {'type': 'boolean', 'description': 'Load a save file to its first scene (default true)'},
              'file': {'type': 'integer', 'minimum': 1, 'maximum': 6, 'description': 'Save file (default 1)'}})),

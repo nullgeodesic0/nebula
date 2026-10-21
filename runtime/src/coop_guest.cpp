@@ -53,6 +53,24 @@ constexpr std::uint32_t kNameObjHolderCtor = 15u;
 constexpr std::uint32_t kNameObjHolderAdd = 16u;
 constexpr std::uint32_t kSolidHeapAllocHead = 17u;  // JKRSolidHeap::allocFromHead(u32 size, int align)
 constexpr std::uint32_t kSolidHeapAllocTail = 18u;  // JKRSolidHeap::allocFromTail(u32 size, int align)
+// A player down (the calls MarioActor::exeGameOver* make; skippable).
+constexpr std::uint32_t kStartPlayerEvent = 19u;
+constexpr std::uint32_t kStartDeathCamera = 20u;
+constexpr std::uint32_t kStartPointerDeathDemo = 21u;
+constexpr std::uint32_t kSetCubeBgmChangeInvalid = 22u;
+constexpr std::uint32_t kClearBgmQueue = 23u;
+// HUD.
+constexpr std::uint32_t kMarioInit2D = 24u;    // skippable
+constexpr std::uint32_t kMarioUpdate2D = 25u;  // skippable
+constexpr std::uint32_t kMeterRequestFirst = 26u;  // 26-30: MeterLayout::request*
+constexpr std::uint32_t kMeterRequestLast = 30u;
+constexpr std::uint32_t kPlayerLeftFirst = 31u;    // 31-33: PlayerLeft::appear, forceAppear, disappear
+constexpr std::uint32_t kPlayerLeftLast = 33u;
+constexpr std::uint32_t kGetPlayerLeft = 34u;
+constexpr std::uint32_t kIncPlayerLife = 35u;
+// Launch stars: SuperSpinDriver then SpinDriver exeCapture, exeShootStart, exeShoot.
+constexpr std::uint32_t kStarStepFirst = 36u;
+constexpr std::uint32_t kStarStepLast = 41u;
 }  // namespace call
 
 namespace fn {
@@ -90,6 +108,33 @@ constexpr std::uint32_t kIsInAreaObj = 0x803FEA64u;  // MR::isInAreaObj(const ch
 constexpr std::uint32_t kIsDemoActive = 0x803C9E84u;     // MR::isDemoActive()
 constexpr std::uint32_t kIsTimeKeepDemoActive = 0x803C9F80u;  // MR::isTimeKeepDemoActive()
 constexpr std::uint32_t kIsInputDisable = 0x802E98B8u;   // MarioModule::isInputDisable() const (on a Mario)
+// Lives and respawn.
+constexpr std::uint32_t kGetPlayerLeft = 0x803CC3CCu;    // MR::getPlayerLeft()
+constexpr std::uint32_t kIncPlayerLeft = 0x803CC3D0u;    // MR::incPlayerLeft()
+constexpr std::uint32_t kDecPlayerLeft = 0x803CC3D8u;    // MR::decPlayerLeft()
+constexpr std::uint32_t kSetNerve = 0x80165824u;         // LiveActor::setNerve(const Nerve*)
+constexpr std::uint32_t kSetPlayerPosAndWait = 0x803F2528u;  // MR::setPlayerPosAndWait(const TVec3f&)
+constexpr std::uint32_t kShowModel = 0x803DD758u;        // MR::showModel(LiveActor*)
+constexpr std::uint32_t kHideModel = 0x803DD794u;        // MR::hideModel(LiveActor*)
+constexpr std::uint32_t kValidateHitSensors = 0x803C27B8u;    // MR::validateHitSensors(LiveActor*)
+constexpr std::uint32_t kInvalidateHitSensors = 0x803C27CCu;  // MR::invalidateHitSensors(LiveActor*)
+constexpr std::uint32_t kMarioIncLife = 0x802B1CE4u;     // MarioActor::incLife(u32)
+// HUD.
+constexpr std::uint32_t kGetLayoutHolder = 0x80361738u;  // MR::getGameSceneLayoutHolder()
+constexpr std::uint32_t kNewOnHeap = 0x80409B0Cu;        // operator new(u32 size, JKRHeap*, int align)
+constexpr std::uint32_t kInitWithoutIter = 0x8026120Cu;  // NameObj::initWithoutIter()
+constexpr std::uint32_t kMeterLayoutCtor = 0x8036C2BCu;  // MeterLayout::MeterLayout(const char*, const char*)
+constexpr std::uint32_t kMeterInitCount = 0x8036C80Cu;   // MeterLayout::initCount(s32)
+constexpr std::uint32_t kMeterSetCount = 0x8036C814u;    // MeterLayout::setCount(s32)
+constexpr std::uint32_t kPlayerLeftCtor = 0x8037867Cu;   // PlayerLeft::PlayerLeft(const char*)
+constexpr std::uint32_t kLayoutSetTrans = 0x803662CCu;   // LayoutActor::setTrans(const TVec2f&): a screen position
+// MR::convertScreenPosToLayoutPos(TVec2f* layout, const TVec2f& screen)
+constexpr std::uint32_t kScreenToLayout = 0x80366658u;
+// The MeterLayout requests MarioMeter makes (ids 26-30) and the PlayerLeft calls the counters make (31-33),
+// made on the second player's meter and counter as well.
+constexpr std::array<std::uint32_t, 5> kMeterRequests = {0x8036C59Cu, 0x8036C664u, 0x8036C6E8u, 0x8036C72Cu,
+                                                         0x8036C79Cu};
+constexpr std::array<std::uint32_t, 3> kPlayerLeftCalls = {0x803787CCu, 0x80378828u, 0x80378888u};
 }  // namespace fn
 
 // CameraContext (scene object 0x17), reached as MR::getCameraViewMtx does: *(r13 - 0x3A78) -> +0x24 -> +0xAC ->
@@ -114,6 +159,28 @@ constexpr std::uint32_t kHeapMemoryWatcher = 0x806A245Cu;
 constexpr std::uint32_t kSceneHeapNapa = 0x14u;
 constexpr std::uint32_t kSceneHeapGddr = 0x18u;
 constexpr std::uint32_t kSolidHeapFreeSize = 0x6Cu;  // JKRSolidHeap::mFreeSize
+// MarioActor's own nerve for ordinary play (NrvMarioActor::MarioActorNrvWait::sInstance).
+constexpr std::uint32_t kMarioActorNrvWait = 0x8069F038u;
+// MarioActor::exeGameOver* (the player down: exeGameOver to exeTimeWait, and exeGameOverBlackHole2).
+constexpr bool in_game_over_step(std::uint32_t pc) {
+    return (pc >= 0x802B8A38u && pc < 0x802B8FE0u) || (pc >= 0x802CA324u && pc < 0x802CA6E0u);
+}
+// PlayerLeft's code (its MR::getPlayerLeft calls).
+constexpr bool in_player_left(std::uint32_t pc) { return pc >= 0x803786D0u && pc < 0x80378B10u; }
+// GameSceneLayoutHolder: +0x14 MarioMeter (+0x0C its HitPointMeter), +0x34 CounterLayoutController (+0x30 its
+// PlayerLeft).
+constexpr std::uint32_t kHolderMarioMeter = 0x14u;
+constexpr std::uint32_t kMarioMeterHitPoint = 0x0Cu;
+constexpr std::uint32_t kHolderCounters = 0x34u;
+constexpr std::uint32_t kCountersPlayerLeft = 0x30u;
+// A player riding a launch star: MarioActor::_924 (the HitSensor they rush with), HitSensor::mHost, and the
+// launchers' vtables (SuperSpinDriver, SpinDriver).
+constexpr std::uint32_t kMarioRushSensor = 0x924u;
+constexpr std::uint32_t kSensorHost = 0x24u;
+constexpr std::uint32_t kSuperSpinDriverVtable = 0x8058FF8Cu;
+constexpr std::uint32_t kSpinDriverVtable = 0x8058C5ACu;
+// Star-shaped launchers (SuperSpinDriver, SpinDriver): the actor riding them.
+constexpr std::uint32_t kStarBindActor = 0x8Cu;
 
 namespace actor {
 constexpr std::uint32_t kPosition = 0x00Cu;     // LiveActor::mPosition
@@ -264,6 +331,33 @@ struct State {
     bool agent_teleport = false;
     coop::Vec3 agent_position{};
     int agent_mode = -1;
+    // Co-op lives (docs/MULTIPLAYER.md, coop::Lives): each player's down state, the second player's lives (the
+    // first's are the game's own), and whether the game's own miss is under way.
+    std::array<coop::DownState, 2> down{};
+    int second_lives = -1;
+    bool game_miss = false;
+    bool skip_death_effects = false;  // the rest of this exeGameOver's calls, for a player down alone
+    std::uint32_t mario_down_name = 0u;  // "マリオダウン" in the game's data
+    bool mario_down_searched = false;
+    // HUD: the second player's life meter and lives counter, and the game's own they follow.
+    std::uint32_t second_meter = 0u;
+    std::uint32_t second_left = 0u;
+    std::uint32_t first_meter = 0u;
+    std::uint32_t first_left = 0u;
+    std::uint32_t hud_call_this = 0u;  // the MeterLayout or PlayerLeft a mirrored call was made on
+    std::uint32_t heal_amount = 0u;
+    bool heal_second_turn = false;
+    std::uint32_t star_swapped = 0u;  // a launch star whose step runs with the second player as the game's
+    bool miss_counted = false;
+    bool second_riding = false;  // the second player on a launch star: the first flies beside them
+    std::uint32_t star_traced = 0u;
+    bool hud_tried = false;
+    std::uint32_t hit_point_name = 0u;  // "HitPointMeter" in the game's data
+    std::uint32_t second_meter_count = 0u;
+    float hud_scale_x = 0.0f;
+    float hud_scale_y = 0.0f;
+    float hud_offset_x = 0.0f;
+    float hud_offset_y = 0.0f;
     // The first player's camera and projection as the game made them, restored after the second half.
     coop::CameraMatrices camera1;
     std::array<float, 16> projection{};
@@ -396,6 +490,8 @@ void add_partner_resources(const Guest& guest, State& s) {
 
 // Right after the game sets up its player, the second player: the same MarioActor as the other character,
 // beside the first, out of the movement list.
+void create_hud(const Guest& guest, State& s);
+
 void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     SavedContext saved(guest.context());
     s.first = first;
@@ -410,6 +506,13 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     s.sticky_travel = false;
     s.controllable_frames = 0u;
     s.follow.reset();
+    // A new stage: both players in play (one out of lives comes back), its own HUD.
+    s.down = {};
+    s.game_miss = false;
+    s.miss_counted = false;
+    s.second_meter = s.second_left = s.first_meter = s.first_left = 0u;
+    s.hud_tried = false;
+    s.star_swapped = 0u;
     const std::uint32_t first_mario = guest.u32(first + actor::kMario);
     if (!plausible(first_mario)) return;
     const coop::Vec3 position = guest.vec(first + actor::kPosition);
@@ -452,6 +555,9 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     guest.call(fn::kRequestSuspend, second);
     s.second = second;
     s.second_mario = guest.u32(second + actor::kMario);
+    // The second player's HUD is made with the stage's own objects: layouts made once the stage runs are not
+    // moved or drawn.
+    create_hud(guest, s);
     trace("players: first %08X (%s), second %08X (%s)", first, s.own == coop::Character::Luigi ? "Luigi" : "Mario",
           second, s.own == coop::Character::Luigi ? "Mario" : "Luigi");
 }
@@ -618,6 +724,258 @@ void remember_first_camera(const Guest& guest, State& s) {
 
 // After the game moves its players, the second player: one MarioActor::movement with the game's player,
 // character and controller switched to it. Then the shared camera, and the warp back to the first player.
+// Whether a player rides a launch star (the launcher they rush with is a SuperSpinDriver or SpinDriver).
+bool rides_star(const Guest& guest, std::uint32_t actor_address) {
+    const std::uint32_t sensor = guest.u32(actor_address + kMarioRushSensor);
+    if (!plausible(sensor)) return false;
+    const std::uint32_t host = guest.u32(sensor + kSensorHost);
+    if (!plausible(host)) return false;
+    const std::uint32_t vtable = guest.u32(host);
+    return vtable == kSuperSpinDriverVtable || vtable == kSpinDriverVtable;
+}
+
+// Makes the second player (or the first again) the game's player: MarioHolder, gIsLuigi and the channel 0 and 1
+// pads, as move_second_player does for the second player's turn.
+void set_game_player(const Guest& guest, State& s, bool second) {
+    const std::uint32_t holder = guest.call(fn::kGetMarioHolder);
+    if (!plausible(holder)) return;
+    const std::uint32_t pad_holder = guest.call(fn::kGetWPadHolder);
+    const bool pads = plausible(pad_holder) && plausible(guest.u32(pad_holder)) && plausible(guest.u32(pad_holder + 4u));
+    guest.set_u8(kIsLuigi, character_byte(second ? coop::partner_of(s.own) : s.own));
+    guest.call(fn::kSetMarioActor, holder, second ? s.second : s.first);
+    if (pads) swap_pads(guest, pad_holder);
+    s.moving_second = second;
+}
+
+// ---- Co-op lives, respawn and HUD (docs/MULTIPLAYER.md "Lives") ----
+
+// The second player's lives live next to the save (the first player's are the game's own, in the save).
+std::string second_lives_path() {
+    char* value = nullptr;
+    std::size_t length = 0u;
+    std::string path;
+    if (_dupenv_s(&value, &length, "GALAXY_NAND_ROOT") == 0 && value != nullptr && value[0] != '\0') {
+        path = std::string(value) + "\\coop_lives.txt";
+    }
+    std::free(value);
+    return path;
+}
+
+void save_second_lives(const State& s) {
+    const std::string path = second_lives_path();
+    FILE* file = nullptr;
+    if (path.empty() || fopen_s(&file, path.c_str(), "w") != 0 || file == nullptr) return;
+    std::fprintf(file, "%d\n", s.second_lives);
+    std::fclose(file);
+}
+
+// First use: from the file, or as many as the first player has.
+void ensure_second_lives(const Guest& guest, State& s) {
+    if (s.second_lives >= 0) return;
+    const std::string path = second_lives_path();
+    FILE* file = nullptr;
+    int lives = -1;
+    if (!path.empty() && fopen_s(&file, path.c_str(), "r") == 0 && file != nullptr) {
+        if (fscanf_s(file, "%d", &lives) != 1) lives = -1;
+        std::fclose(file);
+    }
+    if (lives < 0) lives = static_cast<int>(guest.call(fn::kGetPlayerLeft));
+    s.second_lives = std::clamp(lives, 0, 99);
+    save_second_lives(s);
+}
+
+// A MarioActor::exeGameOver* step's first frame makes these calls (the BGM lock and queue, the player event, the
+// death camera, the pointer demo). For a player going down while the other plays on, none of them happen: the
+// first decides, and the player's down state skips the rest that frame.
+void on_game_over_call(std::uint32_t id, const Guest& guest, State& s, PpcContext* context, std::uint32_t guest_pc) {
+    if (!in_game_over_step(guest_pc) || !plausible(s.first) || !plausible(s.second)) return;
+    // The MarioActor going down: exeGameOver* keeps itself in r30 or r31.
+    const std::uint32_t r30 = context->gpr[30];
+    const std::uint32_t r31 = context->gpr[31];
+    const unsigned who = (r30 == s.second || r31 == s.second) ? 1u
+                         : (r30 == s.first || r31 == s.first) ? 0u
+                                                               : (s.moving_second ? 1u : 0u);
+    if (id == call::kSetCubeBgmChangeInvalid || id == call::kStartDeathCamera) {
+        trace("down: call %u from %08X, r30 %08X r31 %08X, second's turn %d: %s", id, guest_pc, r30, r31,
+              s.moving_second ? 1 : 0, who == 0u ? "first" : "second");
+    }
+    coop::DownState& self = s.down[who];
+    const coop::DownState& partner = s.down[1u - who];
+    if (!(self.down && self.frames == 0u) && !s.game_miss) {
+        // A race lost is the game's to handle (MarioActor::_39D: 1, 2 and 5 are race outcomes).
+        const std::uint32_t actor_address = who == 0u ? s.first : s.second;
+        const std::uint8_t kind = guest.u8(actor_address + 0x39Du);
+        if (kind == 1u || kind == 2u || kind == 5u) return;
+        SavedContext saved(context);
+        ensure_second_lives(guest, s);
+        if (who == 0u) {
+            int lives = static_cast<int>(guest.call(fn::kGetPlayerLeft));
+            const int before = lives;
+            if (coop::go_down_alone(self, partner, lives) && lives < before) guest.call(fn::kDecPlayerLeft);
+        } else if (coop::go_down_alone(self, partner, s.second_lives)) {
+            save_second_lives(s);
+        }
+        if (self.down) {
+            trace("%s down alone: %s", who == 0u ? "first player" : "second player",
+                  self.out ? "no lives left, out until the stage reloads" : "back beside the other soon");
+        } else {
+            s.game_miss = true;
+            trace("both players down: the game's miss");
+        }
+    }
+    if (self.down && self.frames == 0u) {
+        context->pc = kCoopSkipCall;
+        return;
+    }
+    if (id != call::kStartPlayerEvent || !s.game_miss || s.miss_counted) return;
+    // The game's own miss with both down: each player's life is spent once. The first player's comes off with the
+    // miss (the event's decLeft), so one goes back if they spent theirs going down alone; the second player's
+    // here. Game over only when both are out.
+    s.miss_counted = true;
+    std::uint32_t name = context->gpr[3];
+    {
+        SavedContext saved(context);
+        const int mario = static_cast<int>(guest.call(fn::kGetPlayerLeft));
+        const bool mario_out = who == 0u ? mario == 0 : s.down[0].out;
+        bool luigi_out = s.down[1].out;
+        if (who == 1u) {
+            luigi_out = s.second_lives == 0;
+            if (s.second_lives > 0) --s.second_lives;
+            save_second_lives(s);
+        }
+        if (who == 1u && s.down[0].down && !s.down[0].out) guest.call(fn::kIncPlayerLeft);  // spent alone already
+        if (!(mario_out && luigi_out) && static_cast<int>(guest.call(fn::kGetPlayerLeft)) == 0) {
+            // The game chose its game over from the first player's lives alone: a miss instead.
+            guest.call(fn::kIncPlayerLeft);
+            if (!s.mario_down_searched) {
+                s.mario_down_searched = true;
+                s.mario_down_name = guest.find_string("\x83\x7D\x83\x8A\x83\x49\x83\x5F\x83\x45\x83\x93");  // マリオダウン
+            }
+            if (s.mario_down_name != 0u) name = s.mario_down_name;
+        }
+        trace("the game's miss: lives %d and %d", static_cast<int>(guest.call(fn::kGetPlayerLeft)), s.second_lives);
+    }
+    context->gpr[3] = name;
+}
+
+// Puts a player who was down back in play at `there`: ordinary nerve, full health, visible, touchable. Called in
+// that player's turn (the game's player is them), so MR::setPlayerPosAndWait places them.
+void respawn_player(const Guest& guest, std::uint32_t actor_address, coop::Vec3 there) {
+    guest.call(fn::kSetNerve, actor_address, kMarioActorNrvWait);
+    guest.set_u32(actor_address + 0x380u, 3u);  // MarioActor::mHealth
+    guest.set_u32(actor_address + 0x3E0u, 3u);  // MarioActor::mMaxHealth
+    guest.set_u8(actor_address + 0x39Du, 0u);   // the down's kind
+    guest.call(fn::kShowModel, actor_address);
+    guest.call(fn::kValidateHitSensors, actor_address);
+    Guest::Frame frame(guest);
+    guest.call(fn::kSetPlayerPosAndWait, frame.vec(0, there));
+}
+
+// Once a frame, in a player's own turn: the fallen player vanishes after their fall and comes back beside the
+// other in time; one out of lives is carried along hidden beside the other (the game camera follows the first).
+void update_down_player(const Guest& guest, State& s, unsigned who, coop::Vec3 partner_position,
+                        coop::Vec3 partner_side) {
+    coop::DownState& self = s.down[who];
+    if (!self.down) return;
+    const std::uint32_t actor_address = who == 0u ? s.first : s.second;
+    if (self.frames + 1u == coop::kDownHideFrames) {
+        guest.call(fn::kHideModel, actor_address);
+        guest.call(fn::kInvalidateHitSensors, actor_address);
+    }
+    const coop::Vec3 beside = partner_position + partner_side * 120.0f;
+    if (coop::respawn_due(self, s.down[1u - who])) {
+        respawn_player(guest, actor_address, beside);
+        trace("%s back beside the other", who == 0u ? "first player" : "second player");
+        return;
+    }
+    if (self.out && self.frames > coop::kDownHideFrames) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, beside));
+    }
+}
+
+// The second player's life meter and lives counter, made once a stage beside the game's own: the same layouts
+// (HitPointMeter, and PlayerLeft in its Luigi look), fed with the second player's health and lives.
+void create_hud(const Guest& guest, State& s) {
+    if (s.second_meter != 0u || s.hud_tried) return;
+    s.hud_tried = true;  // one try a stage
+    const std::uint32_t holder = guest.call(fn::kGetLayoutHolder);
+    if (!plausible(holder)) return trace("second player's HUD not made: no layout holder");
+    const std::uint32_t mario_meter = guest.u32(holder + kHolderMarioMeter);
+    const std::uint32_t counters = guest.u32(holder + kHolderCounters);
+    if (!plausible(mario_meter) || !plausible(counters)) return trace("second player's HUD not made: no meter or counters");
+    s.first_meter = guest.u32(mario_meter + kMarioMeterHitPoint);
+    s.first_left = guest.u32(counters + kCountersPlayerLeft);
+    if (!plausible(s.first_meter) || !plausible(s.first_left)) return trace("second player's HUD not made: no game meter or lives counter");
+    if (s.hit_point_name == 0u) s.hit_point_name = guest.find_string("HitPointMeter");
+    const std::uint32_t watcher = guest.u32(kHeapMemoryWatcher);
+    const std::uint32_t heap = plausible(watcher) ? guest.u32(watcher + kSceneHeapNapa) : 0u;
+    if (s.hit_point_name == 0u || !plausible(heap)) return trace("second player's HUD not made: name %08X heap %08X", s.hit_point_name, heap);
+    ensure_second_lives(guest, s);
+    const std::uint32_t meter = guest.call(fn::kNewOnHeap, 0x50u, heap, 4u);
+    if (!plausible(meter)) return trace("second player's HUD not made: no memory");
+    for (std::uint32_t at = 0u; at < 0x50u; at += 4u) guest.set_u32(meter + at, 0u);
+    // Screen to layout positions, per axis (layout = scale * screen + offset), from two points: setTrans takes a
+    // screen position, and the game's HUD layouts stand at the layout origin.
+    {
+        Guest::Frame frame(guest);
+        guest.call(fn::kScreenToLayout, frame.scratch(), frame.vec(0, coop::Vec3{0.0f, 0.0f, 0.0f}));
+        const float x0 = guest.f32(frame.scratch());
+        const float y0 = guest.f32(frame.scratch() + 4u);
+        guest.call(fn::kScreenToLayout, frame.scratch(), frame.vec(1, coop::Vec3{100.0f, 100.0f, 0.0f}));
+        s.hud_scale_x = (guest.f32(frame.scratch()) - x0) / 100.0f;
+        s.hud_scale_y = (guest.f32(frame.scratch() + 4u) - y0) / 100.0f;
+        s.hud_offset_x = x0;
+        s.hud_offset_y = y0;
+        trace("HUD layout space: x = %.3f * screen %+.1f, y = %.3f * screen %+.1f", s.hud_scale_x, x0, s.hud_scale_y, y0);
+    }
+    guest.call(fn::kMeterLayoutCtor, meter, s.hit_point_name, s.hit_point_name);
+    guest.call(fn::kInitWithoutIter, meter);
+    guest.call(fn::kMeterInitCount, meter, 3u);
+    // MarioMeter activated the first player's meter as the stage began, before this one was made.
+    guest.call(fn::kMeterRequests[0], meter);  // MeterLayout::requestActive
+    s.second_meter = meter;
+    s.second_meter_count = 3u;
+    const std::uint32_t left = guest.call(fn::kNewOnHeap, 0x30u, heap, 4u);
+    if (plausible(left)) {
+        for (std::uint32_t at = 0u; at < 0x30u; at += 4u) guest.set_u32(left + at, 0u);
+        guest.call(fn::kPlayerLeftCtor, left, s.hit_point_name);
+        // In the second player's character, so the counter shows their face; its MR::getPlayerLeft calls get the
+        // second player's lives (call::kGetPlayerLeft).
+        s.second_left = left;
+        guest.set_u8(kIsLuigi, character_byte(coop::partner_of(s.own)));
+        s.answer_partner = true;  // MR::isPlayerLuigi asks GameDataFunction::isDataMario
+        guest.call(fn::kInitWithoutIter, left);
+        s.answer_partner = false;
+        guest.set_u8(kIsLuigi, character_byte(s.own));
+    }
+    trace("second player's HUD: life meter %08X, lives counter %08X", s.second_meter, s.second_left);
+}
+
+// Once a frame: the second player's life meter shows their health.
+void update_hud_count(const Guest& guest, State& s) {
+    if (s.second_meter == 0u || !plausible(s.second)) return;
+    const std::uint32_t health = s.down[1].down ? 0u : guest.u32(s.second + 0x380u);
+    if (health == s.second_meter_count || health > 8u) return;
+    s.second_meter_count = health;
+    guest.call(fn::kMeterSetCount, s.second_meter, health);
+}
+
+// Before the 2D draw: the second player's layouts stand beside the first's, wherever the game has moved those.
+void place_hud(const Guest& guest, const State& s) {
+    const auto follow = [&](std::uint32_t mine, std::uint32_t theirs, float dx, float dy) {
+        if (!plausible(mine) || !plausible(theirs)) return;
+        // The layout position (dx, dy) as the screen position setTrans takes.
+        if (std::fabs(s.hud_scale_x) < 1e-4f || std::fabs(s.hud_scale_y) < 1e-4f) return;
+        const coop::Vec3 at{(dx - s.hud_offset_x) / s.hud_scale_x, (dy - s.hud_offset_y) / s.hud_scale_y, 0.0f};
+        if (!std::isfinite(at.x) || !std::isfinite(at.y)) return;
+        Guest::Frame frame(guest);
+        guest.call(fn::kLayoutSetTrans, mine, frame.vec(0, at));
+    };
+    follow(s.second_meter, s.first_meter, coop::kSecondMeterOffset[0], coop::kSecondMeterOffset[1]);
+    follow(s.second_left, s.first_left, coop::kSecondLivesOffset[0], coop::kSecondLivesOffset[1]);
+}
+
 void move_second_player(const Guest& guest, State& s) {
     SavedContext saved(guest.context());
     const std::uint32_t holder = guest.call(fn::kGetMarioHolder);
@@ -637,7 +995,9 @@ void move_second_player(const Guest& guest, State& s) {
     // cutscene plays, the second player goes with them, beside them: those sequences change the map
     // (collision, gravity) around the first player and dropped the second through the floor.
     const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
-    const bool first_held = plausible(first_mario) && (guest.call(fn::kIsInputDisable, first_mario) & 0xFFu) != 0u;
+    // (A first player down has no control either, but the second plays on alone then.)
+    const bool first_held = !s.down[0].down && plausible(first_mario) &&
+                            (guest.call(fn::kIsInputDisable, first_mario) & 0xFFu) != 0u;
     // A dome's galaxy selector puppets the first player in a time-keep demo (not MR::isDemoActive).
     const bool demo = (guest.call(fn::kIsDemoActive) & 0xFFu) != 0u ||
                       (guest.call(fn::kIsTimeKeepDemoActive) & 0xFFu) != 0u;
@@ -688,7 +1048,10 @@ void move_second_player(const Guest& guest, State& s) {
         guest.call(fn::kSetPlayerPos, frame.vec(0, s.agent_position));
         s.agent_teleport = false;
     }
-    if ((beside_first || land_beside) && plausible(first_mario)) {
+    // The second player down: they vanish, come back beside the first, or (out of lives) go along hidden.
+    if (plausible(first_mario)) update_down_player(guest, s, 1u, first_now, guest.vec(first_mario + kMarioSideVec));
+    const bool second_down = s.down[1].down;
+    if ((beside_first || land_beside) && plausible(first_mario) && !second_down) {
         // Still the second player's turn: MR::setPlayerPos moves the scene's player. A puppeted first player's
         // actor sits at the origin, and at a level start the first is still flying in: the second player then
         // stays where they were.
@@ -700,8 +1063,10 @@ void move_second_player(const Guest& guest, State& s) {
     }
 
     const coop::Vec3 first_position = guest.vec(s.first + actor::kPosition);
-    const coop::Vec3 second_position = guest.vec(s.second + actor::kPosition);
-    if (!beside_first) s.parked_position = second_position;
+    const coop::Vec3 second_actual = guest.vec(s.second + actor::kPosition);
+    // A player down is not in the picture: the camera and the split follow the one still playing.
+    const coop::Vec3 second_position = second_down ? first_position : second_actual;
+    if (!beside_first) s.parked_position = second_actual;
     coop::CameraShare share{};
     bool too_far = false;
     if (split_screen_enabled()) {
@@ -726,8 +1091,9 @@ void move_second_player(const Guest& guest, State& s) {
     // The second player at a door or dome the first player is not at: swap places (MR::setPlayerPos moves the
     // scene's player, the second now and the first below).
     bool swap_places = false;
-    if (beside_first) {
-        // Travelling with the first player: no doors, and no bringing back (the first may be parked).
+    if (beside_first || second_down || s.down[0].down) {
+        // Travelling with the first player: no doors, and no bringing back (the first may be parked); nor for
+        // a player down.
         s.leash.reset();
     } else if (s.entrance_wait > 0u) {
         --s.entrance_wait;
@@ -765,9 +1131,28 @@ void move_second_player(const Guest& guest, State& s) {
         Guest::Frame frame(guest);
         guest.call(fn::kSetPlayerPos, frame.vec(0, second_position));
     }
+    // The second player on a launch star: the first flies with them, beside them, as the second does with the
+    // first (MR::setPlayerPos moves the first player now).
+    const bool second_rides = !second_down && !s.down[0].down && rides_star(guest, s.second);
+    if (second_rides != s.second_riding) {
+        s.second_riding = second_rides;
+        trace(second_rides ? "second player on a launch star: the first flies beside them" : "launch star flight over");
+    }
+    if (second_rides && plausible(s.second_mario)) {
+        Guest::Frame frame(guest);
+        const coop::Vec3 there =
+            coop::travel_position(second_actual, guest.vec(s.second_mario + kMarioSideVec), first_position);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, there));
+    }
+    // The first player down, in their turn (the game's player is theirs again).
+    if (plausible(s.second_mario)) {
+        update_down_player(guest, s, 0u, second_actual, guest.vec(s.second_mario + kMarioSideVec));
+    }
+    create_hud(guest, s);
+    update_hud_count(guest, s);
 
     keep_camera_on_first_player(guest, s);
-    bump_players(guest, s, first_position, second_position);
+    if (!s.down[0].down && !second_down) bump_players(guest, s, first_position, second_position);
     if (s.split.amount() > 0.0f) update_second_camera(guest, s, first_position, second_position);
     remember_first_camera(guest, s);
 
@@ -1017,6 +1402,41 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
     State& s = state();
     (void)memory;
     (void)guest_pc;
+    if (id >= call::kStartPlayerEvent && id <= call::kClearBgmQueue) {
+        on_game_over_call(id, Guest(context, memory, services, guest_pc), s, context, guest_pc);
+        return;
+    }
+    if (id == call::kMarioInit2D || id == call::kMarioUpdate2D) {
+        // The second player's 2D updates write the one life meter (theirs is fed by update_hud_count).
+        if (plausible(s.second) && context->gpr[3] == s.second) context->pc = kCoopSkipCall;
+        return;
+    }
+    if (id >= call::kMeterRequestFirst && id <= call::kPlayerLeftLast) {
+        s.hud_call_this = context->gpr[3];
+        return;
+    }
+    if (id == call::kIncPlayerLife) {
+        s.heal_amount = context->gpr[3];
+        s.heal_second_turn = s.moving_second;
+        return;
+    }
+    if (id >= call::kStarStepFirst && id <= call::kStarStepLast) {
+        // A launch star the second player rides: its step runs with them as the game's player (its animations,
+        // its end of the ride and its jump off are the rider's).
+        const Guest guest(context, memory, services, guest_pc);
+        const std::uint32_t star = context->gpr[3];
+        if (!s.moving_second && plausible(s.second) && plausible(star) && guest.u32(star + kStarBindActor) == s.second) {
+            SavedContext saved(context);
+            set_game_player(guest, s, true);
+            if (s.star_swapped == 0u && s.star_traced != star) {
+                s.star_traced = star;
+                trace("launch star %08X: the second player rides it", star);
+            }
+            s.star_swapped = star;
+        }
+        return;
+    }
+    if (id == call::kGetPlayerLeft) return;
     switch (id) {
     case call::kKpadRead:
         s.kpad_channel = context->gpr[3];
@@ -1044,9 +1464,15 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         // shrinks them to fit once loaded).
         if (context->gpr[3] == kPlayerHeapSize) context->gpr[3] = kPlayerHeapSize + kPartnerHeapExtra;
         return;
-    case call::kGameSceneDraw3D:
-        begin_split_draw(Guest(context, memory, services, guest_pc), s);
+    case call::kGameSceneDraw3D: {
+        const Guest guest(context, memory, services, guest_pc);
+        {
+            SavedContext saved(context);
+            place_hud(guest, s);
+        }
+        begin_split_draw(guest, s);
         return;
+    }
     case call::kClipFrustum:
         // ClippingJudge::isJudgedToClipFrustum(this, const TVec3f& position, f32 radius, s32 level).
         s.clip_position = s.split.amount() > 0.0f && s.follow.started() ? context->gpr[4] : 0u;
@@ -1101,6 +1527,46 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
     if (services == nullptr || services->call_guest == nullptr || !coop_for_boot()) return;
     State& s = state();
     const Guest guest(context, memory, services, guest_pc);
+    if (id >= call::kMeterRequestFirst && id <= call::kPlayerLeftLast) {
+        // The game's own life meter or lives counter: the second player's does the same.
+        const bool meter = id <= call::kMeterRequestLast;
+        const std::uint32_t theirs = meter ? s.first_meter : s.first_left;
+        const std::uint32_t mine = meter ? s.second_meter : s.second_left;
+        if (theirs != 0u && mine != 0u && s.hud_call_this == theirs) {
+            SavedContext saved(context);
+            guest.call(meter ? fn::kMeterRequests[id - call::kMeterRequestFirst] : fn::kPlayerLeftCalls[id - call::kPlayerLeftFirst],
+                       mine);
+        }
+        s.hud_call_this = 0u;
+        return;
+    }
+    if (id == call::kGetPlayerLeft) {
+        // The second player's lives counter asks for their lives (PlayerLeft keeps itself in r30 or r31).
+        if (s.second_left != 0u && s.second_lives >= 0 && in_player_left(guest_pc) &&
+            (context->gpr[30] == s.second_left || context->gpr[31] == s.second_left)) {
+            context->gpr[3] = static_cast<std::uint32_t>(s.second_lives);
+        }
+        return;
+    }
+    if (id == call::kIncPlayerLife) {
+        // A coin heals both players.
+        const std::uint32_t other = s.heal_second_turn ? s.first : s.second;
+        const unsigned other_index = s.heal_second_turn ? 0u : 1u;
+        if (plausible(s.second) && plausible(other) && !s.down[other_index].down && s.heal_amount > 0u &&
+            s.heal_amount < 16u) {
+            SavedContext saved(context);
+            guest.call(fn::kMarioIncLife, other, s.heal_amount);
+        }
+        return;
+    }
+    if (id >= call::kStarStepFirst && id <= call::kStarStepLast) {
+        if (s.star_swapped != 0u) {
+            SavedContext saved(context);
+            set_game_player(guest, s, false);
+            s.star_swapped = 0u;
+        }
+        return;
+    }
     switch (id) {
     case call::kKpadRead:
         if (s.kpad_channel == 1u) fill_partner_kpad(guest, s);
@@ -1182,6 +1648,14 @@ void coop_request_second_player_teleport(coop::Vec3 position) noexcept {
 
 void coop_request_second_player_mode(std::uint16_t mode) noexcept {
     state().agent_mode = mode;
+}
+
+int coop_second_lives() noexcept {
+    return state().second_lives;
+}
+
+coop::DownState coop_down_state(unsigned player) noexcept {
+    return player < 2u ? state().down[player] : coop::DownState{};
 }
 
 }  // namespace galaxy

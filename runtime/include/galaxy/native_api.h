@@ -525,6 +525,10 @@ enum class SiteHookKind : std::uint32_t {
     CoopAfterCall = 42,
 };
 
+// Set as the context's pc by a CoopBeforeCall hook to skip the call it watches (the generator wraps the calls
+// it may skip; translate.rs coop_call_skippable).
+inline constexpr std::uint32_t kCoopSkipCall = 1u;
+
 inline void site_hook(
     const NativeServicesV1* services,
     PpcContext* context,

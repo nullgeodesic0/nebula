@@ -36,6 +36,10 @@ void coop_set_split_clip_sink(SplitClipSink sink, void* user) noexcept;
 // them: the agent's teleport and power-up for the second player (agent_guest.cpp).
 void coop_request_second_player_teleport(coop::Vec3 position) noexcept;
 void coop_request_second_player_mode(std::uint16_t mode) noexcept;
+// Co-op lives for the agent's state: the second player's lives (-1 before the first stage) and whether a player
+// (0 first, 1 second) is down or out of lives.
+[[nodiscard]] int coop_second_lives() noexcept;
+[[nodiscard]] coop::DownState coop_down_state(unsigned player) noexcept;
 
 // The agent's per-frame step (agent_guest.cpp), at the first player's controller read: with or without co-op.
 void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc);

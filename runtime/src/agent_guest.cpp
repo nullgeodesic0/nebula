@@ -36,6 +36,9 @@ constexpr std::uint32_t kGetMarioHolder = 0x802E1528u;   // MR::getMarioHolder()
 constexpr std::uint32_t kGetMarioActor = 0x802E1520u;    // MarioHolder::getMarioActor() const
 constexpr std::uint32_t kSetPlayerPos = 0x803F1F80u;     // MR::setPlayerPos(const TVec3f&)
 constexpr std::uint32_t kSetPlayerMode = 0x802C42C0u;    // MarioActor::setPlayerMode(u16, bool)
+constexpr std::uint32_t kForceGameOver = 0x802B4EB8u;    // MarioActor::forceGameOver()
+constexpr std::uint32_t kGetPlayerLeft = 0x803CC3CCu;    // MR::getPlayerLeft()
+constexpr std::uint32_t kIsOpeningCamera = 0x8033F9F4u;  // GameSceneFunction::isExecScenarioOpeningCamera()
 constexpr std::uint32_t kIsDemoActive = 0x803C9E84u;     // MR::isDemoActive()
 constexpr std::uint32_t kIsInputDisable = 0x802E98B8u;   // MarioModule::isInputDisable() const (on a Mario)
 constexpr std::uint32_t kIsPlayerDead = 0x803F1EA4u;     // MR::isPlayerDead()
@@ -229,12 +232,15 @@ std::string number(float value) {
     return text;
 }
 
-std::string player_json(const Player& player) {
+std::string player_json(const Player& player, unsigned index, int lives) {
     if (player.actor == 0u) return "null";
+    const coop::DownState down = coop_down_state(index);
     return std::string("{\"x\":") + number(player.position.x) + ",\"y\":" + number(player.position.y) +
            ",\"z\":" + number(player.position.z) + ",\"powerup\":\"" + agent::power_up_name(player.mode) +
            "\",\"health\":" + std::to_string(player.health) +
-           ",\"input_disabled\":" + (player.input_disabled ? "true" : "false") + "}";
+           ",\"input_disabled\":" + (player.input_disabled ? "true" : "false") + ",\"lives\":" +
+           std::to_string(lives) + ",\"down\":" + (down.down ? "true" : "false") + ",\"out\":" +
+           (down.out ? "true" : "false") + "}";
 }
 
 // Free space in one of HeapMemoryWatcher's heaps (`field`: its offset there), in KB; -1 without one.
@@ -259,13 +265,15 @@ std::string state_json(const Guest& guest) {
     const bool demo = (guest.call(fn::kIsDemoActive) & 0xFFu) != 0u;
     const bool dead = first.actor != 0u && (guest.call(fn::kIsPlayerDead) & 0xFFu) != 0u;
     const bool event_camera = (guest.call(fn::kIsEventCameraActive) & 0xFFu) != 0u;
+    const bool intro = (guest.call(fn::kIsOpeningCamera) & 0xFFu) != 0u;
     out += ",\"demo\":" + std::string(demo ? "true" : "false") + ",\"dead\":" + (dead ? "true" : "false") +
-           ",\"event_camera\":" + (event_camera ? "true" : "false") +
+           ",\"event_camera\":" + (event_camera ? "true" : "false") + ",\"intro\":" + (intro ? "true" : "false") +
            ",\"heap_free_kb\":{\"stationed_mem1\":" + heap_free_kb(guest, 0x00u) + ",\"stationed_mem2\":" +
            heap_free_kb(guest, 0x04u) + ",\"game_mem1\":" + heap_free_kb(guest, 0x08u) + ",\"game_mem2\":" +
            heap_free_kb(guest, 0x0Cu) + ",\"scene_mem1\":" + heap_free_kb(guest, 0x14u) + ",\"scene_mem2\":" +
            heap_free_kb(guest, 0x18u) + "}" +
-           ",\"players\":[" + player_json(first) + "," + player_json(second) + "]";
+           ",\"players\":[" + player_json(first, 0u, static_cast<int>(guest.call(fn::kGetPlayerLeft))) + "," +
+           player_json(second, 1u, coop_second_lives()) + "]";
     return out;
 }
 
@@ -325,8 +333,9 @@ void run(Agent& a, const Guest& guest, const agent::Command& command) {
         if (!frames || *frames <= 0) return fail(a, command, "frames must be a positive number");
         if (press) {
             const auto buttons = agent::parse_buttons(args[1]);
-            if (!buttons) return fail(a, command, "buttons: A B 1 2 PLUS MINUS UP DOWN LEFT RIGHT C Z joined with +");
-            timer.pad.buttons = *buttons;
+            if (!buttons) return fail(a, command, "buttons: A B 1 2 PLUS MINUS UP DOWN LEFT RIGHT C Z HOME SHAKE joined with +");
+            timer.pad.buttons = *buttons & ~agent::kShake;
+            timer.pad.shake = (*buttons & agent::kShake) != 0u;
             timer.buttons_until = a.frame + static_cast<std::uint64_t>(*frames);
         } else {
             const auto x = agent::parse_float(args[1]);
@@ -451,6 +460,64 @@ void run(Agent& a, const Guest& guest, const agent::Command& command) {
         reply(a, command.id, true, "");
         return;
     }
+    case Verb::Kill: {
+        const auto player = args.size() == 1u ? agent::parse_player(args[0]) : std::nullopt;
+        if (!player) return fail(a, command, "kill <1|2>");
+        if (!read_scene(guest).in_game) return fail(a, command, "not in a game scene");
+        SavedContext saved(guest.context());
+        const std::uint32_t first = first_player(guest);
+        const std::uint32_t target = *player == 0u ? first : coop_second_player(first);
+        if (!plausible(target)) return fail(a, command, "no such player");
+        guest.set_u32(target + actor::kHealth, 0u);
+        guest.call(fn::kForceGameOver, target);
+        reply(a, command.id, true, "");
+        return;
+    }
+    case Verb::Peek: {
+        const auto address = !args.empty() ? agent::parse_word(args[0]) : std::nullopt;
+        const auto count = args.size() >= 2u ? agent::parse_word(args[1]) : std::optional<std::uint32_t>{1u};
+        if (!address || !count || *count == 0u || *count > 256u || (*address & 3u) != 0u ||
+            !(plausible(*address) || (*address >= 0x90000000u && *address < 0x94000000u))) {
+            return fail(a, command, "peek <aligned guest address> [words 1-256]");
+        }
+        std::string words;
+        char text[16];
+        for (std::uint32_t i = 0; i < *count; ++i) {
+            std::snprintf(text, sizeof(text), "%s\"%08X\"", i == 0u ? "" : ",", guest.u32(*address + 4u * i));
+            words += text;
+        }
+        reply(a, command.id, true, "\"words\":[" + words + "]");
+        return;
+    }
+    case Verb::Poke: {
+        const auto address = args.size() == 2u ? agent::parse_word(args[0]) : std::nullopt;
+        const auto value = args.size() == 2u ? agent::parse_word(args[1]) : std::nullopt;
+        if (!address || !value || (*address & 3u) != 0u ||
+            !(plausible(*address) || (*address >= 0x90000000u && *address < 0x94000000u))) {
+            return fail(a, command, "poke <aligned guest address> <word>");
+        }
+        guest.set_u32(*address, *value);
+        reply(a, command.id, true, "");
+        return;
+    }
+    case Verb::Call: {
+        std::array<std::uint32_t, 5> words{};
+        bool ok = !args.empty() && args.size() <= 5u;
+        for (std::size_t i = 0; ok && i < args.size(); ++i) {
+            const auto word = agent::parse_word(args[i]);
+            ok = word.has_value();
+            if (ok) words[i] = *word;
+        }
+        if (!ok || words[0] < 0x80004000u || words[0] >= 0x80600000u || (words[0] & 3u) != 0u) {
+            return fail(a, command, "call <function address> [r3 r4 r5 r6]");
+        }
+        SavedContext saved(guest.context());
+        const std::uint32_t result = guest.call(words[0], words[1], words[2], words[3], words[4]);
+        char text[32];
+        std::snprintf(text, sizeof(text), "\"r3\":\"%08X\"", result);
+        reply(a, command.id, true, text);
+        return;
+    }
     case Verb::Screenshot: {
         if (args.size() != 1u) return fail(a, command, "screenshot <path.ppm>");
         gx::request_present_snapshot(args[0]);
@@ -477,6 +544,7 @@ void update_pads(Agent& a) {
         bool changed = false;
         if (timer.buttons_until != 0u && a.frame >= timer.buttons_until) {
             timer.pad.buttons = 0u;
+            timer.pad.shake = false;
             timer.buttons_until = 0u;
             changed = true;
         }

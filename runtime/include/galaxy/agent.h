@@ -31,6 +31,10 @@ enum class Verb {
     Release,     // release <player>: the player's controller back to the person playing
     PowerUp,     // powerup <player> <normal|rainbow|fire|ice|bee|spring|boo|fly> [force]
     Teleport,    // teleport <player> <x> <y> <z>
+    Kill,        // kill <player>: health to 0 and down (MarioActor::forceGameOver), as a hit would
+    Peek,        // peek <address> [words]: guest memory, hex (development)
+    Poke,        // poke <address> <word>: one guest word (development)
+    Call,        // call <address> [r3 r4 r5 r6]: a game function on the game thread, its r3 back (development)
     Screenshot,  // screenshot <path.ppm>: the next presented frame
     Quit,        // quit: the game exits
 };
@@ -66,6 +70,10 @@ struct Pad {
     if (name == "release") return Verb::Release;
     if (name == "powerup") return Verb::PowerUp;
     if (name == "teleport") return Verb::Teleport;
+    if (name == "kill") return Verb::Kill;
+    if (name == "peek") return Verb::Peek;
+    if (name == "poke") return Verb::Poke;
+    if (name == "call") return Verb::Call;
     if (name == "screenshot") return Verb::Screenshot;
     if (name == "quit") return Verb::Quit;
     return Verb::Unknown;
@@ -100,6 +108,19 @@ struct Pad {
     return value;
 }
 
+// A 32-bit number in decimal or 0x hex.
+[[nodiscard]] inline std::optional<std::uint32_t> parse_word(std::string_view text) noexcept {
+    int base = 10;
+    if (text.size() > 2u && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        text.remove_prefix(2u);
+        base = 16;
+    }
+    std::uint32_t value = 0u;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value, base);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) return std::nullopt;
+    return value;
+}
+
 [[nodiscard]] inline std::optional<float> parse_float(std::string_view text) noexcept {
     float value = 0.0f;
     const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
@@ -114,7 +135,10 @@ struct Pad {
     return std::nullopt;
 }
 
-// Wii Remote and Nunchuk buttons joined with '+' ("A+B", "Z", "none"): coop::button masks.
+// A shake of the Wii Remote (the spin) in a `press`, beside the coop::button masks.
+inline constexpr std::uint32_t kShake = 0x10000u;
+
+// Wii Remote and Nunchuk buttons joined with '+' ("A+B", "Z", "SHAKE", "none"): coop::button masks.
 [[nodiscard]] inline std::optional<std::uint32_t> parse_buttons(std::string_view text) noexcept {
     if (text == "none") return 0u;
     std::uint32_t mask = 0u;
@@ -136,6 +160,7 @@ struct Pad {
         else if (name == "C") bit = b::kC;
         else if (name == "Z") bit = b::kZ;
         else if (name == "HOME") bit = b::kHome;
+        else if (name == "SHAKE") bit = kShake;
         else return std::nullopt;
         mask |= bit;
         if (plus == std::string_view::npos) break;

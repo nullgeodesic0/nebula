@@ -51,7 +51,8 @@ use std::{fs, path::Path};
 // 25: co-op hooks around NameObjHolder's constructor and add; regenerate every module.
 // 26: (diagnostic hooks, since removed)
 // 27: hooks around JKRSolidHeap::allocFromHead/allocFromTail (stage heap overflow); regenerate every module.
-pub const GENERATION_VERSION: u32 = 27;
+// 28: co-op lives, HUD and launch star hooks, some of them skippable; regenerate every module.
+pub const GENERATION_VERSION: u32 = 28;
 
 /// Shard size and per-shard source budget of the qualified module build.
 pub const MODULE_SHARD_SIZE: usize = 64;

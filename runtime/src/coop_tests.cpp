@@ -442,6 +442,31 @@ bool test_leash() {
 
 }  // namespace
 
+bool test_lives() {
+    using namespace galaxy::coop;
+    bool ok = true;
+    DownState mario, luigi;
+    int luigi_lives = 2;
+    ok &= expect(go_down_alone(luigi, mario, luigi_lives) && luigi.down && !luigi.out && luigi_lives == 1,
+                 "lives: down alone spends a life");
+    bool back = false;
+    for (unsigned i = 0; i < kRespawnFrames - 1u; ++i) back |= respawn_due(luigi, mario);
+    ok &= expect(!back && respawn_due(luigi, mario) && !luigi.down, "lives: back beside the partner in time");
+    int mario_lives = 0;
+    ok &= expect(go_down_alone(mario, luigi, mario_lives) && mario.out && mario_lives == 0,
+                 "lives: none left, out");
+    for (unsigned i = 0; i < 400u; ++i) back = respawn_due(mario, luigi);
+    ok &= expect(!back && mario.down, "lives: an out player does not come back");
+    ok &= expect(!go_down_alone(luigi, mario, luigi_lives) && luigi_lives == 1, "lives: both down is the game's miss");
+    DownState a, b;
+    int lives = 3;
+    (void)go_down_alone(a, b, lives);
+    b.down = true;
+    for (unsigned i = 0; i < 400u; ++i) back = respawn_due(a, b);
+    ok &= expect(!back, "lives: no comeback while the partner is down");
+    return ok;
+}
+
 bool test_agent_commands() {
     using namespace galaxy::agent;
     bool ok = true;
@@ -478,6 +503,7 @@ int main() {
     passed &= test_split_clip_vs_words();
     passed &= test_leash();
     passed &= test_agent_commands();
+    passed &= test_lives();
     if (!passed) {
         return 1;
     }

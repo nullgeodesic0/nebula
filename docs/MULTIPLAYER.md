@@ -82,12 +82,36 @@ line: for draws over the whole screen every vertex shader clips the other side a
 Mario's shadow capture in a corner of the EFB, are left whole; lines and points are not clipped).
 `GALAXY_COOP_SPLIT=0` keeps one shared screen (the camera then hands back to the first player between 1200
 and 2600 units, and the second player is brought back after two seconds past 2600).
+## Lives, HUD and launch stars
+
+Lives work as in New Super Mario Bros. Wii, without the bubble:
+
+- Each player has their own lives and life meter. The first player's lives are the game's own (in the save);
+  the second player's are kept in `coop_lives.txt` next to the save and start as many as the first player has.
+- A player who goes down (no health left, a fall, a crush) while the other plays on spends one of their lives,
+  vanishes after their fall and comes back beside the other about two seconds later, with full health. The
+  game's own miss (the "Too Bad!", the restart from the checkpoint) does not happen.
+- With no lives left a player sits out, carried along hidden beside the other, until the stage reloads.
+- Both down at once is the game's own miss, and each spends a life; game over only when both are out of lives.
+- A coin heals both players.
+
+HUD: the second player's life meter stands left of the first player's, and their lives counter, with their
+face, right of the first player's. They are the game's own layouts (HitPointMeter, PlayerLeft), made with the
+stage's HUD and shown and hidden with the first player's.
+
+Launch stars: the player on a launch star (either one) flies, and the other flies beside them under the
+star's camera; both land together. A launch star ridden by the second player runs with them as the game's
+player, so the flight's animations and its end are theirs.
+
+The runtime side is in `coop_guest.cpp` (`on_game_over_call`, `update_down_player`, `create_hud`,
+`rides_star`); the rules are `coop::go_down_alone` and `coop::respawn_due`, tested in `coop_tests.cpp`.
+
 ## Known limits
 
 These come from a game written for one player and are what the playtest should look at:
 
-- Enemies, doors, stars and the HUD act on the first player. The second player can stomp and spin, but
-  pickups, health and deaths may count for the first player or be ignored.
+- Enemies, doors and stars act on the first player. The second player can stomp and spin; pickups other than
+  coins may count for the first player.
 - Rumble goes to the first player's controller.
 - The Observatory's doors and domes (AstroChangeStageCube areas) test the game's player, the first: when the
   second player walks into one the first is not in, the players swap places, so the game takes them through

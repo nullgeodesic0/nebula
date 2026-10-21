@@ -15,10 +15,11 @@ anyone at the controls. It was built for developing the Mario and Luigi co-op mo
 ## Test copies
 
 Each test copy lives in `C:\nb\agent-mp\<name>` (`--instance`, default `default`) with its own copy of the saves,
-settings and shader cache, taken from the run folder (`C:\nb\run-mp`) the first time. It never writes to the real
-saves or the run folder's saves. The window opens without taking the focus, audio is off, and a controller only
-reaches the test copy while its window has the focus, so a game played at the same time is left alone. Stopping
-a test copy ends only the process it started.
+settings and shader cache, taken from the run folder (`C:\nb\run-mp`, or `--run` for another build such as
+`C:\nb\run-mp-dev`) the first time. It never writes to the real saves or the run folder's saves. It runs with no
+window at all (`GALAXY_HIDE_WINDOW`; `--show` opens one), audio off and controllers only for a focused window,
+so a game played at the same time is left alone; screenshots still see it. Stopping a test copy ends only the
+process it started.
 
 The run folder's `NebulaRuntime.exe` and RMGE01 modules are the build under test; the content folder is
 `C:\nb\content-mp`.
@@ -50,9 +51,9 @@ Claude Code offers the server from `.mcp.json` when a session starts in this fol
 With `GALAXY_AGENT_DIR` set, the game reads `commands.txt` in that folder (the driver appends
 `<id> <verb> <arguments>` lines) and answers each command in `replies.jsonl` (`{"id":..,"ok":..,"frame":..}`),
 once a frame on the game thread at the first player's controller read. `status.json` is rewritten twice a second
-with the frame, scene, stage, mission and, in a stage, `demo`, `event_camera`, `dead`, the free space of the
-game's heaps (`heap_free_kb`: stationed, game and stage, MEM1 and MEM2) and each player's position, power-up,
-health and whether their input is held.
+with the frame, scene, stage, mission and, in a stage, `demo`, `event_camera`, `intro` (the mission's opening
+camera), `dead`, the free space of the game's heaps (`heap_free_kb`: stationed, game and stage, MEM1 and MEM2)
+and each player's position, power-up, health, lives, `down`/`out` (co-op lives) and whether their input is held.
 
 | Command | Effect |
 |---|---|
@@ -60,18 +61,31 @@ health and whether their input is held.
 | `file <1-6> [luigi]` | From the logo or title, reads the saves and starts that file as the file select would (`FileSelector::exeDemo`), no menus; answered when its first stage is requested |
 | `stage <StageName> <mission>` | Into that galaxy mission (`MR::requestChangeStageInGameMoving`); needs a stage, not the title |
 | `wait <frames>` | Answered after that many frames; later commands wait for it |
-| `press <1\|2> <A+B..> <frames> [nowait]` | Buttons held, then released (A B 1 2 PLUS MINUS UP DOWN LEFT RIGHT C Z HOME) |
+| `press <1\|2> <A+B..> <frames> [nowait]` | Buttons held, then released (A B 1 2 PLUS MINUS UP DOWN LEFT RIGHT C Z HOME; SHAKE spins) |
 | `stick <1\|2> <x> <y> <frames> [nowait]` | The Nunchuk stick, -1..1, y up |
 | `pointer <x> <y>`, `pointer off` | The first player's pointer, -1..1 across the screen, y down |
 | `release <1\|2>` | The controller back to the person playing |
 | `powerup <1\|2> <normal\|rainbow\|fire\|ice\|bee\|spring\|boo\|fly> [force]` | Refused when the form's model is not loaded in the stage, unless `force` |
 | `teleport <1\|2> <x> <y> <z>` | `MR::setPlayerPos` (the second player's in their own turn) |
+| `kill <1\|2>` | Health to 0 and down (`MarioActor::forceGameOver`), as a hit would |
+| `peek <address> [words]`, `poke <address> <word>` | Guest memory (development) |
+| `call <address> [r3 r4 r5 r6]` | A game function on the game thread; its r3 back (development) |
 | `screenshot <path.ppm>` | The next presented frame |
 | `quit` | The game exits |
 
 A power-up given by command first marks the form as seen in the test copy's save
 (`MR::onGameEventFlag*MarioAtFirst`): the first-time demo turns the player towards the item they touched, and
 without an item it crashed.
+
+## Level sweep
+
+`py -3 tools/agent/sweep.py` loads every mission of every galaxy in a hidden test copy (co-op; `--solo` for one
+player), walks the second player away and back, and writes `C:
+bgent-mp\sweepesults.json` and
+`report.md` with a screenshot per mission (and of the screen when one never becomes playable). A crash or hang
+relaunches and carries on; a rerun resumes. `--retry <results.json>` runs only the missions that failed there,
+for example in solo to tell co-op bugs from missions the direct jump cannot start (hidden stars and comets need
+their own entrance or save state).
 
 ## Found with it
 

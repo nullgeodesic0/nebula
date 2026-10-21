@@ -104,8 +104,9 @@ class Instance:
                              capture_output=True, text=True).stdout
         return 'NebulaRuntime' in out
 
-    def launch(self, coop=True, split=True, audio=False, fresh_saves=False, extra_env=None):
-        """Starts the game; returns its process id. Its window opens without taking the focus."""
+    def launch(self, coop=True, split=True, audio=False, fresh_saves=False, show=False, extra_env=None):
+        """Starts the game; returns its process id. Without `show` it runs with no window at all
+        (GALAXY_HIDE_WINDOW): only screenshots see it."""
         if self.running():
             raise GameError('instance %s is already running (pid %d)' % (self.name, self.pid()))
         self.prepare(fresh_saves)
@@ -135,6 +136,8 @@ class Instance:
         })
         if not audio:
             env['GALAXY_AUDIO_DISABLE'] = '1'
+        if not show:
+            env['GALAXY_HIDE_WINDOW'] = '1'
         env.update(extra_env or {})
         stamp = time.strftime('%Y%m%d-%H%M%S')
         self.stdout_path = os.path.join(self.logs, 'out-%s.log' % stamp)
@@ -252,10 +255,11 @@ class Instance:
     # ---- high-level steps ----
 
     def playable(self, s):
-        """In a stage (not the file select), no cutscene or event camera, the first player in control."""
+        """In a stage (not the file select), past its intro, no cutscene or event camera, the first player in
+        control."""
         players = s.get('players') or []
         return bool(s.get('in_game')) and s.get('stage') != 'FileSelect' and not s.get('demo') \
-            and not s.get('event_camera') and len(players) >= 1 and players[0] is not None \
+            and not s.get('event_camera') and not s.get('intro') and len(players) >= 1 and players[0] is not None \
             and not players[0].get('input_disabled')
 
     def boot(self, file=1, timeout=180.0):
@@ -398,11 +402,13 @@ def ppm_to_png(ppm_path, png_path, max_width=960):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Drive a test copy of the game (docs/AGENT_TESTING.md).')
     parser.add_argument('--instance', default='default')
+    parser.add_argument('--run', default=DEFAULT_RUN, help='the build folder (NebulaRuntime.exe and modules)')
     sub = parser.add_subparsers(dest='action', required=True)
     p = sub.add_parser('launch', help='start the game')
     p.add_argument('--solo', action='store_true', help='one player (co-op off)')
     p.add_argument('--audio', action='store_true')
     p.add_argument('--fresh-saves', action='store_true')
+    p.add_argument('--show', action='store_true', help='open a window (default: none, screenshots only)')
     sub.add_parser('stop', help='quit the game')
     p = sub.add_parser('boot', help='load a save file (no menus) and wait until the player can move')
     p.add_argument('--file', type=int, default=1)
@@ -420,10 +426,11 @@ def main(argv=None):
     p.add_argument('--grep')
     sub.add_parser('crash', help='the crash report of the last run, if any')
     args = parser.parse_args(argv)
-    game = Instance(args.instance)
+    game = Instance(args.instance, run=args.run)
     try:
         if args.action == 'launch':
-            print('pid', game.launch(coop=not args.solo, audio=args.audio, fresh_saves=args.fresh_saves))
+            print('pid', game.launch(coop=not args.solo, audio=args.audio, fresh_saves=args.fresh_saves,
+                                     show=args.show))
         elif args.action == 'boot':
             print(json.dumps(game.boot(args.file)))
         elif args.action == 'stop':

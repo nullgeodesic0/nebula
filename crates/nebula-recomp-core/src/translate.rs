@@ -7646,10 +7646,21 @@ fn emit_direct_guest_call_with_exact_fpu(
     // Mario and Luigi co-op: the runtime sees the arguments of a few game calls before they run and
     // their results after (coop_guest.cpp), on every direct call of the target.
     let coop = coop_call_id(target);
+    let skippable = coop.is_some_and(coop_call_skippable);
     if let Some(id) = coop {
+        if skippable {
+            // The runtime skips the call by setting pc to galaxy::kCoopSkipCall.
+            writeln!(output, "    context->pc = 0x{pc:08X}u;").map_err(|_| TranslationError::Formatting)?;
+        }
         output.push_str(&site_hook_call(pc, "CoopBeforeCall", id));
+        if skippable {
+            output.push_str("    if (context->pc != galaxy::kCoopSkipCall) {\n");
+        }
     }
     emit_direct_guest_call_body(output, target, pc, callable_entries, exact_fpu_functions)?;
+    if skippable {
+        writeln!(output, "    }} else {{ context->pc = 0x{pc:08X}u; }}").map_err(|_| TranslationError::Formatting)?;
+    }
     if let Some(id) = coop {
         output.push_str(&site_hook_call(pc, "CoopAfterCall", id));
     }
@@ -7983,6 +7994,12 @@ fn site_hook_call(pc: u32, kind: &str, argument: u32) -> String {
     )
 }
 
+/// Co-op calls the runtime may skip from CoopBeforeCall (a player down while the other plays on, the second
+/// player's 2D updates).
+fn coop_call_skippable(id: u32) -> bool {
+    matches!(id, 19..=25)
+}
+
 /// Game calls the Mario and Luigi co-op watches (CoopBeforeCall/CoopAfterCall, argument the id). The ids
 /// match runtime/src/coop_guest.cpp; addresses are RMGE01's, from Petari's symbols.
 fn coop_call_id(target: u32) -> Option<u32> {
@@ -8008,6 +8025,32 @@ fn coop_call_id(target: u32) -> Option<u32> {
         // JKRSolidHeap::allocFromHead/allocFromTail(u32 size, int align): a full stage heap in MEM1 borrows from MEM2.
         0x8040_B9A0 => Some(17),
         0x8040_BA64 => Some(18),
+        // Co-op deaths (a player down while the other plays on): skippable, see coop_call_skippable.
+        0x803F_32C0 => Some(19), // MR::startPlayerEvent(const char*)
+        0x803C_8C18 => Some(20), // MR::startGlobalEventCameraNoTarget(const char*, s32)
+        0x803F_C4CC => Some(21), // MR::startStarPointerModeDemoMarioDeath(void*)
+        0x803F_9BB8 => Some(22), // MR::setCubeBgmChangeInvalid()
+        0x803F_9C04 => Some(23), // MR::clearBgmQueue()
+        // Co-op HUD: the second player's own life meter and lives counter.
+        0x802B_BCC8 => Some(24), // MarioActor::init2D() (skippable)
+        0x802B_CE80 => Some(25), // MarioActor::update2D() (skippable)
+        0x8036_C59C => Some(26), // MeterLayout::requestActive()
+        0x8036_C664 => Some(27), // MeterLayout::requestDeactivate()
+        0x8036_C6E8 => Some(28), // MeterLayout::requestForceAppear()
+        0x8036_C72C => Some(29), // MeterLayout::requestPlayerMoving()
+        0x8036_C79C => Some(30), // MeterLayout::requestPlayerStopped()
+        0x8037_87CC => Some(31), // PlayerLeft::appear()
+        0x8037_8828 => Some(32), // PlayerLeft::forceAppear()
+        0x8037_8888 => Some(33), // PlayerLeft::disappear()
+        0x803C_C3CC => Some(34), // MR::getPlayerLeft()
+        0x803F_2680 => Some(35), // MR::incPlayerLife(u32): coins heal both players
+        // Launch stars ridden by the second player: their steps run with the second player as the game's player.
+        0x8024_7114 => Some(36), // SuperSpinDriver::exeCapture()
+        0x8024_722C => Some(37), // SuperSpinDriver::exeShootStart()
+        0x8024_73C8 => Some(38), // SuperSpinDriver::exeShoot()
+        0x8023_5294 => Some(39), // SpinDriver::exeCapture()
+        0x8023_53B4 => Some(40), // SpinDriver::exeShootStart()
+        0x8023_5608 => Some(41), // SpinDriver::exeShoot()
         _ => None,
     }
 }
