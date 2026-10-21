@@ -120,6 +120,8 @@ constexpr std::uint32_t kHideModel = 0x803DD794u;        // MR::hideModel(LiveAc
 constexpr std::uint32_t kValidateHitSensors = 0x803C27B8u;    // MR::validateHitSensors(LiveActor*)
 constexpr std::uint32_t kInvalidateHitSensors = 0x803C27CCu;  // MR::invalidateHitSensors(LiveActor*)
 constexpr std::uint32_t kMarioIncLife = 0x802B1CE4u;     // MarioActor::incLife(u32)
+constexpr std::uint32_t kChangeGameOverAnimation = 0x802AF7BCu;  // MarioActor::changeGameOverAnimation()
+constexpr std::uint32_t kChangeAnimationNonStop = 0x802AF660u;  // MarioActor::changeAnimationNonStop(const char*)
 // HUD.
 constexpr std::uint32_t kGetLayoutHolder = 0x80361738u;  // MR::getGameSceneLayoutHolder()
 constexpr std::uint32_t kNewOnHeap = 0x80409B0Cu;        // operator new(u32 size, JKRHeap*, int align)
@@ -129,6 +131,13 @@ constexpr std::uint32_t kMeterInitCount = 0x8036C80Cu;   // MeterLayout::initCou
 constexpr std::uint32_t kMeterSetCount = 0x8036C814u;    // MeterLayout::setCount(s32)
 constexpr std::uint32_t kPlayerLeftCtor = 0x8037867Cu;   // PlayerLeft::PlayerLeft(const char*)
 constexpr std::uint32_t kLayoutSetTrans = 0x803662CCu;   // LayoutActor::setTrans(const TVec2f&): a screen position
+constexpr std::uint32_t kGetPane = 0x803D82F4u;          // MR::getPane(const LayoutActor*, const char*)
+constexpr std::uint32_t kIsLayoutDead = 0x803D813Cu;     // MR::isDead(const LayoutActor*)
+constexpr std::uint32_t kShowLayout = 0x803D814Cu;       // MR::showLayout(LayoutActor*)
+constexpr std::uint32_t kLayoutKill = 0x803661F8u;       // LayoutActor::kill()
+// nw4r::lyt::Picture::SetVtxColorElement(u32 element, u8): element 4 * corner + R, G, B, A.
+constexpr std::uint32_t kPictureSetVtxColorElement = 0x8000DE94u;
+constexpr std::uint32_t kPictureVtable = 0x80550130u;    // nw4r::lyt::Picture's vtable
 // MR::convertScreenPosToLayoutPos(TVec2f* layout, const TVec2f& screen)
 constexpr std::uint32_t kScreenToLayout = 0x80366658u;
 // The MeterLayout requests MarioMeter makes (ids 26-30) and the PlayerLeft calls the counters make (31-33),
@@ -160,6 +169,9 @@ constexpr std::uint32_t kHeapMemoryWatcher = 0x806A245Cu;
 constexpr std::uint32_t kSceneHeapNapa = 0x14u;
 constexpr std::uint32_t kSceneHeapGddr = 0x18u;
 constexpr std::uint32_t kSolidHeapFreeSize = 0x6Cu;  // JKRSolidHeap::mFreeSize
+// MarioActor::_482: set, MarioActor::draw leaves the player's model out, as in a black hole (MR::hideModel does
+// not; _A61 would also darken the screen, MarioActor::drawPreWipe).
+constexpr std::uint32_t kMarioActorHidden = 0x482u;
 // MarioActor's own nerve for ordinary play (NrvMarioActor::MarioActorNrvWait::sInstance).
 constexpr std::uint32_t kMarioActorNrvWait = 0x8069F038u;
 // MarioActor::exeGameOver* (the player down: exeGameOver to exeTimeWait, and exeGameOverBlackHole2).
@@ -174,6 +186,7 @@ constexpr std::uint32_t kHolderMarioMeter = 0x14u;
 constexpr std::uint32_t kMarioMeterHitPoint = 0x0Cu;
 constexpr std::uint32_t kHolderCounters = 0x34u;
 constexpr std::uint32_t kCountersPlayerLeft = 0x30u;
+constexpr std::uint32_t kPlayerLeftCount = 0x20u;  // PlayerLeft::mPlayerLeft
 // A player riding a launch star: MarioActor::_924 (the HitSensor they rush with), HitSensor::mHost, and the
 // launchers' vtables (SuperSpinDriver, SpinDriver).
 constexpr std::uint32_t kMarioRushSensor = 0x924u;
@@ -356,6 +369,7 @@ struct State {
     bool hud_tried = false;
     std::uint32_t hit_point_name = 0u;  // "HitPointMeter" in the game's data
     std::uint32_t second_meter_count = 0u;
+    std::uint32_t ring_names = 0u;  // "PicBase", "PicBaseW" in guest memory
     float hud_scale_x = 0.0f;
     float hud_scale_y = 0.0f;
     float hud_offset_x = 0.0f;
@@ -493,6 +507,7 @@ void add_partner_resources(const Guest& guest, State& s) {
 // Right after the game sets up its player, the second player: the same MarioActor as the other character,
 // beside the first, out of the movement list.
 void create_hud(const Guest& guest, State& s);
+void tint_second_meter(const Guest& guest, const State& s);
 
 void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     SavedContext saved(guest.context());
@@ -820,6 +835,16 @@ void on_game_over_call(std::uint32_t id, const Guest& guest, State& s, PpcContex
             save_second_lives(s);
         }
         if (self.down) {
+            // Lives counters count up by themselves but never down (a miss always reloaded the stage): show it.
+            const std::uint32_t counter = who == 0u ? s.first_left : s.second_left;
+            if (plausible(counter)) {
+                const int lives = who == 0u ? static_cast<int>(guest.call(fn::kGetPlayerLeft)) : s.second_lives;
+                guest.set_u32(counter + kPlayerLeftCount, static_cast<std::uint32_t>(std::max(lives, 0)));
+                guest.call(fn::kPlayerLeftCalls[1], counter);  // PlayerLeft::forceAppear
+            }
+            // The down animation the game's player event would have started (MarioActor::exeGameOver; a fall
+            // into the abyss starts its own).
+            if (guest_pc >= 0x802B8A38u && guest_pc < 0x802B8B64u) guest.call(fn::kChangeGameOverAnimation, actor_address);
             trace("%s down alone: %s", who == 0u ? "first player" : "second player",
                   self.out ? "no lives left, out until the stage reloads" : "back beside the other soon");
         } else {
@@ -870,9 +895,14 @@ void respawn_player(const Guest& guest, std::uint32_t actor_address, coop::Vec3 
     guest.set_u32(actor_address + 0x3E0u, 3u);  // MarioActor::mMaxHealth
     guest.set_u8(actor_address + 0x39Du, 0u);   // the down's kind
     guest.call(fn::kShowModel, actor_address);
+    guest.set_u8(actor_address + kMarioActorHidden, 0u);
     guest.call(fn::kValidateHitSensors, actor_address);
     Guest::Frame frame(guest);
     guest.call(fn::kSetPlayerPosAndWait, frame.vec(0, there));
+    // Out of the down animation into the ordinary stand ("待機").
+    static std::uint32_t idle = 0u;
+    if (idle == 0u) idle = guest.find_string("\x91\xD2\x8B\x40");
+    if (idle != 0u) guest.call(fn::kChangeAnimationNonStop, actor_address, idle);  // as the down was started
 }
 
 // Once a frame, in a player's own turn: the fallen player vanishes after their fall and comes back beside the
@@ -884,17 +914,43 @@ void update_down_player(const Guest& guest, State& s, unsigned who, coop::Vec3 p
     const std::uint32_t actor_address = who == 0u ? s.first : s.second;
     if (self.frames + 1u == coop::kDownHideFrames) {
         guest.call(fn::kHideModel, actor_address);
+        guest.set_u8(actor_address + kMarioActorHidden, 1u);
         guest.call(fn::kInvalidateHitSensors, actor_address);
     }
     const coop::Vec3 beside = partner_position + partner_side * 120.0f;
+    if (s.game_miss) return;  // the game's own miss reloads the stage: nobody comes back meanwhile
     if (coop::respawn_due(self, s.down[1u - who])) {
         respawn_player(guest, actor_address, beside);
+        // Their life meter broke and hid itself at zero (MeterLayout::exeZeroMeterBreak): back with the player.
+        const std::uint32_t meter = who == 0u ? s.first_meter : s.second_meter;
+        if (plausible(meter)) guest.call(fn::kShowLayout, meter);
+        if (who == 1u) tint_second_meter(guest, s);
         trace("%s back beside the other", who == 0u ? "first player" : "second player");
         return;
     }
     if (self.out && self.frames > coop::kDownHideFrames) {
         Guest::Frame frame(guest);
         guest.call(fn::kSetPlayerPos, frame.vec(0, beside));
+    }
+}
+
+// The second player's life meter in their colour, set before each draw (its animations set the colours): the
+// HitPointMeter pictures tinted, the ring and the health pieces on land and in water. Their names are in guest
+// memory (State::ring_names) for MR::getPane.
+constexpr const char* kTintPanes[] = {"PicBase",    "PicBaseW",   "PicPoint1",  "PicPoint2",
+                                      "PicPoint3",  "PicPoint1W", "PicPoint2W", "PicPoint3W"};
+constexpr std::uint32_t kTintPaneCount = 8u;
+constexpr std::uint32_t kTintNameSize = 12u;
+void tint_second_meter(const Guest& guest, const State& s) {
+    if (!plausible(s.second_meter) || !plausible(s.ring_names)) return;
+    for (std::uint32_t i = 0; i < kTintPaneCount; ++i) {
+        const std::uint32_t pane = guest.call(fn::kGetPane, s.second_meter, s.ring_names + i * kTintNameSize);
+        if (!plausible(pane) || guest.u32(pane) != fn::kPictureVtable) continue;
+        for (std::uint32_t corner = 0; corner < 4u; ++corner) {
+            for (std::uint32_t channel = 0; channel < 3u; ++channel) {
+                guest.call(fn::kPictureSetVtxColorElement, pane, corner * 4u + channel, coop::kSecondMeterTint[channel]);
+            }
+        }
     }
 }
 
@@ -938,6 +994,16 @@ void create_hud(const Guest& guest, State& s) {
     guest.call(fn::kMeterInitCount, meter, 3u);
     // MarioMeter activated the first player's meter as the stage began, before this one was made.
     guest.call(fn::kMeterRequests[0], meter);  // MeterLayout::requestActive
+    // The second player's meter in their colour (tint_second_meter).
+    s.ring_names = guest.call(fn::kNewOnHeap, kTintPaneCount * kTintNameSize, heap, 4u);
+    if (plausible(s.ring_names)) {
+        for (std::uint32_t i = 0; i < kTintPaneCount; ++i) {
+            const std::string_view name = kTintPanes[i];
+            for (std::uint32_t c = 0; c < kTintNameSize; ++c) {
+                guest.set_u8(s.ring_names + i * kTintNameSize + c, c < name.size() ? static_cast<std::uint8_t>(name[c]) : 0u);
+            }
+        }
+    }
     s.second_meter = meter;
     s.second_meter_count = 3u;
     const std::uint32_t left = guest.call(fn::kNewOnHeap, 0x30u, heap, 4u);
@@ -953,12 +1019,24 @@ void create_hud(const Guest& guest, State& s) {
         s.answer_partner = false;
         guest.set_u8(kIsLuigi, character_byte(s.own));
     }
+    tint_second_meter(guest, s);
     trace("second player's HUD: life meter %08X, lives counter %08X", s.second_meter, s.second_left);
 }
 
-// Once a frame: the second player's life meter shows their health.
+// Once a frame: the second player's life meter shows their health, and their layouts are live while the
+// game's are (the game kills its HUD for a miss or a cutscene with a virtual call no hook sees).
 void update_hud_count(const Guest& guest, State& s) {
     if (s.second_meter == 0u || !plausible(s.second)) return;
+    const auto mirror_alive = [&](std::uint32_t mine, std::uint32_t theirs, std::uint32_t revive) {
+        if (!plausible(mine) || !plausible(theirs)) return;
+        const bool their_dead = (guest.call(fn::kIsLayoutDead, theirs) & 0xFFu) != 0u;
+        const bool my_dead = (guest.call(fn::kIsLayoutDead, mine) & 0xFFu) != 0u;
+        if (their_dead && !my_dead) guest.call(fn::kLayoutKill, mine);
+        if (!their_dead && my_dead) guest.call(revive, mine);
+    };
+    mirror_alive(s.second_meter, s.first_meter, fn::kMeterRequests[0]);    // MeterLayout::requestActive
+    mirror_alive(s.second_left, s.first_left, fn::kPlayerLeftCalls[0]);    // PlayerLeft::appear
+
     const std::uint32_t health = s.down[1].down ? 0u : guest.u32(s.second + 0x380u);
     if (health == s.second_meter_count || health > 8u) return;
     s.second_meter_count = health;
@@ -977,6 +1055,8 @@ void place_hud(const Guest& guest, const State& s) {
         guest.call(fn::kLayoutSetTrans, mine, frame.vec(0, at));
     };
     follow(s.second_meter, s.first_meter, coop::kSecondMeterOffset[0], coop::kSecondMeterOffset[1]);
+    // The meter's own animations (damage, recovery, breaking) set its colours as it moves: its tint after them.
+    tint_second_meter(guest, s);
     follow(s.second_left, s.first_left, coop::kSecondLivesOffset[0], coop::kSecondLivesOffset[1]);
 }
 
@@ -1063,6 +1143,7 @@ void move_second_player(const Guest& guest, State& s) {
     if (s.level_start != s.second_hidden_for_start && !s.down[1].down) {
         s.second_hidden_for_start = s.level_start;
         guest.call(s.level_start ? fn::kHideModel : fn::kShowModel, s.second);
+        guest.set_u8(s.second + kMarioActorHidden, s.level_start ? 1u : 0u);
         guest.call(s.level_start ? fn::kInvalidateHitSensors : fn::kValidateHitSensors, s.second);
     }
     // Out of the picture: down, or waiting for the first player at a level start (still parked meanwhile).

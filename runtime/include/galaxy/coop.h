@@ -742,6 +742,8 @@ inline constexpr unsigned kRespawnFrames = 150u;  // and reappears beside the ot
 // Where the second player's life meter and lives counter stand, from the first player's (layout units, y down).
 inline constexpr float kSecondMeterOffset[2] = {-150.0f, 0.0f};
 inline constexpr float kSecondLivesOffset[2] = {150.0f, 0.0f};
+// The second player's life meter rings, as vertex colour (Luigi green).
+inline constexpr std::uint32_t kSecondMeterTint[3] = {90u, 255u, 90u};
 
 // Whether an allocation of `size` bytes aligned to `align` from the stage's full MEM1 heap (JKRSolidHeap,
 // `mem1_free` bytes left) goes to its MEM2 heap (`mem2_free` left) instead: only when MEM1 cannot hold it and MEM2
