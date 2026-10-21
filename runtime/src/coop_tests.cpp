@@ -295,6 +295,10 @@ bool test_split_screen() {
     ok &= expect(sphere_in_view(camera.view, {0.0f, 0.0f, 0.0f}, 1.0f, 45.0f, 1.0f, 1000.0f), "in front: seen");
     ok &= expect(!sphere_in_view(camera.view, {0.0f, 0.0f, 20.0f}, 1.0f, 45.0f, 1.0f, 1000.0f), "behind: not seen");
     ok &= expect(!sphere_in_view(camera.view, {50.0f, 0.0f, 0.0f}, 1.0f, 45.0f, 1.0f, 1000.0f), "far to the side: not seen");
+    ok &= expect(clip_level_distance(7u, 100000.0f) == 5000.0f && clip_level_distance(0u, 100000.0f) == 100000.0f &&
+                      clip_level_distance(9u, 80000.0f) == 80000.0f, "clipping levels: the judge's distances");
+    ok &= expect(!sphere_in_view(camera.view, {0.0f, 0.0f, -70000.0f}, 100.0f, 45.0f, 1.0f, clip_level_distance(1u, 100000.0f)),
+                  "past the clipping level's distance: not seen");
     ok &= expect(sphere_in_view(camera.view, {50.0f, 0.0f, 0.0f}, 60.0f, 45.0f, 1.0f, 1000.0f), "a big sphere reaching in: seen");
 
     FollowCamera follow;

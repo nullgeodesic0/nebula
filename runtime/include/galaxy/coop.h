@@ -698,6 +698,15 @@ inline constexpr float kSteerDeadZone = 0.2f;
            std::fabs(v.y) <= depth * ty + radius * std::sqrt(1.0f + ty * ty);
 }
 
+// ClippingJudge::isJudgedToClipFrustum's far plane for a clipping level: level 0 is the camera's far plane,
+// levels 1-7 the judge's fixed distances (ClippingJudge's constructor). An object past it stays clipped for
+// the second player as well; Space Junk's spider-web coins sit 70000 units out, never meant to move unless
+// Tarantox has made the web.
+[[nodiscard]] inline float clip_level_distance(std::uint32_t level, float far_z) noexcept {
+    constexpr float kDistances[8] = {0.0f, 60000.0f, 50000.0f, 40000.0f, 30000.0f, 20000.0f, 10000.0f, 5000.0f};
+    return level >= 1u && level < 8u ? kDistances[level] : far_z;
+}
+
 // Camera collision: where the camera goes when the map is in the way between the point it looks at and the
 // eye (`hit`, the first wall on that line): `margin` short of the wall, towards the player.
 [[nodiscard]] inline Vec3 camera_before_wall(Vec3 look, Vec3 hit, float margin) noexcept {

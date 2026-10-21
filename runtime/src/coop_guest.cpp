@@ -367,6 +367,7 @@ struct State {
     std::uint32_t draw_scene = 0u;
     std::uint32_t clip_position = 0u;
     float clip_radius = 0.0f;
+    float clip_far = 0.0f;
     // The first player's camera and projection as the game made them, restored after the second half.
     coop::CameraMatrices camera1;
     std::array<float, 16> projection{};
@@ -1102,6 +1103,7 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         // ClippingJudge::isJudgedToClipFrustum(this, const TVec3f& position, f32 radius, s32 level).
         s.clip_position = s.split.amount() > 0.0f && s.follow.started() ? context->gpr[4] : 0u;
         s.clip_radius = static_cast<float>(fpr(context, 1));
+        s.clip_far = coop::clip_level_distance(context->gpr[5], s.far_z);
         return;
     case call::kNameObjHolderCtor:
         // NameObjHolder::NameObjHolder(this, int num): the scene's (num 0x1300) gets room for the second player.
@@ -1193,7 +1195,7 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
         // Out of the first player's view but in the second's: not clipped, so it moves and is drawn.
         if (s.clip_position != 0u && (context->gpr[3] & 0xFFu) != 0u && plausible(s.clip_position)) {
             const coop::Vec3 position = guest.vec(s.clip_position);
-            if (coop::sphere_in_view(s.camera2.view, position, s.clip_radius, s.fovy, s.aspect, s.far_z)) {
+            if (coop::sphere_in_view(s.camera2.view, position, s.clip_radius, s.fovy, s.aspect, s.clip_far)) {
                 context->gpr[3] = 0u;
             }
         }
