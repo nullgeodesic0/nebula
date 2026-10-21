@@ -17,8 +17,8 @@ ZR/RT as a spin button and ZL/LT as crouch.
 | Jump in play, back in menus | - | B | B |
 | Star Bits, back (B) | `Left Shift`, `Right Shift`, right mouse button | LB | L |
 | Crouch, ground pound (Z) | `Z`, `Left Ctrl`, `Right Ctrl` | LT | ZL |
-| Camera reset (C) | `C` | Right stick click | Right stick click |
-| Spin (Wii Remote shake) | `Q`, `E` | X, Y, RB, RT | X, Y, ZR, shake the controller |
+| Camera reset (C) | `C` | Left stick click | Left stick click |
+| Spin (Wii Remote shake) | `Q`, `E` | Y, RB, RT | X, ZR, shake the controller |
 | Move (Nunchuk stick) | `W` `A` `S` `D` | Left stick | Left stick |
 | Camera, first person (D-pad) | Arrow keys | D-pad | D-pad; right stick while the gyro points |
 | Pointer | Mouse, `I` `J` `K` `L` | Right stick | Gyro; right stick when the gyro is off |
@@ -26,7 +26,7 @@ ZR/RT as a spin button and ZL/LT as crouch.
 | Pause (Plus) | `=`, `P` | Menu | Plus |
 | Minus | `-`, `M` | View | Minus |
 | Home | `H` | - | Home |
-| 1 (the Odyssey moveset's cap button: dive, roll, roll boost) | `1` (and numpad) | Left stick click | Left stick click |
+| 1 (the Odyssey moveset's cap button: dive, roll, roll boost) | `1` (and numpad) | X | Y |
 | 2 | `2` (and numpad) | - | - |
 | Shake (Nunchuk) | - | - | - |
 
@@ -38,11 +38,14 @@ select, yes/no prompts, picture book and the dome galaxy selector are menus;
 every other mode, and a mode it cannot read, is play. The choice is made when
 B goes down and kept until it is released. L/LB always send Wii B. Switch
 buttons are by label (Nintendo A is Wii A); Xbox buttons by position.
-Capture, GL, GR and C (Pro Controller 2) are unbound by default.
+Capture, GL, GR and C (Pro Controller 2) are unbound by default. The west
+face button (Xbox X, Switch Y, DualSense Square) is 1, the Odyssey moveset's cap
+button, and does not spin (controls version 7).
 
 DualSense: face buttons are by position like Xbox (Cross = jump/Wii A,
 Circle = jump in play and back in menus), L1 = Star Bits, L2 = crouch, spin on
-Square, Triangle, R2 or a shake, R1 recenters the pointer, the gyro points
+Triangle, R2 or a shake, Square = 1 (the Odyssey moveset's cap button), L3
+resets the camera, R1 recenters the pointer, the gyro points
 (the right stick turns the camera), the PS button is HOME, Options is Plus
 and Create is Minus. The touchpad click is bindable but unbound.
 
