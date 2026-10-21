@@ -739,8 +739,10 @@ inline constexpr unsigned kRespawnFrames = 150u;  // and reappears beside the ot
     return true;
 }
 
-// Where the second player's life meter and lives counter stand, from the first player's (layout units, y down).
-inline constexpr float kSecondMeterOffset[2] = {-150.0f, 0.0f};
+// Where the life meters and the second player's lives counter stand in co-op, from the first player's own
+// places (layout units, y up): the second player's meter on the right, the first's left of it.
+inline constexpr float kSecondMeterOffset[2] = {0.0f, 0.0f};   // where the first player's stands alone
+inline constexpr float kFirstMeterOffset[2] = {-105.0f, 0.0f};  // the first player's, moved left beside it
 inline constexpr float kSecondLivesOffset[2] = {0.0f, 46.0f};  // above (comet timers use the bottom centre)
 // The second player's life meter rings, as vertex colour (Luigi green).
 inline constexpr std::uint32_t kSecondMeterTint[3] = {90u, 255u, 90u};

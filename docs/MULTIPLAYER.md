@@ -95,7 +95,7 @@ Lives work as in New Super Mario Bros. Wii, without the bubble:
 - Both down at once is the game's own miss, and each spends a life; game over only when both are out of lives.
 - A coin heals both players.
 
-HUD: the second player's life meter, tinted green, stands left of the first player's, and their lives counter,
+HUD: the second player's life meter, tinted green, stands where the first player's would (top right), the first player's just left of it; the second player's lives counter,
 with their face, above the first player's (comet timers use the bottom centre). They are the game's own layouts
 (HitPointMeter, PlayerLeft), made with the stage's HUD and shown, hidden and killed with the first player's; a
 life lost alone shows on the counter.

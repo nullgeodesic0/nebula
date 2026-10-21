@@ -1098,6 +1098,9 @@ void place_hud(const Guest& guest, const State& s) {
         guest.call(fn::kLayoutSetTrans, mine, frame.vec(0, at));
     };
     follow(s.second_meter, s.first_meter, coop::kSecondMeterOffset[0], coop::kSecondMeterOffset[1]);
+    if (plausible(s.second_meter)) {
+        follow(s.first_meter, s.first_meter, coop::kFirstMeterOffset[0], coop::kFirstMeterOffset[1]);
+    }
     // The meter's own animations (damage, recovery, breaking) set its colours as it moves: its tint after them.
     tint_second_meter(guest, s);
     follow(s.second_left, s.first_left, coop::kSecondLivesOffset[0], coop::kSecondLivesOffset[1]);
