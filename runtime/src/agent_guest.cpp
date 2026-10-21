@@ -156,8 +156,14 @@ std::string path_in(const Agent& a, const char* name) {
 
 void reply(const Agent& a, std::uint64_t id, bool ok, const std::string& fields) {
     const std::string path = path_in(a, "replies.jsonl");
+    // Shared (fopen_s opens without sharing): the driver may be reading the file just then, and a reply that
+    // cannot be written is lost. A few tries for any other holder.
     FILE* file = nullptr;
-    if (fopen_s(&file, path.c_str(), "ab") != 0 || file == nullptr) return;
+    for (int attempt = 0; attempt < 20 && file == nullptr; ++attempt) {
+        file = _fsopen(path.c_str(), "ab", _SH_DENYNO);
+        if (file == nullptr) Sleep(1);
+    }
+    if (file == nullptr) return;
     std::fprintf(file, "{\"id\":%llu,\"ok\":%s,\"frame\":%llu%s%s}\n", static_cast<unsigned long long>(id),
                  ok ? "true" : "false", static_cast<unsigned long long>(a.frame), fields.empty() ? "" : ",",
                  fields.c_str());

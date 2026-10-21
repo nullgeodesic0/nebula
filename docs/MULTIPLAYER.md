@@ -139,10 +139,11 @@ The runtime side is in `coop_guest.cpp` (`on_game_over_call`, `update_down_playe
 
 These come from a game written for one player and are what the playtest should look at:
 
-- Enemies, doors and stars act on the first player. The second player can stomp, spin and collect. A star
-  bunny the second player catches still plays its caught scene on the first player (it makes the game's
-  player puppetable); catching by the second player is not yet tested in game (Gateway's bunnies need
-  their story switch, which a direct jump does not set).
+- Enemies, doors and stars act on the first player. The second player can stomp, spin and collect: coins,
+  purple coins (Battlerock's), star chips and star bunnies (Gusty Garden's) were checked with the agent. A
+  star bunny the second player catches counts, but its caught scene plays on the first player, who is moved
+  to the bunny (the scene makes the game's player puppetable). A bunny's opening talk starts from the game's
+  player too.
 - Rumble goes to the first player's controller.
 - The Observatory's doors and domes (AstroChangeStageCube areas) test the game's player, the first: when the
   second player walks into one the first is not in, the players swap places, so the game takes them through
