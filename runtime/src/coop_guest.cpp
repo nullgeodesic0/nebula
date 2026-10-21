@@ -173,6 +173,8 @@ constexpr std::uint32_t kPlayerHeapSize = 0x500000u;          // PlayerHeapHolde
 constexpr std::uint32_t kPartnerHeapExtra = 0x200000u;
 // SingletonHolder<HeapMemoryWatcher>::sInstance; HeapMemoryWatcher::mSceneHeapGDDR (the stage's MEM2 heap).
 constexpr std::uint32_t kHeapMemoryWatcher = 0x806A245Cu;
+// SingletonHolder<GameSystem>::sInstance: +0x24 GameSystemSceneController, whose current stage name is at +0x20.
+constexpr std::uint32_t kGameSystem = 0x806A1228u;
 constexpr std::uint32_t kSceneHeapNapa = 0x14u;
 constexpr std::uint32_t kSceneHeapGddr = 0x18u;
 constexpr std::uint32_t kSolidHeapFreeSize = 0x6Cu;  // JKRSolidHeap::mFreeSize
@@ -371,6 +373,7 @@ struct State {
     bool heal_second_turn = false;
     std::uint32_t star_swapped = 0u;  // a launch star whose step runs with the second player as the game's
     bool miss_counted = false;
+    std::string last_stage;  // the previous scene's stage, to see a save loaded (on_stage_start)
     // NameObjArchiveListCollector::addArchive in flight, and the partner archives a collector already has.
     std::uint32_t archive_collector = 0u;
     std::uint32_t archive_name = 0u;
@@ -520,6 +523,7 @@ void add_partner_resources(const Guest& guest, State& s) {
 // Right after the game sets up its player, the second player: the same MarioActor as the other character,
 // beside the first, out of the movement list.
 void create_hud(const Guest& guest, State& s);
+void on_stage_start(const Guest& guest, State& s);
 void tint_second_meter(const Guest& guest, const State& s);
 
 void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
@@ -586,6 +590,7 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     guest.call(fn::kRequestSuspend, second);
     s.second = second;
     s.second_mario = guest.u32(second + actor::kMario);
+    on_stage_start(guest, s);
     // The second player's HUD is made with the stage's own objects: layouts made once the stage runs are not
     // moved or drawn.
     create_hud(guest, s);
@@ -824,53 +829,22 @@ void set_game_player(const Guest& guest, State& s, bool second) {
 
 // ---- Co-op lives, respawn and HUD (docs/MULTIPLAYER.md "Lives") ----
 
-// The second player's lives live next to the save (the first player's are the game's own, in the save).
-std::string second_lives_path() {
-    char* value = nullptr;
-    std::size_t length = 0u;
-    std::string path;
-    if (_dupenv_s(&value, &length, "GALAXY_NAND_ROOT") == 0 && value != nullptr && value[0] != '\0') {
-        // Beside the NAND folder, not in it: the runtime's NAND clears files it does not know at boot.
-        std::string root(value);
-        while (!root.empty() && (root.back() == '\\' || root.back() == '/')) root.pop_back();
-        const std::size_t slash = root.find_last_of("\\/");
-        path = (slash == std::string::npos ? std::string(".") : root.substr(0u, slash)) + "\\coop_lives.txt";
-    }
-    std::free(value);
-    return path;
-}
-
-void save_second_lives(const State& s) {
-    const std::string path = second_lives_path();
-    FILE* file = nullptr;
-    if (path.empty() || fopen_s(&file, path.c_str(), "w") != 0 || file == nullptr) return;
-    std::fprintf(file, "%d\n", s.second_lives);
-    std::fclose(file);
-}
-
-// First use: from the file, or as many as the first player has.
+// The second player's lives are kept only while the game runs, as the game keeps the first player's: loading a
+// save starts the first player at 4 (GameDataPlayerStatus::deserialize), and the second with as many.
 void ensure_second_lives(const Guest& guest, State& s) {
     if (s.second_lives >= 0) return;
-    const std::string path = second_lives_path();
-    FILE* file = nullptr;
-    int lives = -1;
-    int error = 0;
-    if (!path.empty()) error = static_cast<int>(fopen_s(&file, path.c_str(), "rb"));
-    if (file != nullptr) {
-        char text[16]{};
-        const std::size_t got = std::fread(text, 1u, sizeof(text) - 1u, file);
-        std::fclose(file);
-        char* end = nullptr;
-        const long value = std::strtol(text, &end, 10);
-        if (got > 0u && end != text && value >= 0) lives = static_cast<int>(value);
-    } else if (!path.empty()) {
-        trace("second player's lives file not read (error %d)", error);
-    }
-    const bool from_file = lives >= 0;
-    if (lives < 0) lives = static_cast<int>(guest.call(fn::kGetPlayerLeft));
-    s.second_lives = std::clamp(lives, 0, 99);
-    trace("second player's lives: %d (%s %s)", s.second_lives, from_file ? "from" : "no", path.c_str());
-    save_second_lives(s);
+    s.second_lives = std::clamp(static_cast<int>(guest.call(fn::kGetPlayerLeft)), 0, 99);
+    trace("second player's lives: %d (as the first player's)", s.second_lives);
+}
+
+// A save just loaded (the first stage after the file select): the second player's lives start over with the
+// first player's.
+void on_stage_start(const Guest& guest, State& s) {
+    const std::uint32_t system = guest.u32(kGameSystem);
+    const std::uint32_t controller = plausible(system) ? guest.u32(system + 0x24u) : 0u;
+    const std::string stage = plausible(controller) ? guest.string(controller + 0x20u, 31u) : std::string{};
+    if (s.last_stage == "FileSelect" && stage != "FileSelect") s.second_lives = -1;
+    s.last_stage = stage;
 }
 
 // A MarioActor::exeGameOver* step's first frame makes these calls (the BGM lock and queue, the player event, the
@@ -901,8 +875,8 @@ void on_game_over_call(std::uint32_t id, const Guest& guest, State& s, PpcContex
             int lives = static_cast<int>(guest.call(fn::kGetPlayerLeft));
             const int before = lives;
             if (coop::go_down_alone(self, partner, lives) && lives < before) guest.call(fn::kDecPlayerLeft);
-        } else if (coop::go_down_alone(self, partner, s.second_lives)) {
-            save_second_lives(s);
+        } else {
+            (void)coop::go_down_alone(self, partner, s.second_lives);
         }
         if (self.down) {
             // Lives counters count up by themselves but never down (a miss always reloaded the stage): show it.
@@ -940,7 +914,6 @@ void on_game_over_call(std::uint32_t id, const Guest& guest, State& s, PpcContex
         if (who == 1u) {
             luigi_out = s.second_lives == 0;
             if (s.second_lives > 0) --s.second_lives;
-            save_second_lives(s);
         }
         if (who == 1u && s.down[0].down && !s.down[0].out) guest.call(fn::kIncPlayerLeft);  // spent alone already
         if (!(mario_out && luigi_out) && static_cast<int>(guest.call(fn::kGetPlayerLeft)) == 0) {
