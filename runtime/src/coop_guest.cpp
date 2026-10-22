@@ -459,6 +459,7 @@ struct State {
         bool end_back_to_second = false;
         std::uint32_t end_info = 0u;
         bool calm = false;             // a talk under way without the world frozen (talk_calm)
+        bool answering = false;        // answer_partner set for the second player's talk call
         std::uint32_t button = 0u;     // MarioActor::checkButtonType's button, for after it
         std::uint32_t pad_channel = 0u;   // testCorePad*A's channel, for after it
         std::array<std::uint32_t, 5> pane_args{};  // isStarPointerPointingPane's arguments
@@ -1049,6 +1050,12 @@ bool second_nearer(const Guest& guest, const State& s, std::uint32_t actor) {
 // Before an outermost talk call: run it as `second` (or the first), recording how to give the game back.
 void talk_swap(const Guest& guest, State& s, bool second) {
     s.talk.talker_second = second;
+    // The text's player name and its Luigi-only lines ask the save's character (MR::isPlayerLuigi asks
+    // GameDataFunction::isDataMario): they answer for the talker.
+    if (second && !s.answer_partner) {
+        s.answer_partner = true;
+        s.talk.answering = true;
+    }
     if (second) s.second_scene = 30u;
     if (second == s.moving_second) return;
     SavedContext saved(guest.context());
@@ -1073,12 +1080,26 @@ void talk_begin(const Guest& guest, State& s, std::uint32_t host) {
     talk_swap(guest, s, second);
 }
 
-// Before TalkDirector::movement's steps (the A prompt, the talk's start, paging, its end): its talker.
-void talk_director_begin(const Guest& guest, State& s) {
+// Before TalkDirector::movement's steps (the A prompt, the talk's start, paging, its end; `director` its r3): its
+// talker, or else the brother nearer the NPC the director has in hand (its talk state's, else its request's). Not
+// the last NPC that asked: in split screen NPCs near each brother ask every frame.
+void talk_director_begin(const Guest& guest, State& s, std::uint32_t director) {
     if (!plausible(s.first) || !plausible(s.second)) return;
     if (s.talk.locked) {
         s.second_scene = 30u;  // nobody is taken along while a talk is under way
         talk_swap(guest, s, s.talk.locked_second);
+        return;
+    }
+    std::uint32_t ctrl = 0u;
+    if (plausible(director)) {
+        const std::uint32_t state = guest.u32(director + 0x48u);  // TalkDirector::mTalkState
+        ctrl = plausible(state) ? guest.u32(state + 4u) : 0u;    // TalkState::_04, its TalkMessageCtrl
+        if (!plausible(ctrl)) ctrl = guest.u32(director + 0x3Cu);  // the request in hand
+        if (!plausible(ctrl)) ctrl = guest.u32(director + 0x38u);  // TalkDirector::mMsgCtrl
+    }
+    const std::uint32_t host = plausible(ctrl) ? guest.u32(ctrl + 0xCu) : 0u;  // TalkMessageCtrl::mHostActor
+    if (plausible(host)) {
+        talk_swap(guest, s, second_nearer(guest, s, host));
     } else if (s.talk.candidate_frames != 0u) {
         talk_swap(guest, s, s.talk.candidate_second);
     }
@@ -1088,6 +1109,10 @@ void talk_director_begin(const Guest& guest, State& s) {
 // that has ended is let go.
 void talk_end(const Guest& guest, State& s) {
     SavedContext saved(guest.context());
+    if (s.talk.answering) {
+        s.answer_partner = false;
+        s.talk.answering = false;
+    }
     if (s.talk.swapped) {
         set_game_player(guest, s, s.talk.back_to_second);
         s.talk.swapped = false;
@@ -2109,7 +2134,7 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         if (s.talk.depth++ != 0u) return;
         const Guest guest(context, memory, services, guest_pc);
         if (id == call::kTalkDirectorStep) {
-            talk_director_begin(guest, s);
+            talk_director_begin(guest, s, context->gpr[3]);
         } else {
             const std::uint32_t arg = context->gpr[3];  // TalkMessageCtrl (its NPC at +0xC), or the NPC
             talk_begin(guest, s, id == call::kTryTalkNpc ? arg : plausible(arg) ? guest.u32(arg + 0xCu) : 0u);
