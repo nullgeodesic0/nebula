@@ -1532,6 +1532,8 @@ private:
     // mailbox path. Called from the CPU thread on mailbox polls.
     void dsp_native_pump();
     void dsp_native_service_mram_transaction();
+    // Deterministic mode (GALAXY_DETERMINISTIC): after the CPU wakes the native DSP, runs it to its next park.
+    void dsp_native_settle_for_determinism();
     void dsp_native_throw_if_failed();
     [[nodiscard]] bool dsp_native_active() const { return dsp_native_running_; }
     void dsp_native_shutdown(bool emit_audio_causal_report);

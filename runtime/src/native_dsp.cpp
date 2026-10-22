@@ -2003,6 +2003,12 @@ bool NativeDspWorker::is_halted() const {
     return state_ == WorkerState::Halted;
 }
 
+bool NativeDspWorker::halted_and_idle() const {
+    std::lock_guard lock(mutex_);
+    return state_ == WorkerState::Halted && !pending_resume_.has_value() &&
+           !pending_external_interrupt_pc_.has_value();
+}
+
 std::optional<DspDiagnosticSnapshot> NativeDspWorker::halted_snapshot() const {
     std::lock_guard lock(mutex_);
     if (state_ != WorkerState::Halted) {

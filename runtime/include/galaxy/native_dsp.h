@@ -496,6 +496,11 @@ public:
     [[nodiscard]] std::uint64_t host_idle_wait_count() const noexcept {
         return host_wake_state_.idle_wait_count.load(std::memory_order_acquire);
     }
+    // True while a free-running entry is parked in a classified mailbox poll and nothing has woken it since.
+    [[nodiscard]] bool parked_in_idle_wait() const noexcept {
+        const auto generation = host_wake_state_.generation.load(std::memory_order_acquire);
+        return host_wake_state_.parked_generation.load(std::memory_order_acquire) == generation;
+    }
     [[nodiscard]] DspNativeTelemetrySnapshot telemetry_snapshot() const noexcept {
         auto snapshot = dsp_native_telemetry_snapshot(telemetry_state_);
         snapshot.host_idle_waits = host_idle_wait_count();
@@ -601,6 +606,8 @@ public:
     // Scheduler-owned state, safe for behavior/control decisions. Diagnostic
     // snapshots are evidence only and must never drive wake/interrupt policy.
     [[nodiscard]] bool is_halted() const;
+    // Halted with no resume or external interrupt waiting to be taken: the worker will not run until signalled.
+    [[nodiscard]] bool halted_and_idle() const;
     // Test/inspection API: returns a coherent bounded context copy only while
     // the worker is mutex-published Halted. It never reads executing state.
     [[nodiscard]] std::optional<DspDiagnosticSnapshot> halted_snapshot() const;

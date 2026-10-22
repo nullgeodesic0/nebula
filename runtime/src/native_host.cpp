@@ -13745,6 +13745,7 @@ bool GuestAddressSpace::read_device(
                 dsp_native_dirq_pending_ = false;
                 dsp_native_from_mail_irq_latched_ = false;
                 dsp_native_suppressing_task_done_dirq_ = false;
+                dsp_native_settle_for_determinism();  // the consume woke it
                 if (native_sync_tail_mail) {
                     dsp_native_wait_for_sync_task_done(low);
                 }
@@ -14323,6 +14324,7 @@ bool GuestAddressSpace::write_device_register(
             }
             dsp_native_worker_->signal_external_interrupt(
                 kRmge01DspCpuInterruptVector);
+            dsp_native_settle_for_determinism();
         }
         return true;
     }
@@ -17958,6 +17960,7 @@ void GuestAddressSpace::dsp_native_forward_mail(std::uint32_t mail) {
             dsp_native_worker_->signal_external_interrupt(
                 kRmge01DspCpuInterruptVector);
         }
+        dsp_native_settle_for_determinism();
     }
 }
 
@@ -18005,6 +18008,34 @@ void GuestAddressSpace::dsp_native_service_mram_transaction() {
         galaxy::DspMramTransactionBoundary::ServiceResult::Rejected) {
         throw std::runtime_error(
             "native DSP ARAM whole-span commit was rejected by the CPU service");
+    }
+}
+
+// The native DSP runs on its own thread at host speed, so how far it gets before the CPU next looks depends on
+// host scheduling. In deterministic mode, every CPU action that wakes it (a mail, a consumed mail, PIINT) waits
+// here until it parks again: in a mailbox poll or halted with nothing pending. Its DMA to main memory is served
+// meanwhile. The DSP then only runs at fixed points of guest execution.
+void GuestAddressSpace::dsp_native_settle_for_determinism() {
+    static const bool deterministic = read_env_flag("GALAXY_DETERMINISTIC");
+    if (!deterministic || !dsp_native_running_ || dsp_native_ == nullptr || dsp_native_worker_ == nullptr) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    for (;;) {
+        dsp_native_service_mram_transaction();
+        dsp_native_throw_if_failed();
+        if (dsp_native_->parked_in_idle_wait() || dsp_native_worker_->halted_and_idle()) {
+            return;
+        }
+        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) {
+            static bool s_logged = false;
+            if (!s_logged) {
+                s_logged = true;
+                std::cerr << "[deterministic] the native DSP did not park within 2 s; continuing\n";
+            }
+            return;
+        }
+        SwitchToThread();
     }
 }
 

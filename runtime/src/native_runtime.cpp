@@ -5372,12 +5372,13 @@ std::uint64_t ticks_per_checkpoint() {
     return ticks;
 }
 
-// Deterministic mode's time-base counter, in timeline ticks: the checkpoints executed (the inline counter and the
-// full callbacks) plus the idle time skipped. Only the simulation thread advances it.
+// Deterministic mode's time-base counter, in timeline ticks: the checkpoints executed plus the idle time skipped.
+// Only the simulation thread advances it. checkpoint_count already counts full-mode callbacks once; the callback
+// count (full_checkpoint_invocations) is left out because how often an inline checkpoint escalates into the
+// callback depends on host threads publishing events.
 std::uint64_t virtual_counter_read(void* user) noexcept {
     const auto& state = *static_cast<const RuntimeState*>(user);
-    return (state.checkpoint_count + state.full_checkpoint_invocations) * ticks_per_checkpoint() +
-           state.virtual_idle_ticks;
+    return state.checkpoint_count * ticks_per_checkpoint() + state.virtual_idle_ticks;
 }
 
 // CPU-time sampling cache for host-suspension detection. Disabled by default.
