@@ -2156,6 +2156,8 @@ struct RuntimeState {
     // increments from generated code that never reach this function. Used to check that the adaptive
     // escalation throttle keeps this call rare.
     std::uint64_t full_checkpoint_invocations{};
+    // Deterministic mode (deterministic_mode()): virtual time the guest spent idle, skipped to its next deadline.
+    std::uint64_t virtual_idle_ticks{};
     // Counts how many of those calls ran while services->checkpoint_counter was null. The header-level
     // throttle in branch_checkpoint_taken and call_return_checkpoint cannot engage for such a call.
     std::uint64_t full_checkpoint_null_counter_pointer{};
@@ -5128,6 +5130,28 @@ bool realtime_vi_active(const RuntimeState& state) {
     return true;
 }
 
+// GALAXY_DETERMINISTIC=1 (netplay, docs/NETPLAY.md): the guest's time is a function of what it has executed, not
+// of the host clock, so two machines given the same input run the same game. Time advances with the branch
+// checkpoints the generated code passes (ticks_per_checkpoint each, inline or full) and jumps to the next deadline
+// when the guest idles (deterministic_advance_to); the deadline broker publishes on the simulation thread
+// (DeadlineBroker::poll); the host clock only paces the result to real time.
+bool deterministic_mode() {
+    static const bool enabled = [] {
+        const bool on = read_env_flag("GALAXY_DETERMINISTIC", false);
+        if (on) {
+            std::cerr << "[deterministic] guest time from executed checkpoints; disc reads and NAND writes "
+                         "complete in order" << '\n';
+            // Worker-thread completions reach the guest whenever the worker finishes (boot diverged before its
+            // first frame with them). The address space reads these when it is built, after the timeline.
+            // _putenv_s, not SetEnvironmentVariable: the flags are read with getenv_s, from the CRT's copy.
+            (void)_putenv_s("GALAXY_ASYNC_DISC_READS", "0");
+            (void)_putenv_s("GALAXY_ASYNC_NAND_WRITES", "0");
+        }
+        return on;
+    }();
+    return enabled;
+}
+
 void update_native_audio_output_gate(
     RuntimeState& state,
     bool use_realtime_vi) {
@@ -5348,6 +5372,14 @@ std::uint64_t ticks_per_checkpoint() {
     return ticks;
 }
 
+// Deterministic mode's time-base counter, in timeline ticks: the checkpoints executed (the inline counter and the
+// full callbacks) plus the idle time skipped. Only the simulation thread advances it.
+std::uint64_t virtual_counter_read(void* user) noexcept {
+    const auto& state = *static_cast<const RuntimeState*>(user);
+    return (state.checkpoint_count + state.full_checkpoint_invocations) * ticks_per_checkpoint() +
+           state.virtual_idle_ticks;
+}
+
 // CPU-time sampling cache for host-suspension detection. Disabled by default.
 // Without the cache, runtime_time_base_ticks calls GetThreadTimes on every invocation, from TB/DEC
 // services, input and device handling, and checkpoints. A cached baseline can hide CPU work done
@@ -5392,6 +5424,13 @@ std::uint64_t runtime_time_base_ticks(RuntimeState& state) {
     update_native_audio_output_gate(state, true);
     if (state.timeline == nullptr) {
         throw RuntimeFailure("runtime timeline is unavailable");
+    }
+    if (deterministic_mode()) {
+        // No host suspension to recover from: virtual time never jumps on its own. Due deadlines publish here.
+        const std::uint64_t ticks = state.timeline->now_ticks();
+        state.timeline->commit_guest_observation(ticks);
+        if (state.deadline_broker != nullptr) (void)state.deadline_broker->poll(ticks);
+        return ticks;
     }
     std::uint64_t sampled_qpc = 0u;
     const std::uint64_t ticks = state.timeline->now_ticks(&sampled_qpc);
@@ -18700,9 +18739,54 @@ bool idle_loop_sleep_enabled() {
     return cached_env_gate(cached, "GALAXY_IDLE_LOOP_SLEEP", true);
 }
 
+// Deterministic mode: the guest waits, with nothing to run, for a deadline at `target_ticks`. Real time catches up
+// with it first (the game keeps its pace: a virtual tick is a real one, re-anchored after a long stall or a slow
+// stretch), then virtual time jumps there and the deadlines due publish.
+void deterministic_advance_to(RuntimeState& state, std::uint64_t target_ticks) {
+    const std::uint64_t now = runtime_time_base_ticks(state);
+    if (target_ticks <= now) return;
+    static std::chrono::steady_clock::time_point anchor_real{};
+    static std::uint64_t anchor_ticks = 0u;
+    const auto real_now = std::chrono::steady_clock::now();
+    const auto ticks_to_real = [](std::uint64_t ticks) {
+        return std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(
+            static_cast<double>(ticks) / static_cast<double>(galaxy::timing::kTimelineTicksPerSecond)));
+    };
+    if (anchor_ticks == 0u || anchor_ticks > now) {
+        anchor_real = real_now;
+        anchor_ticks = now;
+    }
+    auto target_real = anchor_real + ticks_to_real(target_ticks - anchor_ticks);
+    if (target_real > real_now + std::chrono::milliseconds(100) ||
+        target_real + std::chrono::milliseconds(100) < real_now) {
+        anchor_real = real_now;
+        anchor_ticks = now;
+        target_real = real_now + ticks_to_real(target_ticks - now);
+    }
+    if (target_real > real_now) {
+        if (!wait_realtime_vi_duration_high_res(target_real - real_now)) {
+            std::this_thread::sleep_until(target_real);
+        }
+    }
+    const std::uint64_t before = runtime_time_base_ticks(state);
+    if (target_ticks > before) state.virtual_idle_ticks += target_ticks - before;
+    (void)runtime_time_base_ticks(state);  // publishes what is now due
+}
+
 void idle_loop_wait_for_next_deadline(RuntimeState& state) {
     if (state.pending_transfer.active) {
         ++state.idle_loop_skips[0];
+        return;
+    }
+    if (deterministic_mode() && state.deadline_broker != nullptr && !state.vi_deadline_wait_active &&
+        state.deadline_events.mask() == 0u && !state.pending_vi_boundary.active()) {
+        // Nothing to run until the next deadline (VI, AI, decrementer, input): go there.
+        const std::uint64_t now = runtime_time_base_ticks(state);
+        const std::optional<std::uint64_t> next = state.deadline_broker->poll(now);
+        if (next.has_value() && *next > now && state.deadline_events.mask() == 0u) {
+            deterministic_advance_to(state, *next);
+            ++state.idle_loop_sleeps;
+        }
         return;
     }
     if (!idle_loop_sleep_enabled() || state.vi_deadline_consumer == nullptr ||
@@ -18933,6 +19017,15 @@ void wait_for_exact_vi_deadline(
             throw RuntimeQuitRequested{};
         }
 
+        if (deterministic_mode()) {
+            // The retrace is the next thing that can happen: go there (paced to real time).
+            if (observation.status == galaxy::timing::PeriodicConsumeStatus::NotDue) {
+                deterministic_advance_to(state, observation.expected_deadline_ticks);
+            } else {
+                (void)runtime_time_base_ticks(state);
+            }
+            continue;
+        }
         const std::uint64_t after_pump_ticks =
             runtime_time_base_ticks(state);
         if (observation.status ==
@@ -28769,6 +28862,7 @@ void branch_checkpoint(
     galaxy::GuestMemoryV1* memory) {
     if (static_cast<RuntimeState*>(user)->pending_transfer.active) return;
     auto& state = *static_cast<RuntimeState*>(user);
+    if (deterministic_mode()) (void)runtime_time_base_ticks(state);  // publishes due deadlines
     RuntimeBoundarySelfScope runtime_boundary_self_scope(state, 1u);
     struct ScopedCallbackProfile final {
         RuntimeState& state;
@@ -29890,6 +29984,23 @@ void coop_idle_spin(RuntimeState& state) {
     const std::uint64_t start = state.timeline->now_ticks();
     const std::uint64_t ai_due =
         state.address_space->ai_dma_next_completion_ticks();
+    if (deterministic_mode()) {
+        // Spinning would never see virtual time move: go to the next thing that can happen instead (a broker
+        // deadline or the AI DMA completion), or a spin's worth of time when there is none.
+        if (state.deadline_events.mask() != 0u || state.address_space->pe_finish_pending() ||
+            state.address_space->pe_token_pending()) {
+            return;
+        }
+        std::uint64_t target = start + kSpinTicks;
+        if (state.deadline_broker != nullptr) {
+            if (const auto next = state.deadline_broker->poll(start); next.has_value() && *next > start) {
+                target = std::min(target, *next);
+            }
+        }
+        if (ai_due > start) target = std::min(target, ai_due);
+        deterministic_advance_to(state, target);
+        return;
+    }
     for (;;) {
         if (state.deadline_events.mask() != 0u ||
             state.address_space->pe_finish_pending() ||
@@ -32617,7 +32728,11 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
     }
-    state.timeline = std::make_unique<galaxy::timing::RuntimeTimeline>([] {
+    state.timeline = std::make_unique<galaxy::timing::RuntimeTimeline>([&state] {
+        if (deterministic_mode()) {
+            return galaxy::timing::CounterSource{&virtual_counter_read, &state,
+                                                 galaxy::timing::kTimelineTicksPerSecond};
+        }
         // One rdtsc per timeline read instead of a QueryPerformanceCounter
         // call (GALAXY_TSC_CLOCK=0 keeps QPC).
         if (read_env_flag("GALAXY_TSC_CLOCK", true)) {
@@ -33798,6 +33913,7 @@ int wmain(int argc, wchar_t** argv) {
         state.deadline_broker =
             std::make_unique<galaxy::timing::DeadlineBroker>(
                 *state.timeline, state.deadline_events);
+        state.deadline_broker->set_synchronous(deterministic_mode());
         const std::uint64_t decrementer_origin_ticks =
             runtime_time_base_ticks(state);
         context.decrementer_start_ticks = decrementer_origin_ticks;

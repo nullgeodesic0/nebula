@@ -32258,9 +32258,14 @@ void GuestAddressSpace::service_virtual_wiimote_input_device(
 
     input_poll_diagnostic_stage(NativeInputPollStage::Report);
     std::array<std::uint8_t, galaxy::input::kMaxWiimoteInputReportBytes> report{};
+    // Deterministic mode (netplay): the game's Bluetooth stack gets the same neutral report every time, so the host
+    // controllers' noise cannot make two machines' games differ; the players' input reaches the game through the
+    // KPAD answers instead, which netplay records, sends and replays (netplay.h).
+    static const bool deterministic_reports = read_env_flag("GALAXY_DETERMINISTIC");
+    static const galaxy::input::WiimoteInputSnapshot kNeutralSnapshot{};
     const galaxy::input::WiimoteReportBuildResult built =
         galaxy::input::build_wiimote_input_report(
-            emitted_report_mode, snapshot, report);
+            emitted_report_mode, deterministic_reports ? kNeutralSnapshot : snapshot, report);
     if (built.status ==
         galaxy::input::WiimoteReportBuildStatus::UnsupportedReportMode) {
         std::ostringstream message;

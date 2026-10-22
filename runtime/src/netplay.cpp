@@ -42,6 +42,8 @@ struct Netplay {
     std::uint32_t frame = 0u;    // game frames so far (channel 0 reads at kFrameReadSite)
     std::uint32_t channel = 0xFFFFFFFFu;
     std::uint32_t buffer = 0u;
+    std::uint32_t dump_frame = 0xFFFFFFFFu;
+    std::string dump_path;
 };
 
 Netplay& netplay() {
@@ -87,6 +89,12 @@ void initialize(Netplay& n) {
         }
         n.hash_chunks = !env("GALAXY_STATE_HASH_CHUNKS").empty();
     }
+    if (const std::string dump = env("GALAXY_STATE_DUMP"); !dump.empty()) {
+        if (const std::size_t comma = dump.find(','); comma != std::string::npos) {
+            n.dump_frame = static_cast<std::uint32_t>(std::strtoul(dump.substr(0, comma).c_str(), nullptr, 10));
+            n.dump_path = dump.substr(comma + 1u);
+        }
+    }
 }
 
 std::uint64_t fnv1a(const std::byte* data, std::size_t size, std::uint64_t h = 0xCBF29CE484222325ull) {
@@ -117,6 +125,22 @@ void write_hash(Netplay& n, const GuestMemoryV1* memory) {
     }
 }
 
+// GALAXY_STATE_DUMP="<frame>,<path>": MEM1 as it is when that frame starts, raw, to diff two runs' state.
+void write_dump(Netplay& n, const GuestMemoryV1* memory) {
+    if (memory == nullptr) return;
+    for (std::uint32_t r = 0; r < memory->region_count; ++r) {
+        const GuestMemoryRegionV1& region = memory->regions[r];
+        if (region.host_base == nullptr || region.size != 0x01800000u) continue;
+        std::FILE* file = nullptr;
+        if (fopen_s(&file, n.dump_path.c_str(), "wb") == 0 && file != nullptr) {
+            std::fwrite(region.host_base, 1, region.size, file);
+            std::fclose(file);
+            std::fprintf(stderr, "[netplay] MEM1 at frame %u dumped to %s\n", n.frame, n.dump_path.c_str());
+        }
+        return;
+    }
+}
+
 }  // namespace
 
 void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::uint32_t guest_pc) {
@@ -129,6 +153,7 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
     if (n.channel == 0u) {
         // A frame starts: its state before this frame's input.
         if (n.hashes != nullptr && n.frame % n.hash_every == 0u) write_hash(n, memory);
+        if (n.dump_frame == n.frame && !n.dump_path.empty()) write_dump(n, memory);
     }
 }
 

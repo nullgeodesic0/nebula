@@ -1811,11 +1811,38 @@ void DeadlineBroker::start() {
     if (stopping_) {
         throw std::runtime_error("deadline broker cannot restart after stop");
     }
+    if (synchronous_) {
+        started_ = true;  // poll() publishes; no worker
+        return;
+    }
     // std::thread construction can fail (resource exhaustion). Publish the
     // started state only after ownership of a live worker is established so a
     // caller can cleanly destroy the broker after the exception.
     worker_ = std::thread(&DeadlineBroker::worker_loop, this);
     started_ = true;
+}
+
+std::optional<std::uint64_t> DeadlineBroker::poll(std::uint64_t now_ticks) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (!synchronous_ || stopping_) return std::nullopt;
+    for (const DeadlineEvent& event : schedule_.collect_due(now_ticks)) {
+        const bool published = event.replaceable
+            ? latch_.publish_replaceable(event.kind, event.sequence)
+            : (event.kind == EventKind::InputReport || event.kind == EventKind::VideoInterface
+                   ? latch_.publish_periodic(event)
+                   : latch_.publish(event.kind));
+        if (!published) {
+            throw std::overflow_error(event.replaceable ? "replaceable deadline publication collided"
+                                                        : "pending deadline event counter overflowed");
+        }
+        DeadlinePublicationStats& stats = publication_stats_[static_cast<std::size_t>(event.kind)];
+        ++stats.publications;
+        stats.last_sequence = event.sequence;
+        stats.last_deadline_ticks = event.deadline_ticks;
+        stats.last_prepublication_ticks = now_ticks;
+        stats.last_postpublication_ticks = now_ticks;
+    }
+    return schedule_.next_deadline_ticks();
 }
 
 void DeadlineBroker::stop() noexcept {

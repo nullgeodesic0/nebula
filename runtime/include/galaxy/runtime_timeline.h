@@ -629,6 +629,13 @@ public:
 
     void start();
     void stop() noexcept;
+    // Deterministic mode (netplay): no worker thread. The simulation thread publishes due deadlines itself with
+    // poll(), at points that depend only on what the game has executed, so a deadline reaches the game at the
+    // same place on every machine. Set before start().
+    void set_synchronous(bool synchronous) noexcept { synchronous_ = synchronous; }
+    [[nodiscard]] bool synchronous() const noexcept { return synchronous_; }
+    // Synchronous mode: publishes every deadline due at `now_ticks`; returns the next one, if any.
+    std::optional<std::uint64_t> poll(std::uint64_t now_ticks);
     [[nodiscard]] bool failed() const noexcept {
         return failed_.load(std::memory_order_acquire);
     }
@@ -677,6 +684,7 @@ private:
     // coarse condition-variable timeout.
     void* wake_event_{};
     std::thread worker_{};
+    bool synchronous_{};
     bool started_{};
     bool stopping_{};
     std::atomic_bool failed_{false};

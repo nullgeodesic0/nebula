@@ -680,8 +680,18 @@ void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeService
         a.queue.pop_front();
         run(a, guest, command);
     }
+    // Writing the status calls the game. In deterministic mode (netplay) it goes by game frames, not the host
+    // clock, so every run makes the same calls at the same frames.
+    static const bool deterministic = [] {
+        char* value = nullptr;
+        std::size_t length = 0u;
+        const bool on = _dupenv_s(&value, &length, "GALAXY_DETERMINISTIC") == 0 && value != nullptr &&
+                        value[0] != '\0' && value[0] != '0';
+        std::free(value);
+        return on;
+    }();
     const std::uint64_t now = GetTickCount64();
-    if (now - a.last_status_ms >= 500u) {
+    if (deterministic ? a.frame % 30u == 0u : now - a.last_status_ms >= 500u) {
         a.last_status_ms = now;
         write_status(a, guest);
     }
