@@ -106,6 +106,8 @@ constexpr std::uint32_t kTalkCameraEnd = 68u;        // MR::endNPCTalkCamera, MR
 constexpr std::uint32_t kCameraNearlyEnd = 69u;      // MR::isCameraInterpolatingNearlyEnd (TalkBalloonEvent::exeWait)
 constexpr std::uint32_t kCanStartDemo = 70u;         // MR::canStartDemo()
 constexpr std::uint32_t kCheckButton = 71u;          // MarioActor::checkButtonType(u16 button, bool)
+constexpr std::uint32_t kLodDistance = 72u;          // LodCtrl::calcDistanceToCamera() const
+constexpr std::uint32_t kBalloonPos = 73u;           // TalkMessageCtrl::updateBalloonPos() (TalkBalloon::updateBalloon)
 }  // namespace call
 
 namespace fn {
@@ -161,6 +163,8 @@ constexpr std::uint32_t kChangeAnimationNonStop = 0x802AF660u;  // MarioActor::c
 constexpr std::uint32_t kIsBckStopped = 0x803DB2B0u;     // MR::isBckStopped(const LiveActor*)
 constexpr std::uint32_t kPipeNrvWait = 0x806A06D0u;      // NrvEarthenPipe::EarthenPipeNrvWait::sInstance
 constexpr std::uint32_t kAreaIsInVolume = 0x8001E1A0u;   // AreaObj::isInVolume(const TVec3f&) const
+constexpr std::uint32_t kSetPaneScale = 0x803D6A24u;     // MR::setPaneScale(const LayoutActor*, f32, f32, const char* pane)
+constexpr std::uint32_t kTalkBalloonEventVtable = 0x805A21A0u;  // __vt__16TalkBalloonEvent
 // Talks.
 constexpr std::uint32_t kIsSystemTalking = 0x803CA334u;  // MR::isSystemTalking()
 constexpr std::uint32_t kReadyRemoteDemo = 0x80303B5Cu;  // MarioAccess::readyRemoteDemo(): the game's player held
@@ -461,6 +465,7 @@ struct State {
         bool calm = false;             // a talk under way without the world frozen (talk_calm)
         bool answering = false;        // answer_partner set for the second player's talk call
         std::uint32_t button = 0u;     // MarioActor::checkButtonType's button, for after it
+        std::uint32_t lod = 0u;        // LodCtrl::calcDistanceToCamera's LodCtrl, for after it
         std::uint32_t pad_channel = 0u;   // testCorePad*A's channel, for after it
         std::array<std::uint32_t, 5> pane_args{};  // isStarPointerPointingPane's arguments
     } talk;
@@ -1225,6 +1230,90 @@ bool demo_request_site(std::uint32_t guest_pc) {
         return true;
     default:
         return false;
+    }
+}
+
+// After LodCtrl::calcDistanceToCamera (its LodCtrl in s.talk.lod; the distance in f1): the distance to the
+// nearer brother, so an object shows its high and middle models around either of them and goes low only where
+// neither is. It is the distance to the player for most objects (MR::calcDistanceToPlayer), the camera depth for
+// the rest, which the other brother's distance stands in for (his camera follows him).
+void lod_distance(const Guest& guest, const State& s, PpcContext* context) {
+    if (!plausible(s.first) || !plausible(s.second) || !plausible(s.talk.lod)) return;
+    const unsigned other = s.moving_second ? 0u : 1u;
+    if (s.down[other].down) return;
+    const std::uint32_t actor = guest.u32(s.talk.lod + 0xCu);  // LodCtrl::mActor
+    if (!plausible(actor)) return;
+    const float near_other = coop::length(guest.vec(actor + actor::kPosition) -
+                                          guest.vec((other == 1u ? s.second : s.first) + actor::kPosition));
+    const double game = std::bit_cast<double>(context->fpr_bits[1]);
+    if (std::isfinite(near_other) && near_other < game) {
+        context->fpr_bits[1] = std::bit_cast<std::uint64_t>(double(near_other));
+    }
+}
+
+// A co-op talk's window stands in the world over its NPC, like the walk-by balloons, and smaller, rather than
+// across the top of the screen (the walk-by balloon itself cannot page or choose). Offset from the NPC's screen
+// point and scale: GALAXY_TALK_WINDOW="dx,dy,scale" overrides them while they are tuned.
+struct TalkWindowTuning {
+    float dx = 60.0f;   // the window's beak lands on the NPC's balloon point
+    float dy = 60.0f;
+    float scale = 0.7f;
+};
+
+TalkWindowTuning talk_window_tuning() {
+    TalkWindowTuning t;
+    char* text = nullptr;
+    std::size_t length = 0u;
+    if (_dupenv_s(&text, &length, "GALAXY_TALK_WINDOW") == 0 && text != nullptr) {
+        float dx = 0.0f, dy = 0.0f, scale = 1.0f;
+        if (sscanf_s(text, "%f,%f,%f", &dx, &dy, &scale) == 3 && std::isfinite(dx) && std::isfinite(dy) &&
+            std::isfinite(scale) && scale > 0.1f && scale <= 2.0f) {
+            t = {dx, dy, scale};
+        }
+        std::free(text);
+    }
+    return t;
+}
+
+// After TalkMessageCtrl::updateBalloonPos from TalkBalloon::updateBalloon (the balloon in r30; the NPC's screen
+// point, at its message control's +0x1C, just computed): a co-op talk's TalkBalloonEvent moves there. Its beak
+// is aimed from the new place right after.
+void talk_window_in_world(const Guest& guest, State& s, PpcContext* context) {
+    if (!s.talk.calm) return;
+    const std::uint32_t balloon = context->gpr[30];
+    if (!plausible(balloon) || guest.u32(balloon) != fn::kTalkBalloonEventVtable) return;
+    const std::uint32_t ctrl = guest.u32(balloon + 0x20u);  // TalkBalloon::mMessageCtrl
+    if (!plausible(ctrl)) return;
+    static const TalkWindowTuning tuning = talk_window_tuning();
+    coop::Vec3 npc = guest.vec(ctrl + 0x1Cu);  // TalkMessageCtrl::_1C: screen x, y, and z (> 0 behind)
+    // In split screen the second player's talk shows over his half: the NPC's balloon point (above its head)
+    // through the camera his half drew with, rather than the game's camera (the first player's).
+    const bool second_talks = s.talk.locked ? s.talk.locked_second : s.talk.talker_second;
+    if (second_talks && s.split.amount() > 0.5f) {
+        const std::uint32_t host = guest.u32(ctrl + 0xCu);
+        if (plausible(host)) {
+            const coop::Vec3 up = coop::pose_of(s.second_view.inverse).up;
+            const coop::Vec3 point = guest.vec(host + actor::kPosition) + up * 180.0f;
+            const coop::Vec3 eye = coop::transform_point(s.second_view.view, point);
+            const float ty = std::tan(s.fovy * 0.5f * 3.14159265f / 180.0f);
+            if (eye.z < -1.0f && ty > 0.0f && s.aspect > 0.0f) {
+                const float nx = (eye.x / -eye.z) / (ty * s.aspect);
+                const float ny = (eye.y / -eye.z) / ty;
+                npc.x = (nx + 1.0f) * 0.5f * s.screen_width;
+                npc.y = (1.0f - ny) * 0.5f * s.screen_height;
+            }
+        }
+    }
+    if (!std::isfinite(npc.x) || !std::isfinite(npc.y)) return;
+    SavedContext saved(context);
+    Guest::Frame frame(guest);
+    guest.call(fn::kLayoutSetTrans, balloon, frame.vec(0, {npc.x + tuning.dx, npc.y + tuning.dy, 0.0f}));
+    if (tuning.scale != 1.0f) {
+        // The root pane (a null name, as MR::setLayoutScaleAtPaneScale passes): the window's animations move its
+        // panes below it.
+        context->fpr_bits[1] = std::bit_cast<std::uint64_t>(double(tuning.scale));
+        context->fpr_bits[2] = std::bit_cast<std::uint64_t>(double(tuning.scale));
+        guest.call(fn::kSetPaneScale, balloon, 0u);
     }
 }
 
@@ -2176,6 +2265,11 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         return;
     }
     if (id == call::kCameraNearlyEnd || id == call::kCanStartDemo) return;
+    if (id == call::kLodDistance) {
+        s.talk.lod = context->gpr[3];
+        return;
+    }
+    if (id == call::kBalloonPos) return;
     if (id == call::kGetPlayerPos) return;
     if (id == call::kAddArchive) {
         s.archive_collector = context->gpr[3];
@@ -2389,6 +2483,14 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
     }
     if (id == call::kCheckButton) {
         if (s.talk.calm && s.talk.button == 3u) context->gpr[3] = 0u;  // A (MarioModule::checkTrgA's 3) pages
+        return;
+    }
+    if (id == call::kLodDistance) {
+        lod_distance(guest, s, context);
+        return;
+    }
+    if (id == call::kBalloonPos) {
+        if (guest_pc == 0x8029CFA0u) talk_window_in_world(guest, s, context);
         return;
     }
     if (id == call::kNearerPlayerCode) {

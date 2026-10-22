@@ -81,12 +81,20 @@ without an item it crashed.
 ## Level sweep
 
 `py -3 tools/agent/sweep.py` loads every mission of every galaxy in a hidden test copy (co-op; `--solo` for one
-player), walks the second player away and back, and writes `C:
-bgent-mp\sweepesults.json` and
+player), walks the second player away and back, and writes `C:\nb\agent-mp\sweep\results.json` and
 `report.md` with a screenshot per mission (and of the screen when one never becomes playable). A crash or hang
 relaunches and carries on; a rerun resumes. `--retry <results.json>` runs only the missions that failed there,
 for example in solo to tell co-op bugs from missions the direct jump cannot start (hidden stars and comets need
 their own entrance or save state).
+
+## Cutscene sweep
+
+`py -3 tools/agent/cutscene_sweep.py` plays each mission's Power Star cutscenes in a hidden test copy: it makes one
+of the stage's Power Stars appear (`PowerStar::requestAppear`, the appear cutscene) unless one is out, has a
+brother take it (alternately the second and the first player in co-op), and presses A through the star-get
+scene, the dome's result and the save prompt (pointing at Yes) until the Observatory has been calm for 3 s.
+Results are ok, no-star, not-taken (the star was not reached), stuck or crash, in `C:\nb\agent-mp\cutscenes` (`--out`), with screenshots. Leaving the dome while it plays story scenes one after another (the
+butler's report) frees what the story sequence still holds, so the sweep waits for calm before the next jump.
 
 ## Found with it
 

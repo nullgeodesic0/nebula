@@ -128,14 +128,20 @@ do. Hooks: `EarthenPipe::exeReady/exePlayerIn/exeTargetPipeShowUp/exePlayerOut` 
 `pipe_after_exit`).
 
 Talks: the brother nearest an NPC gets its A prompt, and his A starts the talk, which plays on him (the NPC
-turns to him; lines that ask whether the player is Luigi answer for him). Talks do not freeze the world: there
-is no talk cutscene (scene stop, player hold), talk pose or talk camera, so both brothers keep moving and the
-world keeps running while the talk window shows. Either brother's A pages the text (A does not jump while a talk
+turns to him; the text names him, and lines that ask whether the player is Luigi answer for him). Talks do not
+freeze the world: there is no talk cutscene (scene stop, player hold), talk pose or talk camera, so both brothers
+keep moving and the world keeps running. The talk window stands in the world over the NPC, like the walk-by
+balloons, at 0.7 of its size (`talk_window_in_world`; `GALAXY_TALK_WINDOW="dx,dy,scale"` overrides the placement),
+rather than across the top of the screen; in split screen the second player's talk shows over his half. It works
+in split screen too: the talk director takes its talker from the NPC it has in hand, not the last NPC that asked. Either brother's A pages the text (A does not jump while a talk
 window is open), and either chooses yes or no, with A or the pointer. A cutscene the talk sets off (a Power Star
 appearing, a Luma turning into a launch star) waits for the talk's end and plays as usual. Talks inside a
 cutscene and the short walk-by balloons are unchanged. Star bunnies run their code as the nearer brother, so
 their talk, chase and caught scene are whoever comes up to them; the caught scene binds that brother. Hooks:
 `talk_begin`, `talk_director_begin`, `talk_calm_skips`, `nearer_player_code` (ids 53-71).
+
+Level of detail: objects choose their detailed, middle or low model by the distance to the nearer brother
+(`LodCtrl::calcDistanceToCamera`, hook 72), so models are detailed around both and low only where neither is.
 
 Items: coins, purple coins and star chips are collected by whichever brother touches them (checked with the
 agent's `actors` command). `MR::isNearPlayer` and `isNearPlayerAnyTime` count either brother; switch areas

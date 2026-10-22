@@ -7700,7 +7700,9 @@ fn emit_direct_guest_call_body(
         }
         // No LodDistance hook after LodCtrl::update's distance call: which
         // model shows is game state, so nothing may change it (the runtime
-        // keeps a no-op for modules generated before 1.0.1).
+        // keeps a no-op for modules generated before 1.0.1). Co-op alone
+        // answers LodCtrl::calcDistanceToCamera for the nearer brother
+        // (coop_call_id 72), as the game would for a single player there.
         // TalkTextFormer::updateTalking reveals one step of a talk balloon's
         // (TalkBalloon, former at r31 + 0x24) or Rosalina's storybook text
         // (RosettaMonologue, former at r30 + 0x24) per frame; the runtime
@@ -8094,6 +8096,10 @@ fn coop_call_id(target: u32) -> Option<u32> {
         0x803C_8784 => Some(69), // MR::isCameraInterpolatingNearlyEnd()
         0x803C_9F18 => Some(70), // MR::canStartDemo()
         0x802B_B6A0 => Some(71), // MarioActor::checkButtonType(u16 button, bool)
+        // Level of detail by the nearer brother: LodCtrl::update's distance (to the player, or the camera).
+        0x8016_6C6C => Some(72), // LodCtrl::calcDistanceToCamera() const
+        // Co-op talk windows stand in the world at their NPC (from TalkBalloon::updateBalloon, by call site).
+        0x802A_0028 => Some(73), // TalkMessageCtrl::updateBalloonPos()
         _ => None,
     }
 }
