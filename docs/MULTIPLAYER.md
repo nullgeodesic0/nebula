@@ -132,7 +132,8 @@ turns to him; the text names him, and lines that ask whether the player is Luigi
 freeze the world: there is no talk cutscene (scene stop, player hold), talk pose or talk camera, so both brothers
 keep moving and the world keeps running. The talk window stands in the world over the NPC, like the walk-by
 balloons, at 0.7 of its size (`talk_window_in_world`; `GALAXY_TALK_WINDOW="dx,dy,scale"` overrides the placement),
-rather than across the top of the screen; in split screen the second player's talk shows over his half. It works
+rather than across the top of the screen. It is kept on screen and, in split screen, wholly inside its talker's
+half (`keep_talk_window_in_view`), at 0.55 of its size there. It works
 in split screen too: the talk director takes its talker from the NPC it has in hand, not the last NPC that asked. Either brother's A pages the text (A does not jump while a talk
 window is open), and either chooses yes or no, with A or the pointer. A cutscene the talk sets off (a Power Star
 appearing, a Luma turning into a launch star) waits for the talk's end and plays as usual. Talks inside a

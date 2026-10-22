@@ -1275,6 +1275,36 @@ TalkWindowTuning talk_window_tuning() {
     return t;
 }
 
+// Moves a talk window's anchor (its NPC's balloon point, screen units) so the whole window stays on screen and,
+// in split screen, inside its talker's half. At 0.7 of its size the window spans 208 pixels either side of the
+// point and 5 to 90 above it on an 854 x 480 picture (measured), scaled to the game's screen units.
+void keep_talk_window_in_view(const State& s, bool second, float scale, float& x, float& y) {
+    const float k = scale / 0.7f;
+    const float half_w = 208.0f * k * s.screen_width / 854.0f;
+    const float top = 90.0f * k * s.screen_height / 480.0f;
+    const float bottom = 5.0f * k * s.screen_height / 480.0f;
+    constexpr float kMargin = 8.0f;
+    const bool split = s.split.amount() > 0.5f && s.layout.started();
+    const std::array<float, 3> side = s.layout.plane(second, s.screen_width, s.screen_height);
+    for (int pass = 0; pass < 3; ++pass) {
+        if (split) {
+            // The corner deepest across the line pushes the window back along the line's normal.
+            float least = std::numeric_limits<float>::max();
+            for (const float cx : {x - half_w, x + half_w}) {
+                for (const float cy : {y - top, y - bottom}) {
+                    least = std::min(least, side[0] * cx + side[1] * cy + side[2]);
+                }
+            }
+            if (least < kMargin) {
+                x += side[0] * (kMargin - least);
+                y += side[1] * (kMargin - least);
+            }
+        }
+        x = std::clamp(x, half_w + kMargin, std::max(half_w + kMargin, s.screen_width - half_w - kMargin));
+        y = std::clamp(y, top + kMargin, std::max(top + kMargin, s.screen_height - kMargin));
+    }
+}
+
 // After TalkMessageCtrl::updateBalloonPos from TalkBalloon::updateBalloon (the balloon in r30; the NPC's screen
 // point, at its message control's +0x1C, just computed): a co-op talk's TalkBalloonEvent moves there. Its beak
 // is aimed from the new place right after.
@@ -1305,14 +1335,21 @@ void talk_window_in_world(const Guest& guest, State& s, PpcContext* context) {
         }
     }
     if (!std::isfinite(npc.x) || !std::isfinite(npc.y)) return;
+    // A half of the screen is narrower: the window is smaller there (0.55 for the default 0.7).
+    const bool split = s.split.amount() > 0.5f && s.layout.started();
+    const float scale = split ? tuning.scale * (0.55f / 0.7f) : tuning.scale;
+    const float shrink = scale / tuning.scale;
+    keep_talk_window_in_view(s, second_talks, scale, npc.x, npc.y);
     SavedContext saved(context);
     Guest::Frame frame(guest);
-    guest.call(fn::kLayoutSetTrans, balloon, frame.vec(0, {npc.x + tuning.dx, npc.y + tuning.dy, 0.0f}));
-    if (tuning.scale != 1.0f) {
+    // The window scales about its origin, so the beak's offset from it scales too.
+    guest.call(fn::kLayoutSetTrans, balloon,
+               frame.vec(0, {npc.x + tuning.dx * shrink, npc.y + tuning.dy * shrink, 0.0f}));
+    if (scale != 1.0f) {
         // The root pane (a null name, as MR::setLayoutScaleAtPaneScale passes): the window's animations move its
         // panes below it.
-        context->fpr_bits[1] = std::bit_cast<std::uint64_t>(double(tuning.scale));
-        context->fpr_bits[2] = std::bit_cast<std::uint64_t>(double(tuning.scale));
+        context->fpr_bits[1] = std::bit_cast<std::uint64_t>(double(scale));
+        context->fpr_bits[2] = std::bit_cast<std::uint64_t>(double(scale));
         guest.call(fn::kSetPaneScale, balloon, 0u);
     }
 }
