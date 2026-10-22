@@ -760,6 +760,7 @@ add_executable(NebulaRuntime
     runtime/src/site_hooks.cpp
     runtime/src/odyssey_moveset.cpp
     runtime/src/coop_guest.cpp
+    runtime/src/netplay.cpp
     runtime/src/agent_guest.cpp
     runtime/src/voice_replacement.cpp
 )

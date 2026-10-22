@@ -3,6 +3,7 @@
 #include "guest_access.h"
 
 #include "galaxy/coop.h"
+#include "galaxy/netplay.h"
 #include "galaxy/runtime_settings.h"
 
 #include <algorithm>
@@ -2178,6 +2179,7 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         if (services != nullptr) borrow_from_mem2(context, memory, services, guest_pc);
         return;
     }
+    if (id == call::kKpadRead) netplay_kpad_before(context, memory, guest_pc);
     // KPADRead(chan, ...): the agent's frame, at the first player's controller read.
     if (id == call::kKpadRead && context->gpr[3] == 0u && services != nullptr && services->call_guest != nullptr) {
         agent_frame(context, memory, services, guest_pc);
@@ -2421,6 +2423,11 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
 
 void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
                      std::uint32_t guest_pc) {
+    // Netplay's recording or replay of the frame's controller data (netplay.h), once a channel's is final: the
+    // second player's after co-op has written it (below).
+    if (id == call::kKpadRead && !(coop_enabled() && netplay_pending_channel() == 1u)) {
+        netplay_kpad_after(context, memory, services, guest_pc);
+    }
     if (id == call::kKpadRead && s_menu.kpad_buffer != 0u && services != nullptr && services->call_guest != nullptr) {
         file_select_frame(Guest(context, memory, services, guest_pc), context->gpr[3]);
         s_menu.kpad_buffer = 0u;
@@ -2553,6 +2560,7 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
     switch (id) {
     case call::kKpadRead:
         if (s.kpad_channel == 1u) fill_partner_kpad(guest, s);
+        if (netplay_pending_channel() == 1u) netplay_kpad_after(context, memory, services, guest_pc);
         s.kpad_channel = 0xFFFFFFFFu;
         return;
     case call::kGameDataHolderIsDataMario:
