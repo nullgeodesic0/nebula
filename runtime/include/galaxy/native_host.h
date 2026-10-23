@@ -1075,7 +1075,9 @@ public:
     //
     // Successful submission can return the released producer storage through
     // recycle_gx_fifo(). Retain at most one producer and one spare allocation,
-    // each capped at 256 KiB. A large capture does not enlarge this pool.
+    // each capped at 4 MiB: a co-op frame's FIFO is larger than 256 KiB, and
+    // regrowing it from empty every frame cost the simulation thread ~5%.
+    // A larger capture does not enlarge this pool.
     std::vector<std::byte> take_gx_fifo() {
         drain_wgpipe_gather_bursts();
         std::vector<std::byte> captured;
@@ -1088,7 +1090,7 @@ public:
     // and all CPU reads of the submitted source are complete. This does not
     // retire, consume or otherwise alter the submission's PE receipt.
     void recycle_gx_fifo(std::vector<std::byte>&& released) noexcept {
-        constexpr std::size_t kRetainedFifoCapacityBytes = 256u * 1024u;
+        constexpr std::size_t kRetainedFifoCapacityBytes = 4u * 1024u * 1024u;
         if (released.capacity() > kRetainedFifoCapacityBytes) {
             return;
         }
