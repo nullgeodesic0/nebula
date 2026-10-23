@@ -887,6 +887,10 @@ public:
         CloseHandle(snapshot);
     }
 
+    // Samples are taken only while sampling (on unless set_sampling(false); GALAXY_SIM_PROFILE_RESIM samples only
+    // rollback re-simulation).
+    void set_sampling(bool on) noexcept { sampling_.store(on, std::memory_order_release); }
+
     void stop_and_print(std::ostream& out) {
         if (!worker_.joinable()) return;
         running_.store(false, std::memory_order_release);
@@ -940,6 +944,7 @@ public:
 
 private:
     static constexpr std::size_t kMaxFrames = 24u;
+    std::atomic<bool> sampling_{true};
 
     template <typename Pct>
     void print_guest(std::ostream& out, const char* tag, const std::vector<std::uint64_t>& counts,
@@ -1065,6 +1070,7 @@ private:
             } else {
                 Sleep(1);
             }
+            if (!sampling_.load(std::memory_order_acquire)) continue;
             if (SuspendThread(target_) == static_cast<DWORD>(-1)) continue;
             CONTEXT ctx{};
             ctx.ContextFlags = CONTEXT_FULL;
@@ -30415,8 +30421,15 @@ void start_cooperative_scheduler(
     rollback.state = &state;
     rollback.context = context;
     rollback.memory = memory;
-    galaxy::netplay_set_snapshot_hooks({&rollback, &rollback_save, &rollback_restore,
-                                        [](void*, bool on) { galaxy::gx::set_render_suppressed(on); }});
+    galaxy::netplay_set_snapshot_hooks({&rollback, &rollback_save, &rollback_restore, [](void*, bool on) {
+        galaxy::gx::set_render_suppressed(on);
+        // GALAXY_SIM_PROFILE with GALAXY_SIM_PROFILE_RESIM: a profile of the re-simulated frames alone.
+        static const bool profile_resim = read_env_flag("GALAXY_SIM_PROFILE_RESIM", false);
+        if (!profile_resim) return;
+        g_sim_profiler.set_sampling(on);
+        if (!on) g_sim_profiler.stop_and_print(std::cerr);
+    }});
+    if (read_env_flag("GALAXY_SIM_PROFILE_RESIM", false)) g_sim_profiler.set_sampling(false);
     galaxy::netplay_set_digest_hook(
         [](void* user) {
             auto& s = *static_cast<RollbackSnapshot*>(user);

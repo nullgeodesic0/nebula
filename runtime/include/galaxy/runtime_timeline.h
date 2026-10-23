@@ -690,6 +690,7 @@ public:
     void restore_schedule(const DeadlineSchedule& schedule) {
         std::lock_guard lock(mutex_);
         schedule_ = schedule;
+        poll_next_due_.store(0u, std::memory_order_relaxed);
     }
     [[nodiscard]] bool failed() const noexcept {
         return failed_.load(std::memory_order_acquire);
@@ -728,6 +729,8 @@ private:
     RuntimeTimeline& timeline_;
     PendingEventLatch& latch_;
     DeadlineSchedule schedule_{};
+    // Synchronous mode: the next deadline poll() returned (0: unknown); any schedule change clears it.
+    std::atomic<std::uint64_t> poll_next_due_{0u};
     mutable std::mutex mutex_{};
     // The deadline the worker is currently sleeping toward (all ones while it
     // waits for a signal only). A new or replaced deadline wakes it only when

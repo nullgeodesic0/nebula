@@ -165,6 +165,12 @@ bool diagnostic_texture_invalidate_requested(std::uint64_t frame) {
     return std::binary_search(frames.begin(), frames.end(), frame);
 }
 
+bool env_flag_enabled(const char* name) {
+    char value[16]{};
+    std::size_t length = 0u;
+    return getenv_s(&length, value, sizeof(value), name) == 0 && length > 1u && value[0] != '0';
+}
+
 const std::string& capture_request_file() {
     static const std::string path = [] {
         char value[MAX_PATH]{};
@@ -3125,6 +3131,9 @@ void GxBackend::reset_fifo_session_state() {
     event_state_ = GxState{};
     event_parser_ = FifoParser{};
     event_parser_.set_dump_dir("generated");
+    // Every dirty guest range reaches the event parser before its next scan (render_frame), so its cached
+    // display lists need no byte comparison. GALAXY_GX_EVENT_DL_VERIFY=1 compares them anyway.
+    event_parser_.set_display_list_bytes_trusted(!env_flag_enabled("GALAXY_GX_EVENT_DL_VERIFY"));
     event_pending_fifo_.clear();
 
     dependency_state_ = GxState{};
@@ -5715,6 +5724,8 @@ FramePeCompletionToken GxBackend::render_frame(
     chunk.worker_memory_snapshot = worker_snapshot;
     const GxTimingConfig& timing = get_gx_timing_config();
     if (!timing.vi_render_fifo_wait && !timing.pe_events_gpu_fence) {
+        // The event parser trusts dirty ranges for its display-list cache: they reach it before it scans.
+        invalidate_dirty_display_list_ranges(event_parser_, drained_dirty_ranges);
         scan_pe_events_on_sim_thread(fifo_data, fifo_size, memory, services);
         chunk.pe_events_scanned_on_sim_thread = true;
     }

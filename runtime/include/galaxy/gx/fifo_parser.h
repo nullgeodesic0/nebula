@@ -483,6 +483,11 @@ public:
         event_classification_only_ = enabled;
     }
 
+    // Trusts invalidate_display_list_cache_range for cached CALL_DL windows: a hit no longer compares the guest
+    // bytes with the cached copy (the comparison dominated the simulation thread's PE-event parse). For a parser
+    // whose owner feeds it every dirty guest range.
+    void set_display_list_bytes_trusted(bool trusted) { display_list_bytes_trusted_ = trusted; }
+
     // Invalidates cached CALL_DL replays whose guest byte window overlaps a
     // dirty guest-memory range. The address may be physical or a MEM1/MEM2
     // cached/uncached CPU alias.
@@ -663,6 +668,7 @@ private:
     FifoParserProfile* profile_ = nullptr;
     FifoGuestMemoryReadRecorder* memory_read_recorder_ = nullptr;
     bool event_classification_only_ = false;
+    bool display_list_bytes_trusted_ = false;
     std::uint64_t display_list_cache_tick_ = 0;
     std::uint64_t display_list_cache_token_ = 0;
     std::size_t last_display_list_cache_index_ = static_cast<std::size_t>(-1);

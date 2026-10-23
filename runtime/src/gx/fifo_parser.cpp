@@ -811,7 +811,8 @@ FifoParser::CachedDisplayList* FifoParser::find_cached_display_list(
             return nullptr;
         }
         if (cached.bytes.size() != bytes.size() ||
-            !std::equal(bytes.begin(), bytes.end(), cached.bytes.begin())) {
+            (!display_list_bytes_trusted_ &&
+             !std::equal(bytes.begin(), bytes.end(), cached.bytes.begin()))) {
             invalidate_display_list_cache_index(index);
             return nullptr;
         }
