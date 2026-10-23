@@ -109,6 +109,16 @@ constexpr std::uint32_t kCanStartDemo = 70u;         // MR::canStartDemo()
 constexpr std::uint32_t kCheckButton = 71u;          // MarioActor::checkButtonType(u16 button, bool)
 constexpr std::uint32_t kLodDistance = 72u;          // LodCtrl::calcDistanceToCamera() const
 constexpr std::uint32_t kBalloonPos = 73u;           // TalkMessageCtrl::updateBalloonPos() (TalkBalloon::updateBalloon)
+// Star Pointers (docs/MULTIPLAYER.md "Star Pointers").
+constexpr std::uint32_t kPointingCore = 74u;      // isStarPointerPointingCore(info, actor, s32 channel, ...)
+constexpr std::uint32_t kScreenPosition = 75u;    // MR::calcScreenPosition(TVec2f*, const TVec3f&)
+constexpr std::uint32_t kTractTrigger = 76u;      // MR::isOnTractTrigger()
+constexpr std::uint32_t kCaptureCode = 77u;       // calls into GCapture and GCaptureTarget
+constexpr std::uint32_t kPointing = 78u;          // MR::isStarPointerPointing(const LiveActor*, s32, bool, const char*)
+constexpr std::uint32_t kPointerScreenPos = 79u;  // MR::getStarPointerScreenPosition(s32)
+constexpr std::uint32_t kStrokeMoment = 80u;      // MR::calcStarPointerStrokeRotateMoment(TVec3f*, const TVec3f&, f32, s32)
+constexpr std::uint32_t kCoStar = 81u;            // the second pointer's Co-Star actions (MarioActor::isRequestJump2P, ...)
+constexpr std::uint32_t kSpineUpdate = 82u;       // Spine::update(): an actor's nerve step
 }  // namespace call
 
 namespace fn {
@@ -198,7 +208,29 @@ constexpr std::uint32_t kScreenToLayout = 0x80366658u;
 constexpr std::array<std::uint32_t, 5> kMeterRequests = {0x8036C59Cu, 0x8036C664u, 0x8036C6E8u, 0x8036C72Cu,
                                                          0x8036C79Cu};
 constexpr std::array<std::uint32_t, 3> kPlayerLeftCalls = {0x803787CCu, 0x80378828u, 0x80378888u};
+// Star Pointers.
+constexpr std::uint32_t kStarPointerViewMtx = 0x803FB51Cu;  // MR::getStarPointerViewMtx(): StarPointerTransformHolder's
+constexpr std::uint32_t kStarPointerProjMtx = 0x803FB540u;  // MR::getStarPointerProjMtx()
+constexpr std::uint32_t kIsStarPointerPointing = 0x803FA9A8u;  // MR::isStarPointerPointing(actor, s32, bool, const char*)
+constexpr std::uint32_t kIsNerve = 0x8016582Cu;              // LiveActor::isNerve(const Nerve*) const
+constexpr std::uint32_t kGetStarPointerDirector = 0x80386000u;  // StarPointerFunction::getStarPointerDirector()
+constexpr std::uint32_t kGetScreenWidth = 0x803F6B44u;          // MR::getScreenWidth(): 832 wide, 608 at 4:3
 }  // namespace fn
+// StarPointerDirector +4: StarPointerController[2], each kStarPointerControllerSize; mPastInfo.mPos (the position
+// target tests use, last frame's) at kPointerPastPos.
+constexpr std::uint32_t kStarPointerControllerSize = 0x74u;
+constexpr std::uint32_t kPointerPastPos = 0x04u;
+
+// Pull Stars (GCapture.cpp): the one GCapture, its idle nerves, and its and GCaptureTarget's code.
+constexpr std::uint32_t kGCaptureVtable = 0x80580814u;
+constexpr std::uint32_t kGCaptureTargetVtable = 0x80580AB0u;
+constexpr std::uint32_t kGCaptureNrvWait = 0x806A07E0u;      // NrvGCapture::GCaptureNrvWait::sInstance
+constexpr std::uint32_t kGCaptureNrvCoolDown = 0x806A07F8u;  // NrvGCapture::GCaptureNrvCoolDown::sInstance
+constexpr bool in_capture_target(std::uint32_t pc) { return pc >= 0x801E1630u && pc < 0x801E2408u; }
+constexpr bool in_capture_code(std::uint32_t pc) {
+    return (pc >= 0x801DEBA4u && pc < 0x801E0CF8u) || in_capture_target(pc);
+}
+constexpr bool in_capture_receive(std::uint32_t pc) { return pc >= 0x801DF0ECu && pc < 0x801DF164u; }  // receiveOtherMsg
 
 // CameraContext (scene object 0x17), reached as MR::getCameraViewMtx does: *(r13 - 0x3A78) -> +0x24 -> +0xAC ->
 // +0x10 -> [0x17].
@@ -503,6 +535,31 @@ struct State {
     float fovy = 45.0f;
     float aspect = 16.0f / 9.0f;
     float far_z = 100000.0f;
+    // Star Pointers (docs/MULTIPLAYER.md "Star Pointers"). `camera`, `projection`: what each player's half was
+    // last drawn with (index 0 the first player's), while `split`; the game's pointer camera
+    // (StarPointerTransformHolder) and CameraContext are given a pointer's half for its target tests.
+    struct Pointers {
+        bool split = false;
+        std::array<coop::CameraMatrices, 2> camera{};
+        std::array<std::array<float, 16>, 2> projection{};
+        bool holder_swapped = false;  // isStarPointerPointingCore in flight with a half's camera
+        std::array<float, 12> holder_view{};
+        std::array<float, 16> holder_projection{};
+        bool context_swapped = false;  // GCapture's MR::calcScreenPosition in flight with a half's camera
+        coop::CameraMatrices context_camera{};
+        std::array<float, 16> context_projection{};
+        // Pull Stars: the brother whose pointer has them (GCapture runs with him as the game's player).
+        bool capture_second = false;
+        std::uint32_t capture_depth = 0u;
+        bool capture_swapped = false;
+        bool capture_back_to_second = false;
+        bool bind_refused = false;  // the other brother's bind skipped, for after it
+        bool spine_swapped = false;  // a Pull Star nerve step in flight run as the capturing brother
+        bool spine_back_to_second = false;
+        std::uint32_t gcapture = 0u;
+        std::array<std::uint32_t, 4> pointing_args{};  // MR::isStarPointerPointing's, for after it
+        bool pointing_target = false;  // ... called from GCaptureTarget
+    } pointers;
 };
 
 bool split_screen_enabled() {
@@ -659,6 +716,7 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     s.nearer_swapped = false;
     s.second_scene = 0u;
     s.talk = {};
+    s.pointers = {};
     s.second_hidden_for_start = false;
     const std::uint32_t first_mario = guest.u32(first + actor::kMario);
     if (!plausible(first_mario)) return;
@@ -1398,6 +1456,230 @@ void bunny_player_pos(const Guest& guest, const State& s, PpcContext* context, s
     context->gpr[3] = (second < first ? s.second : s.first) + actor::kPosition;
 }
 
+// ---- Star Pointers (docs/MULTIPLAYER.md "Star Pointers") ----
+// Mario's pointer is channel 0's and the second player's (the orange one) channel 1's, however the WPads are swapped.
+
+// The half a pointer is over (1 the second player's), from where its target tests look
+// (StarPointerController::mPastInfo.mPos, in the game's 2D screen: MR::getScreenWidth by the frame buffer's height).
+std::size_t half_under_pointer(const Guest& guest, const State& s, std::uint32_t channel) {
+    SavedContext saved(guest.context());
+    const std::uint32_t director = guest.call(fn::kGetStarPointerDirector);
+    const std::uint32_t controllers = plausible(director) ? guest.u32(director + 4u) : 0u;
+    if (!plausible(controllers)) return channel;
+    const std::uint32_t controller = controllers + kStarPointerControllerSize * channel;
+    const auto width = static_cast<float>(guest.call(fn::kGetScreenWidth));
+    const auto height = static_cast<float>(guest.call(fn::kGetFrameBufferHeight) & 0xFFFFu);
+    const float x = guest.f32(controller + kPointerPastPos) / width * s.screen_width;
+    const float y = guest.f32(controller + kPointerPastPos + 4u) / height * s.screen_height;
+    if (!std::isfinite(x) || !std::isfinite(y)) return channel;
+    const std::array<float, 3> line = s.layout.plane(true, s.screen_width, s.screen_height);
+    return line[0] * x + line[1] * y + line[2] >= 0.0f ? 1u : 0u;
+}
+
+// Before isStarPointerPointingCore (one pointer's gates and target test, `channel`): while split, the game's pointer
+// camera (StarPointerTransformHolder, the game camera's copy) is the camera of the half the pointer is over, as last
+// drawn, so a target counts where it is seen under the cursor, depth test included. After it, the game's again.
+void pointer_half_begin(const Guest& guest, State& s, std::uint32_t channel) {
+    auto& p = s.pointers;
+    if (!p.split || channel > 1u || p.holder_swapped) return;
+    const std::size_t half = half_under_pointer(guest, s, channel);
+    SavedContext saved(guest.context());
+    const std::uint32_t view = guest.call(fn::kStarPointerViewMtx);
+    const std::uint32_t projection = guest.call(fn::kStarPointerProjMtx);
+    if (!plausible(view) || !plausible(projection)) return;
+    p.holder_view = read_floats<12>(guest, view);
+    p.holder_projection = read_floats<16>(guest, projection);
+    write_floats(guest, view, p.camera[half].view);
+    write_floats(guest, projection, p.projection[half]);
+    p.holder_swapped = true;
+}
+
+void pointer_half_end(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    if (!p.holder_swapped) return;
+    p.holder_swapped = false;
+    SavedContext saved(guest.context());
+    write_floats(guest, guest.call(fn::kStarPointerViewMtx), p.holder_view);
+    write_floats(guest, guest.call(fn::kStarPointerProjMtx), p.holder_projection);
+}
+
+// Around GCapture's MR::calcScreenPosition (which Pull Star is nearest its pointer, from CameraContext): the camera
+// of the half the capturing brother's pointer is over, while split.
+void capture_screen_begin(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    if (!p.split || p.context_swapped) return;
+    const std::size_t half = half_under_pointer(guest, s, p.capture_second ? 1u : 0u);
+    SavedContext saved(guest.context());
+    const std::uint32_t context = camera_context(guest);
+    if (context == 0u) return;
+    p.context_camera = read_camera(guest, context);
+    p.context_projection = read_floats<16>(guest, context + camera::kProjection);
+    write_camera(guest, context, p.camera[half]);
+    write_floats(guest, context + camera::kProjection, p.projection[half]);
+    p.context_swapped = true;
+}
+
+void capture_screen_end(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    if (!p.context_swapped) return;
+    p.context_swapped = false;
+    SavedContext saved(guest.context());
+    const std::uint32_t context = camera_context(guest);
+    if (context == 0u) return;
+    write_camera(guest, context, p.context_camera);
+    write_floats(guest, context + camera::kProjection, p.context_projection);
+}
+
+// The Pull Stars change hands only while GCapture holds nobody (its Wait or CoolDown).
+bool capture_idle(const Guest& guest, const State& s) {
+    const std::uint32_t capture = s.pointers.gcapture;
+    if (!plausible(capture) || guest.u32(capture) != kGCaptureVtable) return true;
+    SavedContext saved(guest.context());
+    return (guest.call(fn::kIsNerve, capture, kGCaptureNrvWait) & 0xFFu) != 0u ||
+           (guest.call(fn::kIsNerve, capture, kGCaptureNrvCoolDown) & 0xFFu) != 0u;
+}
+
+// A call into GCapture's or GCaptureTarget's code from their own (nerve steps, control, sensor answers): it runs
+// with the capturing brother as the game's player (his position, his bind, his A as channel 0's), as star bunnies
+// run with the nearer one. Calls from elsewhere (the player's and the camera's checks) are left as they are.
+void capture_code_begin(const Guest& guest, State& s, std::uint32_t guest_pc) {
+    auto& p = s.pointers;
+    PpcContext* context = guest.context();
+    const std::uint32_t self = context->gpr[3];
+    if (plausible(self) && guest.u32(self) == kGCaptureVtable) p.gcapture = self;
+    ++p.capture_depth;
+    // GCapture::receiveOtherMsg's requestBind(sender): the Pull Star binds whoever's body touches it first. The
+    // brother not capturing (standing next to the other) is refused; requestBind's false tells him so.
+    if (in_capture_receive(guest_pc) && plausible(s.first) && plausible(s.second)) {
+        const std::uint32_t sensor = context->gpr[4];
+        const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
+        const std::uint32_t capturer = p.capture_second ? s.second : s.first;
+        if ((host == s.first || host == s.second) && host != capturer) {
+            p.bind_refused = true;
+            context->pc = kCoopSkipCall;
+            return;
+        }
+    }
+    if (p.capture_depth != 1u) return;
+    if (!in_capture_code(guest_pc) || p.capture_second == s.moving_second || !plausible(s.first) ||
+        !plausible(s.second) || s.down[p.capture_second ? 1u : 0u].down) {
+        return;
+    }
+    SavedContext saved(guest.context());
+    p.capture_back_to_second = s.moving_second;
+    set_game_player(guest, s, p.capture_second);
+    p.capture_swapped = true;
+}
+
+// Spine::update of GCapture or a GCaptureTarget: its nerve step (exeCapture and the rest, which their nerves reach
+// by a tail branch, unseen by capture_code_begin) runs as the capturing brother too.
+void capture_spine_begin(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    const std::uint32_t spine = guest.context()->gpr[3];
+    const std::uint32_t actor = plausible(spine) ? guest.u32(spine) : 0u;  // Spine::mExecutor
+    const std::uint32_t vtable = plausible(actor) ? guest.u32(actor) : 0u;
+    if ((vtable != kGCaptureVtable && vtable != kGCaptureTargetVtable) || p.spine_swapped ||
+        p.capture_second == s.moving_second || !plausible(s.first) || !plausible(s.second) ||
+        s.down[p.capture_second ? 1u : 0u].down) {
+        return;
+    }
+    SavedContext saved(guest.context());
+    p.spine_back_to_second = s.moving_second;
+    set_game_player(guest, s, p.capture_second);
+    p.spine_swapped = true;
+}
+
+void capture_spine_end(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    if (!p.spine_swapped) return;
+    p.spine_swapped = false;
+    SavedContext saved(guest.context());
+    set_game_player(guest, s, p.spine_back_to_second);
+}
+
+void capture_code_end(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    if (p.bind_refused) {
+        p.bind_refused = false;
+        guest.context()->gpr[3] = 0u;
+    }
+    if (p.capture_depth == 0u || --p.capture_depth != 0u || !p.capture_swapped) return;
+    SavedContext saved(guest.context());
+    set_game_player(guest, s, p.capture_back_to_second);
+    p.capture_swapped = false;
+}
+
+// After a Pull Star's own pointing test (GCaptureTarget, on the capturing brother's pointer): if it missed and the
+// other brother's pointer is on it while GCapture is free, the Pull Stars are his.
+void capture_pointing_after(const Guest& guest, State& s, PpcContext* context) {
+    auto& p = s.pointers;
+    if ((context->gpr[3] & 0xFFu) != 0u || !plausible(s.first) || !plausible(s.second)) return;
+    const bool other_second = !p.capture_second;
+    if (s.down[other_second ? 1u : 0u].down || !capture_idle(guest, s)) return;
+    std::uint32_t pointed = 0u;
+    {
+        SavedContext saved(context);
+        const auto& a = p.pointing_args;
+        pointed = guest.call(fn::kIsStarPointerPointing, a[0], other_second ? 1u : 0u, a[2], a[3]) & 0xFFu;
+    }
+    if (pointed == 0u) return;
+    p.capture_second = other_second;
+    trace("pull stars: the %s player's pointer", other_second ? "second" : "first");
+    context->gpr[3] = 1u;
+}
+
+void pointers_before(std::uint32_t id, const Guest& guest, State& s, PpcContext* context, std::uint32_t guest_pc) {
+    auto& p = s.pointers;
+    // Channel 0 in the Pull Stars' code is the capturing brother's pointer.
+    const bool remap = in_capture_code(guest_pc) && p.capture_second;
+    switch (id) {
+    case call::kPointingCore: pointer_half_begin(guest, s, context->gpr[5]); return;
+    case call::kScreenPosition:
+        if (in_capture_code(guest_pc)) capture_screen_begin(guest, s);
+        return;
+    case call::kCaptureCode: capture_code_begin(guest, s, guest_pc); return;
+    case call::kPointing:
+        for (unsigned i = 0; i < 4u; ++i) p.pointing_args[i] = context->gpr[3 + i];
+        p.pointing_target = in_capture_target(guest_pc);
+        if (remap && context->gpr[4] == 0u) context->gpr[4] = 1u;
+        return;
+    case call::kPointerScreenPos:
+        if (remap && context->gpr[3] == 0u) context->gpr[3] = 1u;
+        return;
+    case call::kStrokeMoment:
+        if (remap && context->gpr[5] == 0u) context->gpr[5] = 1u;
+        return;
+    case call::kSpineUpdate: capture_spine_begin(guest, s); return;
+    default: return;
+    }
+}
+
+void pointers_after(std::uint32_t id, const Guest& guest, State& s, PpcContext* context) {
+    auto& p = s.pointers;
+    switch (id) {
+    case call::kPointingCore: pointer_half_end(guest, s); return;
+    case call::kScreenPosition: capture_screen_end(guest, s); return;
+    case call::kTractTrigger:
+        // A on a Pull Star is the capturing brother's: the other's jump is not taken for it.
+        if (p.capture_second != s.moving_second) context->gpr[3] = 0u;
+        return;
+    case call::kCaptureCode: capture_code_end(guest, s); return;
+    case call::kPointing:
+        if (p.pointing_target) {
+            p.pointing_target = false;
+            capture_pointing_after(guest, s, context);
+        }
+        return;
+    case call::kCoStar:
+        // The second pointer's A is the second player's jump, not Co-Star help: no jump assist for the other
+        // brother, no enemy held, no launch star fired.
+        context->gpr[3] = 0u;
+        return;
+    case call::kSpineUpdate: capture_spine_end(guest, s); return;
+    default: return;
+    }
+}
+
 // ---- Co-op lives, respawn and HUD (docs/MULTIPLAYER.md "Lives") ----
 
 // The second player's lives are kept only while the game runs, as the game keeps the first player's: loading a
@@ -1939,6 +2221,7 @@ bool second_half(const State& s) { return (s.pass == 2u) != events_swapped(s); }
 // split eases in; the renderer keeps each pass to its side of the line.
 void begin_split_draw(const Guest& guest, State& s) {
     s.pass = 0u;
+    s.pointers.split = false;
     if (!split_screen_enabled() || s.split.amount() == 0.0f || !plausible(s.second) || !plausible(s.second_mario) ||
         !plausible(s.first) || !s.follow.started() || !s.layout.started()) {
         return;
@@ -2043,6 +2326,8 @@ void begin_split_draw(const Guest& guest, State& s) {
               other_eye.z, other_fwd.x, other_fwd.y, other_fwd.z, s.projection[0]);
     }
     write_floats(guest, context + camera::kProjection, half_projection(s, second_half(s)));
+    s.pointers.camera[second_half(s) ? 1u : 0u] = game_half;
+    s.pointers.projection[second_half(s) ? 1u : 0u] = half_projection(s, second_half(s));
     // The renderer keeps EFB copies per view: per player, so each half's effects see only its own picture
     // whichever pass draws it.
     send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), second_half(s) ? 2u : 1u);
@@ -2061,6 +2346,9 @@ void finish_split_draw(const Guest& guest, State& s) {
     s.pass = 2u;
     write_camera(guest, context, s.camera2);
     write_floats(guest, context + camera::kProjection, half_projection(s, second_half(s)));
+    s.pointers.camera[second_half(s) ? 1u : 0u] = s.camera2;
+    s.pointers.projection[second_half(s) ? 1u : 0u] = half_projection(s, second_half(s));
+    s.pointers.split = true;
     guest.call(fn::kLoadViewMtx);
     guest.call(fn::kCalcViewAndEntry);
     send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), second_half(s) ? 2u : 1u);
@@ -2325,6 +2613,10 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         return;
     }
     if (id == call::kBalloonPos) return;
+    if (id >= call::kPointingCore && id <= call::kSpineUpdate) {
+        pointers_before(id, Guest(context, memory, services, guest_pc), s, context, guest_pc);
+        return;
+    }
     if (id == call::kGetPlayerPos) return;
     if (id == call::kAddArchive) {
         s.archive_collector = context->gpr[3];
@@ -2551,6 +2843,10 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
     }
     if (id == call::kBalloonPos) {
         if (guest_pc == 0x8029CFA0u) talk_window_in_world(guest, s, context);
+        return;
+    }
+    if (id >= call::kPointingCore && id <= call::kSpineUpdate) {
+        pointers_after(id, guest, s, context);
         return;
     }
     if (id == call::kNearerPlayerCode) {
