@@ -34729,7 +34729,9 @@ int wmain(int argc, wchar_t** argv) {
         },
         &state);
     state.jaudio_mixer.set_voice_override(
-        {[](std::uint32_t id, std::uint64_t start) { return static_cast<std::uint8_t>(galaxy::voice::claim(id, start)); },
+        {[](std::uint32_t id, std::uint64_t start, bool luigi) {
+             return static_cast<std::uint8_t>(galaxy::voice::claim(id, start, luigi));
+         },
          &galaxy::voice::render, &galaxy::voice::mix_remainder, &galaxy::voice::playing});
     // System-time offset: not written by initialize_boot_memory.
     address_space.write_u32(0x800030D8u, 0x00000000u);

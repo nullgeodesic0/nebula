@@ -8002,7 +8002,7 @@ fn site_hook_call(pc: u32, kind: &str, argument: u32) -> String {
 /// Co-op calls the runtime may skip from CoopBeforeCall (a player down while the other plays on, the second
 /// player's 2D updates, a Pull Star's bind of the brother not capturing, the second player mounting a vehicle).
 fn coop_call_skippable(id: u32) -> bool {
-    matches!(id, 19..=25 | 43..=45 | 47 | 63..=68 | 77 | 83)
+    matches!(id, 19..=25 | 43..=45 | 47 | 63..=68 | 77 | 83 | 89)
 }
 
 /// Game calls the Mario and Luigi co-op watches (CoopBeforeCall/CoopAfterCall, argument the id). The ids
@@ -8130,6 +8130,8 @@ fn coop_call_id(target: u32) -> Option<u32> {
         // 3D sound: a source nearer the second player is heard as if he stood where the first is.
         0x8002_8884 => Some(87), // AudDopplerAudienceState::convertAbsToRel(const TVec3f&, JAUDopplerAudibleRelPos*)
         0x8015_FD74 => Some(88), // ClippingJudge::isJudgedToClipFrustum(const TVec3f&, f32) const (the far plane's)
+        // A life won (a 1-Up mushroom caught, a stomp chain) by the second player is his (skippable).
+        0x803C_C3D0 => Some(89), // MR::incPlayerLeft()
         _ => None,
     }
 }
