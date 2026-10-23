@@ -430,8 +430,18 @@ public:
     [[nodiscard]] std::size_t draw_payload_size(
         std::uint8_t vtxfmt,
         std::uint16_t vertex_count) const override {
-        return VertexLoader::source_vertex_size(state_.vertex_desc(vtxfmt)) *
-               static_cast<std::size_t>(vertex_count);
+        // Vertex sizes per format, kept while the state's vertex layout revision stands (the sink lives for one
+        // scan, the only time its state is mutated by one parser). Revision 0 means unknown: decode every time.
+        const std::uint64_t revision = state_.dependency_shape_revision();
+        if (revision != vertex_size_revision_ || revision == 0u) {
+            vertex_sizes_.fill(kUnknownVertexSize);
+            vertex_size_revision_ = revision;
+        }
+        std::size_t& size = vertex_sizes_[vtxfmt & 7u];
+        if (size == kUnknownVertexSize) {
+            size = VertexLoader::source_vertex_size(state_.vertex_desc(vtxfmt));
+        }
+        return size * static_cast<std::size_t>(vertex_count);
     }
 
     void on_draw(
@@ -494,8 +504,11 @@ public:
     void on_invalidate_vertex_cache() override {}
 
 private:
+    static constexpr std::size_t kUnknownVertexSize = ~std::size_t{0};
     GxState& state_;
     const NativeServicesV1* services_;
+    mutable std::array<std::size_t, 8> vertex_sizes_{};
+    mutable std::uint64_t vertex_size_revision_ = 0u;
 };
 
 bool trace_efb_copy_enabled() {
