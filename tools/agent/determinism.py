@@ -271,6 +271,61 @@ def cmd_snapshot(args):
     return 0
 
 
+def cmd_netpair(args):
+    """A host and a joiner on this machine over localhost (GALAXY_NET_HOST / GALAXY_NET_JOIN): the host's agent
+    presses A through the opening; both copies hash MEM1 and must agree at every sample."""
+    out = args.out
+    os.makedirs(out, exist_ok=True)
+    started = time.time()
+    copies = []
+    for role, extra in (('host', {'GALAXY_NET_HOST': str(args.port)}),
+                        ('join', {'GALAXY_NET_JOIN': '127.0.0.1:%d' % args.port})):
+        name = 'net-%s-%s' % (os.path.basename(os.path.normpath(out)), role)
+        inst = nebula_agent.Instance(name, root=args.root, run=args.run, content=args.content)
+        inst.stop()
+        path = os.path.join(out, role + '.hash')
+        if os.path.exists(path):
+            os.remove(path)
+        env = {'GALAXY_NET_DELAY': str(args.delay), 'GALAXY_STATE_HASH': path, 'GALAXY_STATE_HASH_EVERY': str(args.every),
+               'GALAXY_STATE_HASH_CHUNKS': '1', 'GALAXY_STATE_EXIT_FRAME': str(args.frames)}
+        if args.dump:
+            env['GALAXY_STATE_DUMP'] = '%d,%s' % (args.dump, os.path.join(out, 'mem-%s.bin' % role))
+        env.update(extra)
+        inst.launch(fresh_saves=True, extra_env=env)
+        copies.append(inst)
+    host = copies[0]
+    try:
+        host.wait_for(lambda s: s.get('frame', 0) > 0, timeout=120.0, what='the host to start')
+        for _ in range(args.presses):
+            host.command('press 1 A 4', timeout=120.0)
+            host.command('wait 40', timeout=120.0)
+    except nebula_agent.GameError as e:
+        print('host input stopped: %s' % e)
+    deadline = time.time() + args.timeout
+    while time.time() < deadline and any(i.running() for i in copies):
+        time.sleep(0.5)
+    for inst in copies:
+        if inst.running():
+            print('  %s did not finish: %s' % (inst.name, inst.status_line()))
+            inst.stop()
+        for line in inst.log_tail(100000, '[net]')[-6:]:
+            print('  %s %s' % (inst.name, line))
+        crash = inst.crash()
+        if crash:
+            print('  %s crashed: %s' % (inst.name, crash[0]))
+    hashes = [read_hashes(os.path.join(out, role + '.hash')) for role in ('host', 'join')]
+    same, differ, megabytes = first_difference(hashes)
+    dumps = [os.path.join(out, 'mem-%s.bin' % role) for role in ('host', 'join')]
+    if args.dump and all(os.path.exists(d) for d in dumps):
+        print('MEM1 at frame %d, host vs joiner:' % args.dump)
+        diff_dumps(dumps[0], dumps[1], load_symbols(args.symbols), 30)
+    if differ is None:
+        print('host and joiner identical at every sample through frame %s (%.0f s)' % (same, time.time() - started))
+        return 0
+    print('host and joiner agree through frame %s; differ at %d in MB %s' % (same, differ, megabytes))
+    return 1
+
+
 def cmd_record(args):
     os.makedirs(args.out, exist_ok=True)
     path = os.path.join(args.out, 'input.rec')
@@ -333,7 +388,17 @@ def main(argv=None):
     snap.add_argument('--dump', type=int, default=0, help='also dump MEM1 at this frame in both and diff them')
     snap.add_argument('--symbols', default=None, help='a decomp symbol map, to name the differing words')
     snap.add_argument('--env', action='append', help='NAME=VALUE for both copies')
+    net = sub.add_parser('netpair', help='a host and a joiner over localhost must stay identical')
+    net.add_argument('--frames', type=int, default=3000)
+    net.add_argument('--every', type=int, default=30)
+    net.add_argument('--delay', type=int, default=3)
+    net.add_argument('--port', type=int, default=27777)
+    net.add_argument('--presses', type=int, default=25)
+    net.add_argument('--dump', type=int, default=0, help='dump MEM1 at this frame in both and diff them')
+    net.add_argument('--symbols', default=None)
     args = parser.parse_args(argv)
+    if args.command == 'netpair':
+        return cmd_netpair(args)
     if args.command == 'snapshot':
         args.frames = args.frames or args.restore + 120
         return cmd_snapshot(args)

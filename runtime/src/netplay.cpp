@@ -1,4 +1,5 @@
 #include "galaxy/netplay.h"
+#include "galaxy/netplay_session.h"
 
 #include "guest_access.h"
 
@@ -55,6 +56,8 @@ struct Netplay {
     std::uint32_t peek_sequence = 0u;  // EFB peeks so far this frame (netplay_efb_peek)
     std::uint32_t channel = 0xFFFFFFFFu;
     std::uint32_t buffer = 0u;
+    std::uint32_t other_channel = 0xFFFFFFFFu;  // a KPADRead off the frame site, online
+    std::uint32_t other_buffer = 0u;
     std::uint32_t dump_frame = 0xFFFFFFFFu;
     std::string dump_path;
     std::uint32_t rate_every = 0u;   // GALAXY_NETPLAY_RATE=<frames>: log simulated frames per second
@@ -189,11 +192,20 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
     Netplay& n = netplay();
     if (!n.initialized) initialize(n);
     n.channel = 0xFFFFFFFFu;
-    if (guest_pc != kFrameReadSite) return;
+    if (guest_pc != kFrameReadSite) {
+        // Another KPADRead (JUTException::readPad's, a diagnostic): online it must see the synchronised input
+        // too, never this PC's own controller.
+        if (net_session_requested() && context->gpr[3] < kChannels) {
+            n.other_channel = context->gpr[3];
+            n.other_buffer = context->gpr[4];
+        }
+        return;
+    }
     n.channel = context->gpr[3];
     n.buffer = context->gpr[4];
     if (n.channel == 0u) {
         n.peek_sequence = 0u;
+        net_frame_begin(n.frame, memory);
         // A frame starts: its state before this frame's input.
         if (n.hashes != nullptr && n.frame >= n.hash_from && n.frame % n.hash_every == 0u) write_hash(n, memory);
         if (n.dump_frame == n.frame && !n.dump_path.empty()) write_dump(n, memory);
@@ -266,6 +278,23 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
 void netplay_kpad_after(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
                         std::uint32_t guest_pc) {
     Netplay& n = netplay();
+    if (guest_pc != kFrameReadSite && n.other_channel < kChannels && services != nullptr) {
+        // Online, off the frame read site: the input this frame applied for that channel (the frame counter has
+        // moved past it once the second channel was read).
+        const std::uint32_t channel = n.other_channel;
+        n.other_channel = 0xFFFFFFFFu;
+        const std::uint32_t applied = n.frame == 0u ? 0u : n.frame - 1u;
+        const NetInput& input = net_input(applied, channel == 0u ? 0u : 1u);
+        const guest_access::Guest guest(context, memory, services, guest_pc);
+        for (std::uint32_t i = 0; i < kStatusSize; i += 4u) {
+            guest.set_u32(n.other_buffer + i, (static_cast<std::uint32_t>(input.status[i]) << 24u) |
+                                                  (static_cast<std::uint32_t>(input.status[i + 1u]) << 16u) |
+                                                  (static_cast<std::uint32_t>(input.status[i + 2u]) << 8u) |
+                                                  input.status[i + 3u]);
+        }
+        context->gpr[3] = input.count;
+        return;
+    }
     if (guest_pc != kFrameReadSite || n.channel >= kChannels || services == nullptr) {
         n.channel = 0xFFFFFFFFu;
         return;
@@ -290,7 +319,19 @@ void netplay_kpad_after(PpcContext* context, GuestMemoryV1* memory, const Native
                                            (static_cast<std::uint32_t>(in[i + 2u]) << 8u) | in[i + 3u]);
         }
     };
-    if (auto it = n.replay.find({n.frame, channel}); it != n.replay.end()) {
+    if (net_session_requested()) {
+        // Online: this PC's controller (the local first-player read) is its player's input `delay` frames on;
+        // the first player plays the host's input and the second the joiner's, on both PCs.
+        if (channel == 0u) {
+            std::array<std::uint8_t, kStatusSize> local{};
+            const std::uint32_t local_count = context->gpr[3];
+            if (static_cast<std::int32_t>(local_count) > 0) read(n.buffer, local.data(), kStatusSize);
+            net_local_input(n.frame, local_count, local.data());
+        }
+        const NetInput& input = net_input(n.frame, channel == 0u ? 0u : 1u);
+        write(n.buffer, input.status.data(), kStatusSize);
+        context->gpr[3] = input.count;
+    } else if (auto it = n.replay.find({n.frame, channel}); it != n.replay.end()) {
         write(n.buffer, it->second.status.data(), kStatusSize);
         context->gpr[3] = it->second.count;
     }
@@ -330,6 +371,7 @@ std::uint32_t netplay_efb_peek(bool depth, std::uint32_t local_value) noexcept {
     if (!n.initialized) initialize(n);
     // Peek answers ride in the input stream as channel kPeekChannel + their order in the frame (count = value).
     constexpr std::uint32_t kPeekChannel = 0x100u;
+    if (net_session_requested()) return net_peek(n.frame, n.peek_sequence++, local_value);
     const std::uint32_t channel = kPeekChannel + (n.peek_sequence++ & 0xFFFFu) + (depth ? 0u : 0x10000u);
     if (!n.replay.empty()) {
         const auto it = n.replay.find({n.frame, channel});

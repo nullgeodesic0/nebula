@@ -1,6 +1,7 @@
 #include "galaxy/native_api.h"
 #include "galaxy/crash_notes.h"
 #include "galaxy/netplay.h"
+#include "galaxy/netplay_session.h"
 #include "nebula_build_identity.h"
 #include "galaxy/ai_dma_timing.h"
 #include "galaxy/checkpoint_gate.h"
@@ -5160,13 +5161,16 @@ std::uint32_t deterministic_pe_wait_ms() {
 
 bool deterministic_mode() {
     static const bool enabled = [] {
-        const bool on = read_env_flag("GALAXY_DETERMINISTIC", false);
+        // An online session (GALAXY_NET_HOST / GALAXY_NET_JOIN) is deterministic by definition.
+        const bool on = read_env_flag("GALAXY_DETERMINISTIC", false) || galaxy::net_session_requested();
         if (on) {
             std::cerr << "[deterministic] guest time from executed checkpoints; disc reads and NAND writes "
                          "complete in order" << '\n';
             // Worker-thread completions reach the guest whenever the worker finishes (boot diverged before its
             // first frame with them). The address space reads these when it is built, after the timeline.
             // _putenv_s, not SetEnvironmentVariable: the flags are read with getenv_s, from the CRT's copy.
+            // Other modules read the switch itself (neutral Bluetooth reports, the DSP lockstep, the agent).
+            (void)_putenv_s("GALAXY_DETERMINISTIC", "1");
             (void)_putenv_s("GALAXY_ASYNC_DISC_READS", "0");
             (void)_putenv_s("GALAXY_ASYNC_NAND_WRITES", "0");
             // PE finish/token events are raised when the FIFO is submitted, on this thread, rather than at the
@@ -18821,7 +18825,8 @@ void deterministic_advance_to(RuntimeState& state, std::uint64_t target_ticks, c
     const std::uint64_t now = runtime_time_base_ticks(state);
     if (target_ticks <= now) return;
     trace_deterministic_advance(state, why, now, target_ticks);
-    if (deterministic_unpaced()) {
+    // Unpaced probes never wait; an online session paces whole frames itself (netplay_session.cpp, 59.94 Hz).
+    if (deterministic_unpaced() || galaxy::net_session_requested()) {
         state.virtual_idle_ticks += target_ticks - now;
         (void)runtime_time_base_ticks(state);  // publishes what is now due
         return;
