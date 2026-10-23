@@ -8121,6 +8121,15 @@ fn coop_call_id(target: u32) -> Option<u32> {
         0x802B_B578 | 0x802B_B644 | 0x802B_BB04 | 0x803F_269C | 0x803F_AF94 | 0x803F_B04C => Some(81),
         // Vehicles (the Star Ball, the manta ray) are the first player's; the second rides along (skippable):
         0x802C_824C => Some(83), // MarioActor::addRushSensor(HitSensor*, bool)
+        // A boss fight begins (its music): the brother away from the arena is brought in.
+        0x803F_A0EC => Some(84), // MR::startBossBGM(s32)
+        // Online each PC shows its own brother's cursor (a renderer-only clip around the other's).
+        0x8038_839C => Some(85), // StarPointerLayout::drawDecoration() const (from StarPointerLayout::draw)
+        // Star Bits answer the nearer brother (their distance gate, pointing and flight home use the player).
+        0x8023_CB3C..=0x8024_06FF => Some(86), // StarPiece and its nerves
+        // 3D sound: a source nearer the second player is heard as if he stood where the first is.
+        0x8002_8884 => Some(87), // AudDopplerAudienceState::convertAbsToRel(const TVec3f&, JAUDopplerAudibleRelPos*)
+        0x8015_FD74 => Some(88), // ClippingJudge::isJudgedToClipFrustum(const TVec3f&, f32) const (the far plane's)
         _ => None,
     }
 }

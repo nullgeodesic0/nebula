@@ -180,9 +180,9 @@ his side, one screen; he gets off beside him when the ride ends. Each brother ri
 open: the refusal is the one place to change. Checked with the agent on Rolling Green's Star Ball (the manta
 ray, handed over by the penguin in Loopdeeloop, is not yet checked in game).
 
-Launch stars: the player on a launch star (either one) flies, and the other flies beside them under the
-star's camera; both land together. A launch star ridden by the second player runs with them as the game's
-player, so the flight's animations and its end are theirs.
+Launch stars: a launch star takes only the brother on it; the other stays where he is and plays on (split screen
+shows both), and follows through the star himself or not. A launch star ridden by the second player runs with
+him as the game's player, so the flight's animations, camera and its end are his.
 
 Pipes work as in New Super Mario Bros. Wii. The first brother into a green pipe (EarthenPipe) waits inside,
 held before he crosses over, until the other reaches its mouth or 6 seconds pass. Then he comes out of the
@@ -213,6 +213,36 @@ Items: coins, purple coins and star chips are collected by whichever brother tou
 agent's `actors` command). `MR::isNearPlayer` and `isNearPlayerAnyTime` count either brother; switch areas
 (`SwitchArea`, which let star bunnies out, start events and the like) see the second player when he is inside
 and the first is not; star bunnies (`TrickRabbit`, `RunawayRabbit`) run from the nearer brother.
+
+Star Bits: a Star Bit tests the pointers only within 150 m of the game's player (`StarPiece::tryGotJudge`) and
+then flies to him, so far from the first brother the second's pointer did nothing. A Star Bit's code runs with the
+brother nearer it as the game's player (calls into it, hook 86, and its nerve steps through Spine::update), so
+one near either brother is pointable and flies to whoever is near it. The far plane's frustum test (hook 88)
+also leaves alone what the second player's half shows. Checked with the agent: 26000 units from Mario, Luigi's
+pointer collected 10 Star Bits around him.
+
+Sound: the game hears 3D sounds from its camera, so far from the first brother the second's surroundings fell
+silent. After `AudDopplerAudienceState::convertAbsToRel` (hook 87; every positioned sound's volume, pan,
+surround, reverb, priority and cut-off come from its result) a source nearer the second brother is placed as it
+stands from him but around the first, and the result is made again (`sound_from_nearer_brother`): each brother's
+surroundings are heard alike. Guest state only, so online both PCs hear it the same.
+
+The star get with both brothers: whichever brother takes a Power Star, the other stands beside him for the star
+get, as on the Luigi missions: pinned beside the star (its matrix, the one the taker is held to), held by the
+game's remote-demo hold (no moving, no falling), without hit sensors (no damage, no death) and playing the star
+get animation; the screen is one picture meanwhile. Done in each brother's own turn (`star_get_watch`,
+`star_get_update`), from the taker's rush partner being a PowerStar and `MR::isPowerStarGetDemoActive`. The
+stage ends after it, so nothing undoes the hold.
+
+Boss arenas: when a cutscene starts (or a boss's music, `MR::startBossBGM`, hook 84) and a boss (Bowser, Bowser Jr.
+and his ship, Kamella, Topmaniac, Bugaboom, Dino Piranha, Fiery Dino Piranha, Major Burrows, Kingfin, Bouldergeist,
+Tarantox, Megaleg, Baron Brr) is within 8000 units of a brother while the other is away, the other is brought
+beside him (`gather_for_boss`). Other cutscenes move nobody. Checked with the agent on Dino Piranha's intro, Luigi
+24000 units away.
+
+Online, each PC shows only its own brother's cursor: around the other brother's pointer layout's draw
+(`StarPointerLayout::drawDecoration`, hook 85) the renderer clips everything away, with the same host-side marker
+as split screen's line; guest drawing and state are the same on both PCs (checked with `determinism.py netpair`).
 
 The runtime side is in `coop_guest.cpp` (`on_game_over_call`, `update_down_player`, `create_hud`,
 `rides_star`); the rules are `coop::go_down_alone` and `coop::respawn_due`, tested in `coop_tests.cpp`.
