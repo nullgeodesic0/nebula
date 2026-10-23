@@ -174,17 +174,18 @@ void write_hash(Netplay& n, const GuestMemoryV1* memory) {
 
 // GALAXY_STATE_DUMP="<frame>,<path>": MEM1 as it is when that frame starts, raw, to diff two runs' state.
 void write_dump(Netplay& n, const GuestMemoryV1* memory) {
+    // MEM1 to the path, MEM2 (64 MB) beside it as <path>.mem2.
     if (memory == nullptr) return;
     for (std::uint32_t r = 0; r < memory->region_count; ++r) {
         const GuestMemoryRegionV1& region = memory->regions[r];
-        if (region.host_base == nullptr || region.size != 0x01800000u) continue;
+        if (region.host_base == nullptr || (region.size != 0x01800000u && region.size != 0x04000000u)) continue;
+        const std::string path = region.size == 0x01800000u ? n.dump_path : n.dump_path + ".mem2";
         std::FILE* file = nullptr;
-        if (fopen_s(&file, n.dump_path.c_str(), "wb") == 0 && file != nullptr) {
+        if (fopen_s(&file, path.c_str(), "wb") == 0 && file != nullptr) {
             std::fwrite(region.host_base, 1, region.size, file);
             std::fclose(file);
-            std::fprintf(stderr, "[netplay] MEM1 at frame %u dumped to %s\n", n.frame, n.dump_path.c_str());
+            std::fprintf(stderr, "[netplay] guest memory at frame %u dumped to %s\n", n.frame, path.c_str());
         }
-        return;
     }
 }
 

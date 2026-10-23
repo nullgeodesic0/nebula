@@ -2,6 +2,7 @@
 
 #include "galaxy/motion_style.h"
 
+#include <array>
 #include <cstdint>
 
 namespace galaxy {
@@ -73,6 +74,11 @@ struct RuntimeSettings {
     // Mario and Luigi co-op on one screen (docs/MULTIPLAYER.md): a second player with the second controller.
     // The second character's model loads with the first's, so a change takes effect at the next start.
     bool coop = false;
+    // Online co-op (docs/NETPLAY.md, F1 > Online): whether another PC may join this game, the UDP port it
+    // listens on, and the address this PC last joined.
+    bool net_joinable = false;
+    unsigned net_port = 7777u;
+    std::array<char, 64> net_join_address{};
 };
 
 // The language the game runs in this session: the setting when the game first asks (at boot), then

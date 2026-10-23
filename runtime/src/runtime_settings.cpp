@@ -191,6 +191,15 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
         settings.moveset.turn_boost = parse_switch(value, settings.moveset.turn_boost);
     } else if (std::strcmp(key, "coop") == 0) {
         settings.coop = parse_switch(value, settings.coop);
+    } else if (std::strcmp(key, "net_joinable") == 0) {
+        settings.net_joinable = parse_switch(value, settings.net_joinable);
+    } else if (std::strcmp(key, "net_port") == 0) {
+        char* end = nullptr;
+        const unsigned long port = std::strtoul(value, &end, 10);
+        if (end != value && *end == '\0' && port >= 1u && port <= 65535u) settings.net_port = static_cast<unsigned>(port);
+    } else if (std::strcmp(key, "net_join_address") == 0) {
+        settings.net_join_address.fill('\0');
+        (void)strncpy_s(settings.net_join_address.data(), settings.net_join_address.size(), value, _TRUNCATE);
     } else if (std::strcmp(key, "custom_animations") == 0) {
         if (_stricmp(value, "on") == 0 || std::strcmp(value, "1") == 0) settings.custom_animations = true;
         if (_stricmp(value, "off") == 0 || std::strcmp(value, "0") == 0) settings.custom_animations = false;
@@ -581,6 +590,9 @@ bool reload_runtime_audio_settings_if_changed() noexcept {
         settings.custom_animations = parsed.custom_animations;
         settings.custom_model = parsed.custom_model;
         settings.custom_voice = parsed.custom_voice;
+        settings.net_joinable = parsed.net_joinable;
+        settings.net_port = parsed.net_port;
+        settings.net_join_address = parsed.net_join_address;
         set_runtime_settings(settings);
         input::set_controls_config(controls);
         record_input_mode_sync(file_mode, settings.input_mode);
@@ -630,6 +642,9 @@ bool save_runtime_settings_to_file() {
                  << "moveset_turn_boost=" << (settings.moveset.turn_boost ? "on" : "off") << '\n'
                  << "moveset_second_player=" << (settings.moveset.second_player ? "on" : "off") << '\n'
                  << "coop=" << (settings.coop ? "on" : "off") << '\n'
+                 << "net_joinable=" << (settings.net_joinable ? "on" : "off") << '\n'
+                 << "net_port=" << settings.net_port << '\n'
+                 << "net_join_address=" << settings.net_join_address.data() << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;
