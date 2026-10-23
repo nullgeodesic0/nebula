@@ -37,6 +37,12 @@ struct NetplaySnapshotHooks {
     void (*restore)(void* user) = nullptr;
     // Re-simulation on/off: frames are simulated but not rendered (GALAXY_SNAPSHOT_RENDER_RESIM=1 renders them).
     void (*resimulating)(void* user, bool on) = nullptr;
+    // Hot join (docs/HOT_JOIN.md). write: saves into a file and returns false, or true in another process that
+    // loaded it and resumed here. load: resumes a written file (does not return unless it cannot be used).
+    // GALAXY_SNAPSHOT_WRITE="<frame>,<file>" writes when that frame starts; GALAXY_SNAPSHOT_LOAD="<frame>,<file>"
+    // loads when this process's own frame count reaches it, after which its frames are the writer's.
+    bool (*write)(void* user, const char* path, std::uint32_t frame) = nullptr;
+    void (*load)(void* user, const char* path) = nullptr;
 };
 void netplay_set_snapshot_hooks(const NetplaySnapshotHooks& hooks) noexcept;
 // With GALAXY_DETERMINISTIC_TRACE: a line per frame of host-side state digests (written by `trace(user)` with

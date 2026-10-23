@@ -18127,6 +18127,13 @@ std::shared_ptr<GuestAddressSpace::DeviceSnapshot> GuestAddressSpace::make_devic
     return std::make_shared<DeviceSnapshot>();
 }
 
+void GuestAddressSpace::own_device_snapshot(DeviceSnapshot& snapshot) {
+    for (auto& [handle, file] : snapshot.nand_files_) {
+        if (file.backing != nullptr) file.backing = std::make_shared<NandBacking>(*file.backing);
+    }
+}
+
+
 void GuestAddressSpace::save_devices(DeviceSnapshot& out) {
 #define GALAXY_DEVICE_SNAPSHOT_SAVE(name) out.name = name;
     GALAXY_DEVICE_SNAPSHOT_FIELDS(GALAXY_DEVICE_SNAPSHOT_SAVE)
@@ -27155,6 +27162,19 @@ void native_host_test_attach_nand_metadata(const std::filesystem::path& path) {
 std::uint32_t GuestAddressSpace::ensure_rmge01_data_directory() {
     (void)nand_host_path(kRmge01DataDirView);
     return 0u;
+}
+
+void GuestAddressSpace::adopt_device_snapshot(DeviceSnapshot& snapshot) {
+    for (auto& [handle, file] : snapshot.nand_files_) {
+        if (file.backing == nullptr) continue;
+        const std::optional<NativeNandObjectIdentity> identity =
+            native_nand_object_identity(nand_host_path(file.backing->guest_path));
+        file.backing->host_identity_valid = identity.has_value() && !identity->is_directory;
+        if (file.backing->host_identity_valid) {
+            file.backing->host_volume_serial = identity->volume_serial;
+            file.backing->host_file_index = identity->file_index;
+        }
+    }
 }
 
 std::filesystem::path GuestAddressSpace::nand_host_path(

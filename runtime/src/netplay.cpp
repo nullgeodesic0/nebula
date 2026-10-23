@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <map>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -72,6 +73,10 @@ struct Netplay {
     bool snapshot_saved = false;
     bool snapshot_restored = false;
     bool resimulating = false;           // between the rollback and the frame it was rolled back from
+    std::uint32_t write_frame = 0xFFFFFFFFu;  // GALAXY_SNAPSHOT_WRITE (hot join)
+    std::string write_path;
+    std::uint32_t load_frame = 0xFFFFFFFFu;   // GALAXY_SNAPSHOT_LOAD
+    std::string load_path;
     std::uint64_t resim_start_qpc = 0u;
 };
 
@@ -128,6 +133,14 @@ void initialize(Netplay& n) {
                 static_cast<std::uint32_t>(std::strtoul(test.substr(comma + 1u).c_str(), nullptr, 10));
             std::fprintf(stderr, "[netplay] snapshot test: save at frame %u, roll back to it at frame %u\n",
                          n.snapshot_save_frame, n.snapshot_restore_frame);
+        }
+    }
+    for (const auto& [name, frame, path] : {std::tuple{"GALAXY_SNAPSHOT_WRITE", &n.write_frame, &n.write_path},
+                                            std::tuple{"GALAXY_SNAPSHOT_LOAD", &n.load_frame, &n.load_path}}) {
+        const std::string value = env(name);
+        if (const std::size_t comma = value.find(','); comma != std::string::npos) {
+            *frame = static_cast<std::uint32_t>(std::strtoul(value.substr(0, comma).c_str(), nullptr, 10));
+            *path = value.substr(comma + 1u);
         }
     }
     if (const std::string rate = env("GALAXY_NETPLAY_RATE"); !rate.empty()) {
@@ -279,6 +292,27 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
                 std::fflush(stderr);
                 n.snapshot_hooks.restore(n.snapshot_hooks.user);
             }
+        }
+        if (n.snapshot_hooks.write != nullptr && n.frame == n.write_frame) {
+            n.write_frame = 0xFFFFFFFFu;
+            const std::uint32_t frame = n.frame;
+            const std::uint32_t channel = n.channel;
+            const std::uint32_t buffer = n.buffer;
+            if (n.snapshot_hooks.write(n.snapshot_hooks.user, n.write_path.c_str(), frame)) {
+                // Another process loaded the file and resumed here: from now on its frames are the writer's.
+                n.frame = frame;
+                n.channel = channel;
+                n.buffer = buffer;
+                n.write_frame = 0xFFFFFFFFu;
+                n.load_frame = 0xFFFFFFFFu;
+                std::fprintf(stderr, "[netplay] joined: resumed at frame %u from a snapshot file\n", frame);
+            }
+        }
+        if (n.snapshot_hooks.load != nullptr && n.frame == n.load_frame) {
+            n.load_frame = 0xFFFFFFFFu;
+            std::fprintf(stderr, "[netplay] frame %u: loading %s\n", n.frame, n.load_path.c_str());
+            std::fflush(stderr);
+            n.snapshot_hooks.load(n.snapshot_hooks.user, n.load_path.c_str());
         }
         if (n.frame >= n.exit_frame) {
             // A probe run is over: its files are flushed and nothing else of it matters.

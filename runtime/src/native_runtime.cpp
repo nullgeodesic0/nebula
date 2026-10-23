@@ -11,6 +11,7 @@
 #include "galaxy/coop_guest.h"
 #include "galaxy/odyssey_moveset_guest.h"
 #include "galaxy/coop_scheduler.h"
+#include "galaxy/hot_join.h"
 #include "galaxy/native_call_admission.h"
 #include "galaxy/experimental_ultrawide_aspect.h"
 #include "galaxy/layout_aspect.h"
@@ -30356,6 +30357,170 @@ void rollback_copy_ram(RollbackSnapshot& s, bool to_snapshot) {
     }
 }
 
+std::string rollback_env(const char* name) {
+    char* value = nullptr;
+    std::string out;
+    if (_dupenv_s(&value, nullptr, name) == 0 && value != nullptr) {
+        out = value;
+        std::free(value);
+    }
+    return out;
+}
+
+// GALAXY_SNAPSHOT_SCAN=<file>: a snapshot's stacks with this process's address map, for
+// tools/agent/snapshot_scan.py to find every host address the stacks hold (hot join: what a second process must
+// have at the same place). Little-endian: "NBSCAN1\0"; stacks (slot, sp, size, bytes); labels (lo, hi, name);
+// regions (VirtualQuery: base, size, allocation base, state, type, protect); busy heap blocks (address, size).
+void rollback_write_scan(const RollbackSnapshot& s, const std::string& path) {
+    std::FILE* file = nullptr;
+    if (fopen_s(&file, path.c_str(), "wb") != 0 || file == nullptr) return;
+    const auto u32 = [&](std::uint32_t v) { std::fwrite(&v, sizeof(v), 1, file); };
+    const auto u64 = [&](std::uint64_t v) { std::fwrite(&v, sizeof(v), 1, file); };
+    std::fwrite("NBSCAN1\0", 8, 1, file);
+    // Stacks, then the scheduler's chain words as a pseudo stack (slot -2).
+    u32(static_cast<std::uint32_t>(s.scheduler.stacks.size() + 1u));
+    for (const auto& image : s.scheduler.stacks) {
+        u32(static_cast<std::uint32_t>(image.slot));
+        u64(reinterpret_cast<std::uint64_t>(image.sp));
+        u64(image.bytes.size());
+        std::fwrite(image.bytes.data(), 1, image.bytes.size(), file);
+    }
+    std::vector<std::uint64_t> chains;
+    for (const auto& [thread, fiber] : s.scheduler.fibers) {
+        chains.insert(chains.end(), std::begin(fiber.chain.words), std::end(fiber.chain.words));
+    }
+    u32(static_cast<std::uint32_t>(-2));
+    u64(0u);
+    u64(chains.size() * 8u);
+    std::fwrite(chains.data(), 8, chains.size(), file);
+
+    std::vector<std::pair<std::pair<std::uint64_t, std::uint64_t>, std::string>> labels;
+    const auto label = [&](const void* at, std::size_t size, std::string name) {
+        const auto lo = reinterpret_cast<std::uint64_t>(at);
+        labels.push_back({{lo, lo + size}, std::move(name)});
+    };
+    HMODULE modules[1024];
+    DWORD needed = 0;
+    if (EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed)) {
+        for (DWORD i = 0; i < needed / sizeof(HMODULE) && i < 1024u; ++i) {
+            MODULEINFO info{};
+            char name[MAX_PATH]{};
+            GetModuleInformation(GetCurrentProcess(), modules[i], &info, sizeof(info));
+            GetModuleBaseNameA(GetCurrentProcess(), modules[i], name, MAX_PATH);
+            label(info.lpBaseOfDll, info.SizeOfImage, std::string("module:") + name);
+        }
+    }
+    label(s.state, sizeof(RuntimeState), "anchor:RuntimeState");
+    label(s.context, sizeof(galaxy::PpcContext), "anchor:PpcContext");
+    label(s.memory, sizeof(galaxy::GuestMemoryV1), "anchor:GuestMemoryV1");
+    label(s.state->coop.get(), sizeof(galaxy::coop::Scheduler), "anchor:Scheduler");
+    label(s.state->timeline.get(), sizeof(*s.state->timeline), "anchor:RuntimeTimeline");
+    label(s.state->deadline_broker.get(), sizeof(*s.state->deadline_broker), "anchor:DeadlineBroker");
+    if (s.state->vi_deadline_consumer != nullptr) {
+        label(s.state->vi_deadline_consumer.get(), sizeof(*s.state->vi_deadline_consumer), "anchor:ViDeadlineConsumer");
+    }
+    label(s.state->services, sizeof(*s.state->services), "anchor:NativeServicesV1");
+    label(s.state->address_space, sizeof(*s.state->address_space), "anchor:GuestAddressSpace");
+    label(&s, sizeof(s), "anchor:RollbackSnapshot");
+    label(reinterpret_cast<const void*>(galaxy::host::flat_guest_memory::kGuestBase),
+          galaxy::host::flat_guest_memory::kGuestSpaceSize, "guest:flat");
+    for (std::uint32_t r = 0; r < s.memory->region_count; ++r) {
+        const galaxy::GuestMemoryRegionV1& region = s.memory->regions[r];
+        if (region.host_base == nullptr) continue;
+        char name[64];
+        std::snprintf(name, sizeof(name), "guest:region%u@%08X", r, region.guest_base);
+        label(region.host_base, region.size, name);
+    }
+    u32(static_cast<std::uint32_t>(labels.size()));
+    for (const auto& [range, name] : labels) {
+        u64(range.first);
+        u64(range.second);
+        u32(static_cast<std::uint32_t>(name.size()));
+        std::fwrite(name.data(), 1, name.size(), file);
+    }
+
+    std::vector<MEMORY_BASIC_INFORMATION> regions;
+    for (std::uint64_t at = 0u; at < 0x7FFFFFFF0000ull;) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<const void*>(at), &info, sizeof(info)) == 0) break;
+        if (info.State != MEM_FREE) regions.push_back(info);
+        at = reinterpret_cast<std::uint64_t>(info.BaseAddress) + info.RegionSize;
+    }
+    u32(static_cast<std::uint32_t>(regions.size()));
+    for (const auto& info : regions) {
+        u64(reinterpret_cast<std::uint64_t>(info.BaseAddress));
+        u64(info.RegionSize);
+        u64(reinterpret_cast<std::uint64_t>(info.AllocationBase));
+        u32(info.State);
+        u32(info.Type);
+        u32(info.Protect);
+    }
+
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> blocks;
+    HANDLE heaps[256];
+    const DWORD heap_count = GetProcessHeaps(256, heaps);
+    for (DWORD h = 0; h < heap_count && h < 256u; ++h) {
+        if (!HeapLock(heaps[h])) continue;
+        PROCESS_HEAP_ENTRY entry{};
+        while (HeapWalk(heaps[h], &entry)) {
+            if ((entry.wFlags & PROCESS_HEAP_ENTRY_BUSY) != 0) {
+                blocks.push_back({reinterpret_cast<std::uint64_t>(entry.lpData), entry.cbData});
+            }
+        }
+        HeapUnlock(heaps[h]);
+    }
+    u32(static_cast<std::uint32_t>(blocks.size()));
+    for (const auto& [at, size] : blocks) {
+        u64(at);
+        u64(size);
+    }
+
+    // Each parked stack's frames by its unwind data, from coop_context_switch's frame (every fiber is parked
+    // here: the stacks are as captured). Per stack: frame count, then (rip, rsp) and where each frame's caller
+    // saved rbx/rbp/rsi/rdi/r12-r15 (0 if not on this stack).
+    for (const auto& image : s.scheduler.stacks) {
+        const auto* sp = static_cast<const std::uint64_t*>(image.sp);
+        const std::uint64_t top = reinterpret_cast<std::uint64_t>(image.sp) + image.bytes.size();
+        CONTEXT context{};
+        context.Rbp = sp[0xC0 / 8];
+        context.Rbx = sp[0xC8 / 8];
+        context.Rdi = sp[0xD0 / 8];
+        context.Rsi = sp[0xD8 / 8];
+        context.R12 = sp[0xE0 / 8];
+        context.R13 = sp[0xE8 / 8];
+        context.R14 = sp[0xF0 / 8];
+        context.R15 = sp[0xF8 / 8];
+        context.Rip = sp[0x100 / 8];
+        context.Rsp = reinterpret_cast<std::uint64_t>(image.sp) + 0x108u;
+        std::vector<std::uint64_t> frames;
+        for (int depth = 0; depth < 4096 && context.Rip != 0u && context.Rsp < top; ++depth) {
+            KNONVOLATILE_CONTEXT_POINTERS saved{};
+            frames.push_back(context.Rip);
+            frames.push_back(context.Rsp);
+            DWORD64 image_base = 0u;
+            PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
+            if (entry == nullptr) {
+                context.Rip = *reinterpret_cast<const std::uint64_t*>(context.Rsp);
+                context.Rsp += 8u;
+            } else {
+                void* handler_data = nullptr;
+                DWORD64 establisher = 0u;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, entry, &context, &handler_data,
+                                 &establisher, &saved);
+            }
+            for (PDWORD64 at : {saved.Rbx, saved.Rbp, saved.Rsi, saved.Rdi, saved.R12, saved.R13, saved.R14,
+                                saved.R15}) {
+                frames.push_back(reinterpret_cast<std::uint64_t>(at));
+            }
+        }
+        u32(static_cast<std::uint32_t>(frames.size() / 10u));
+        std::fwrite(frames.data(), 8, frames.size(), file);
+    }
+    std::fclose(file);
+    std::fprintf(stderr, "[rollback] scan written to %s (%zu stacks, %zu heap blocks)\n", path.c_str(),
+                 s.scheduler.stacks.size(), blocks.size());
+}
+
 bool rollback_save(void* user) {
     auto& s = *static_cast<RollbackSnapshot*>(user);
     const auto save_started = std::chrono::steady_clock::now();
@@ -30380,8 +30545,10 @@ bool rollback_save(void* user) {
         return false;
     }
     // Resumed by rollback_restore: the stacks are back; now the rest.
+    galaxy::hot_join::trace("rollback_save resumed");
     const auto restore_started = std::chrono::steady_clock::now();
     galaxy::gx::restore_rollback_state(*s.gx);
+    galaxy::hot_join::trace("gx");
     // The render thread is idle: every detached VI receipt is complete and retires now.
     if (!poll_draw_done_submissions(*s.state) || !s.state->pending_draw_done_submissions.empty()) {
         throw RuntimeFailure("rollback restore left a render receipt outstanding");
@@ -30389,9 +30556,12 @@ bool rollback_save(void* user) {
     galaxy::coop_rollback_restore(*s.coop);
     galaxy::odyssey_rollback_restore(*s.odyssey);
     galaxy::voice::restore_playback(s.voice);
+    galaxy::hot_join::trace("coop, odyssey, voice");
     rollback_copy_ram(s, false);
     rollback_restore_runtime(*s.state, s.runtime);
+    galaxy::hot_join::trace("ram, runtime");
     s.state->address_space->restore_devices(*s.devices);
+    galaxy::hot_join::trace("devices");
     // Every cache keyed on guest memory (textures, display lists, decoded vertices) sees the restore as a write.
     for (std::uint32_t r = 0; r < s.memory->region_count; ++r) {
         const galaxy::GuestMemoryRegionV1& region = s.memory->regions[r];
@@ -30410,6 +30580,120 @@ bool rollback_save(void* user) {
 void rollback_restore(void* user) {
     auto& s = *static_cast<RollbackSnapshot*>(user);
     s.state->coop->restore(s.scheduler);
+}
+
+// --- Hot join (docs/HOT_JOIN.md): a snapshot written to a file and resumed in another process ---
+
+// Heap objects the guest threads' stacks point at (in saved registers and spills), besides the simulation thread's
+// own stack and thread-local blocks, which hot_join::host_ranges covers.
+std::vector<galaxy::hot_join::Anchor> hot_join_anchors(const RuntimeState& state) {
+    std::vector<galaxy::hot_join::Anchor> anchors{
+        {"RuntimeState", &state, sizeof(RuntimeState)},
+        {"PpcContext", rollback_snapshot().context, sizeof(galaxy::PpcContext)},
+        {"GuestMemoryV1", rollback_snapshot().memory, sizeof(galaxy::GuestMemoryV1)},
+        {"NativeServicesV1", state.services, sizeof(*state.services)},
+        {"GuestAddressSpace", state.address_space, sizeof(*state.address_space)},
+        {"Scheduler", state.coop.get(), sizeof(galaxy::coop::Scheduler)},
+        {"RuntimeTimeline", state.timeline.get(), sizeof(*state.timeline)},
+        {"DeadlineBroker", state.deadline_broker.get(), sizeof(*state.deadline_broker)},
+    };
+    if (state.vi_deadline_consumer != nullptr) {
+        anchors.push_back({"ViDeadlineConsumer", state.vi_deadline_consumer.get(), sizeof(*state.vi_deadline_consumer)});
+    }
+    return anchors;
+}
+
+double hot_join_ms_since(std::chrono::steady_clock::time_point started) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+}
+
+// Saves the machine into the snapshot arena and writes it to `path`. Returns false; returns true in a second process
+// that loaded the file (hot_join_load) and resumed here.
+bool hot_join_write(void* user, const char* path, std::uint32_t frame) {
+    auto& live = *static_cast<RollbackSnapshot*>(user);
+    const auto started = std::chrono::steady_clock::now();
+    RollbackSnapshot* root = nullptr;
+    {
+        galaxy::hot_join::ArenaScope scope;
+        if (!galaxy::hot_join::arena_reset()) return false;
+        root = new RollbackSnapshot;
+        root->state = live.state;
+        root->context = live.context;
+        root->memory = live.memory;
+    }
+    bool resumed = false;
+    {
+        galaxy::hot_join::ArenaScope scope;
+        resumed = rollback_save(root);
+    }
+    if (resumed) {
+        galaxy::hot_join::trace("hot_join_write returns");
+        return true;
+    }
+    {
+        galaxy::hot_join::ArenaScope scope;
+        galaxy::host::GuestAddressSpace::own_device_snapshot(*root->devices);
+    }
+    const double save_ms = hot_join_ms_since(started);
+    std::vector<std::pair<const void*, std::size_t>> ram;
+    for (const auto& copy : root->ram) ram.push_back({copy.data(), copy.size()});
+    for (const auto& image : root->scheduler.stacks) ram.push_back({image.bytes.data(), image.bytes.size()});
+    if (galaxy::hot_join::audit_arena(ram) != 0u && !rollback_env("GALAXY_HOT_JOIN_TRACE").empty()) {
+        // The root is the arena's first object: name the runtime fields by their offsets in it.
+#define GALAXY_HOT_JOIN_FIELD_OFFSET(name)                                                     \
+    std::fprintf(stderr, "[hot-join] root+0x%zx runtime.%s\n",                                \
+                 offsetof(RollbackSnapshot, runtime) + offsetof(RollbackRuntimeFields, name), #name);
+        GALAXY_ROLLBACK_RUNTIME_FIELDS(GALAXY_HOT_JOIN_FIELD_OFFSET)
+#undef GALAXY_HOT_JOIN_FIELD_OFFSET
+    }
+    galaxy::hot_join::FileHeader header;
+    header.frame = frame;
+    header.root = reinterpret_cast<std::uint64_t>(root);
+    header.ranges = galaxy::hot_join::host_ranges(live.state, hot_join_anchors(*live.state));
+    const bool written = galaxy::hot_join::write_file(path, header);
+    std::fprintf(stderr, "[hot-join] frame %u: %s %s (%zu bytes of arena, %zu ranges): save %.1f ms, total %.1f ms\n",
+                 frame, written ? "wrote" : "FAILED to write", path, galaxy::hot_join::arena_used(),
+                 header.ranges.size(), save_ms, hot_join_ms_since(started));
+    return false;
+}
+
+// Loads a snapshot another process wrote and resumes it: the fiber that wrote it continues inside hot_join_write.
+// Returns only if the file cannot be used.
+void hot_join_load(void* user, const char* path) {
+    auto& live = *static_cast<RollbackSnapshot*>(user);
+    const auto started = std::chrono::steady_clock::now();
+    galaxy::hot_join::FileHeader header;
+    if (!galaxy::hot_join::read_file(path, header)) {
+        std::fprintf(stderr, "[hot-join] cannot load %s\n", path);
+        return;
+    }
+    const double read_ms = hot_join_ms_since(started);
+    auto* root = reinterpret_cast<RollbackSnapshot*>(header.root);
+    root->state = live.state;
+    root->context = live.context;
+    root->memory = live.memory;
+    const auto here = galaxy::hot_join::host_ranges(live.state, hot_join_anchors(*live.state));
+    std::vector<std::string> unmatched;
+    std::size_t moved = 0u;
+    for (auto& image : root->scheduler.stacks) {
+        moved += galaxy::hot_join::relocate(image.bytes.data(), image.bytes.size(), header.ranges, here, &unmatched);
+    }
+    for (const auto& range : header.ranges) {
+        const auto same = std::find_if(here.begin(), here.end(), [&](const auto& r) { return r.name == range.name; });
+        if (same != here.end() && same->lo != range.lo) {
+            std::fprintf(stderr, "[hot-join]   %s moved 0x%llx -> 0x%llx\n", range.name.c_str(),
+                         static_cast<unsigned long long>(range.lo), static_cast<unsigned long long>(same->lo));
+        }
+    }
+    for (const auto& name : unmatched) std::fprintf(stderr, "[hot-join]   %s: not in this process\n", name.c_str());
+    live.state->coop->adopt_stacks(root->scheduler);
+    live.state->address_space->adopt_device_snapshot(*root->devices);
+    std::fprintf(stderr, "[hot-join] loaded frame %u from %s: read %.1f ms, %zu stack words relocated, %.1f ms\n",
+                 header.frame, path, read_ms, moved, hot_join_ms_since(started));
+    std::fflush(stderr);
+    galaxy::hot_join::set_resuming(true);
+    galaxy::hot_join::trace("restore");
+    rollback_restore(root);
 }
 
 void start_cooperative_scheduler(
@@ -30431,6 +30715,9 @@ void start_cooperative_scheduler(
     host.idle = &coop_idle;
     host.call_guest = &coop_call_guest;
     host.exchange_chain = &coop_exchange_chain;
+    if (!rollback_env("GALAXY_SNAPSHOT_SCAN").empty()) {
+        host.captured = [](void*) { rollback_write_scan(rollback_snapshot(), rollback_env("GALAXY_SNAPSHOT_SCAN")); };
+    }
     state.coop_memory = memory;
     state.coop = std::make_unique<galaxy::coop::Scheduler>(host, coop_ram(), context);
     state.services->branch_checkpoint = &coop_branch_checkpoint;
@@ -30445,7 +30732,7 @@ void start_cooperative_scheduler(
         if (!profile_resim) return;
         g_sim_profiler.set_sampling(on);
         if (!on) g_sim_profiler.stop_and_print(std::cerr);
-    }});
+    }, &hot_join_write, &hot_join_load});
     if (read_env_flag("GALAXY_SIM_PROFILE_RESIM", false)) g_sim_profiler.set_sampling(false);
     galaxy::netplay_set_digest_hook(
         [](void* user) {
