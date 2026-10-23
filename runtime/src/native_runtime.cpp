@@ -1,5 +1,6 @@
 #include "galaxy/native_api.h"
 #include "galaxy/crash_notes.h"
+#include "galaxy/netplay.h"
 #include "nebula_build_identity.h"
 #include "galaxy/ai_dma_timing.h"
 #include "galaxy/checkpoint_gate.h"
@@ -5135,6 +5136,21 @@ bool realtime_vi_active(const RuntimeState& state) {
 // checkpoints the generated code passes (ticks_per_checkpoint each, inline or full) and jumps to the next deadline
 // when the guest idles (deterministic_advance_to); the deadline broker publishes on the simulation thread
 // (DeadlineBroker::poll); the host clock only paces the result to real time.
+// GALAXY_DETERMINISTIC_UNPACED=1 (with GALAXY_DETERMINISTIC): virtual time never waits for real time to catch up,
+// for fast replays (tools/agent/determinism.py) and, later, rollback re-simulation.
+bool deterministic_unpaced() {
+    static const bool enabled = read_env_flag("GALAXY_DETERMINISTIC_UNPACED", false);
+    return enabled;
+}
+
+bool deterministic_mode();
+
+// How long a frame-completion probe may block for the render thread: 0 (a probe; the guest runs on meanwhile)
+// normally, a real wait in deterministic mode.
+std::uint32_t deterministic_pe_wait_ms() {
+    return deterministic_mode() ? 2000u : 0u;
+}
+
 bool deterministic_mode() {
     static const bool enabled = [] {
         const bool on = read_env_flag("GALAXY_DETERMINISTIC", false);
@@ -5146,6 +5162,27 @@ bool deterministic_mode() {
             // _putenv_s, not SetEnvironmentVariable: the flags are read with getenv_s, from the CRT's copy.
             (void)_putenv_s("GALAXY_ASYNC_DISC_READS", "0");
             (void)_putenv_s("GALAXY_ASYNC_NAND_WRITES", "0");
+            // PE finish/token events are raised when the FIFO is submitted, on this thread, rather than at the
+            // render thread's GPU fence; EFB peeks read the exact value instead of the render thread's last
+            // published field. (The incremental gather-pipe scan, GALAXY_SCAN_PE_EVENTS_ON_SIM_THREAD, is not
+            // used: with it, a capture taken past the scanned bytes desynchronizes the event parser.)
+            (void)_putenv_s("GALAXY_PE_EVENTS_GPU_FENCE", "0");
+            (void)_putenv_s("GALAXY_SUBMIT_GX_AT_DRAW_DONE_WAIT", "0");
+            (void)_putenv_s("GALAXY_SCAN_PE_EVENTS_ON_SIM_THREAD", "0");
+            (void)_putenv_s("GALAXY_EFB_PEEK_EXACT", "1");
+            if (deterministic_unpaced()) {
+                // Nothing paces the run: frames are not shown (the render thread then never waits on the
+                // display), the renderer works from snapshots instead of draining before each frame, and audio is
+                // off (its output would block once real time fell behind).
+                std::cerr << "[deterministic] unpaced: as fast as the machine runs, no presents, no audio\n";
+                (void)_putenv_s("GALAXY_SKIP_PRESENT", "1");
+                (void)_putenv_s("GALAXY_SMOOTH_REALTIME_PRESENT", "0");
+                (void)_putenv_s("GALAXY_VSYNC_INTERVAL", "0");
+                (void)_putenv_s("GALAXY_RENDER_LIVE_MEMORY_WAIT", "0");
+                (void)_putenv_s("GALAXY_RENDER_MEMORY_SNAPSHOT", "1");
+                (void)_putenv_s("GALAXY_RENDER_QUEUE_DEPTH", "8");
+                (void)_putenv_s("GALAXY_AUDIO_DISABLE", "1");
+            }
         }
         return on;
     }();
@@ -16727,8 +16764,19 @@ bool dispatch_external_interrupt(
     bool exact_idle_ee = false) {
     if (state.pending_transfer.active) return false;
     if (state.coop != nullptr) {
-        return coop_dispatch_external_interrupt(
-            state, resume_address, context, memory, exact_idle_ee);
+        if (!galaxy::netplay_tracing() || context == nullptr || memory == nullptr || state.services == nullptr) {
+            return coop_dispatch_external_interrupt(state, resume_address, context, memory, exact_idle_ee);
+        }
+        const std::uint32_t cause = galaxy::guest_load_u32(memory, 0xCC003000u, state.services, resume_address) &
+                                    galaxy::guest_load_u32(memory, 0xCC003004u, state.services, resume_address);
+        const bool delivered =
+            coop_dispatch_external_interrupt(state, resume_address, context, memory, exact_idle_ee);
+        if (delivered) {
+            galaxy::netplay_trace("irq cause=%08x cp=%llu t=%llu pc=%08x", cause,
+                                  static_cast<unsigned long long>(state.checkpoint_count),
+                                  static_cast<unsigned long long>(state.timeline->now_ticks()), resume_address);
+        }
+        return delivered;
     }
     constexpr std::uint32_t kPiInterruptCause = 0xCC003000u;
     constexpr std::uint32_t kPiInterruptMask = 0xCC003004u;
@@ -17930,10 +17978,12 @@ void wait_for_frame_pe_completion_cooperatively(
         // Probe the exact token without consuming time first, service native
         // devices below, then make the bounded wait with the same high-
         // resolution timer used by the real-time VI path.
+        // Deterministic mode blocks for the token instead: no guest-visible time passes while the render thread
+        // works, so the boundary completes at the same guest instant however long the GPU takes.
         bool complete = false;
         try {
             complete = poll_draw_done_submissions(state) &&
-                galaxy::gx::wait_for_frame_pe_completion_for(token, 0u);
+                galaxy::gx::wait_for_frame_pe_completion_for(token, deterministic_pe_wait_ms());
         } catch (const std::exception& error) {
             throw RuntimeFailure(
                 std::string(boundary) +
@@ -18743,9 +18793,24 @@ bool idle_loop_sleep_enabled() {
 // Deterministic mode: the guest waits, with nothing to run, for a deadline at `target_ticks`. Real time catches up
 // with it first (the game keeps its pace: a virtual tick is a real one, re-anchored after a long stall or a slow
 // stretch), then virtual time jumps there and the deadlines due publish.
-void deterministic_advance_to(RuntimeState& state, std::uint64_t target_ticks) {
+// GALAXY_DETERMINISTIC_TRACE=<file>: one line per virtual-time jump (game frame, checkpoints, from, to, why), to
+// find where two replays' clocks part.
+void trace_deterministic_advance(const RuntimeState& state, const char* why, std::uint64_t from, std::uint64_t to) {
+    if (!galaxy::netplay_tracing()) return;
+    galaxy::netplay_trace("advance %s cp=%llu %llu->%llu", why,
+                          static_cast<unsigned long long>(state.checkpoint_count),
+                          static_cast<unsigned long long>(from), static_cast<unsigned long long>(to));
+}
+
+void deterministic_advance_to(RuntimeState& state, std::uint64_t target_ticks, const char* why) {
     const std::uint64_t now = runtime_time_base_ticks(state);
     if (target_ticks <= now) return;
+    trace_deterministic_advance(state, why, now, target_ticks);
+    if (deterministic_unpaced()) {
+        state.virtual_idle_ticks += target_ticks - now;
+        (void)runtime_time_base_ticks(state);  // publishes what is now due
+        return;
+    }
     static std::chrono::steady_clock::time_point anchor_real{};
     static std::uint64_t anchor_ticks = 0u;
     const auto real_now = std::chrono::steady_clock::now();
@@ -18785,7 +18850,7 @@ void idle_loop_wait_for_next_deadline(RuntimeState& state) {
         const std::uint64_t now = runtime_time_base_ticks(state);
         const std::optional<std::uint64_t> next = state.deadline_broker->poll(now);
         if (next.has_value() && *next > now && state.deadline_events.mask() == 0u) {
-            deterministic_advance_to(state, *next);
+            deterministic_advance_to(state, *next, "idle");
             ++state.idle_loop_sleeps;
         }
         return;
@@ -19021,7 +19086,7 @@ void wait_for_exact_vi_deadline(
         if (deterministic_mode()) {
             // The retrace is the next thing that can happen: go there (paced to real time).
             if (observation.status == galaxy::timing::PeriodicConsumeStatus::NotDue) {
-                deterministic_advance_to(state, observation.expected_deadline_ticks);
+                deterministic_advance_to(state, observation.expected_deadline_ticks, "vi");
             } else {
                 (void)runtime_time_base_ticks(state);
             }
@@ -19200,11 +19265,13 @@ bool advance_pending_vi_boundary(
                 // persistent boundary must not park the simulation thread in
                 // GxBackend's condition-variable wait while it remains the
                 // sole owner of the real AI/input hardware deadlines.
+                // In deterministic mode this blocks (deterministic_pe_wait_ms): other guest threads must not run
+                // on while the render thread finishes, or the VI interrupt lands at a host-dependent guest time.
                 bool complete = false;
                 try {
                     complete = galaxy::gx::wait_for_frame_pe_completion_for(
                         snapshot.token,
-                        0u);
+                        deterministic_pe_wait_ms());
                 } catch (const std::exception& error) {
                     throw RuntimeFailure(
                         "persistent VI PE token failed"
@@ -29989,7 +30056,9 @@ void coop_idle_spin(RuntimeState& state) {
         // Spinning would never see virtual time move: go to the next thing that can happen instead (a broker
         // deadline or the AI DMA completion), or a spin's worth of time when there is none.
         if (state.deadline_events.mask() != 0u || state.address_space->pe_finish_pending() ||
-            state.address_space->pe_token_pending()) {
+            state.address_space->pe_token_pending() ||
+            (sim_thread_pe_scan_enabled() &&
+             state.address_space->gx_fifo_pe_scan_pending(state.pe_scanned_fifo_bytes))) {
             return;
         }
         std::uint64_t target = start + kSpinTicks;
@@ -29999,7 +30068,7 @@ void coop_idle_spin(RuntimeState& state) {
             }
         }
         if (ai_due > start) target = std::min(target, ai_due);
-        deterministic_advance_to(state, target);
+        deterministic_advance_to(state, target, "spin");
         return;
     }
     for (;;) {
@@ -32566,6 +32635,8 @@ int wmain(int argc, wchar_t** argv) {
             _wputenv_s(L"GALAXY_EXPERIMENTAL_DYNAMIC_ASPECT", L"1");
         }
     }
+    // Deterministic mode sets the flags it depends on in the environment; settle it before anything reads them.
+    (void)deterministic_mode();
     // Wall-clock anchor for the one-line VI-cadence summary printed at normal exit. vi_retrace_count is the
     // guest's own 60 Hz timebase (kViRetracePeriodTicks = kWiiTimeBaseHz / 60), advanced by its only increment
     // site. Dividing the final count by elapsed seconds reports whether the guest's timebase is honoured, at zero

@@ -1593,6 +1593,18 @@ bool smooth_realtime_present_enabled() {
     return enabled;
 }
 
+// GALAXY_SKIP_PRESENT=1: frames are rendered but never shown, so nothing paces the render thread (deterministic
+// unpaced replays, GALAXY_DETERMINISTIC_UNPACED, set it).
+bool skip_present_enabled() {
+    static const bool enabled = [] {
+        char value[16]{};
+        std::size_t length = 0;
+        return getenv_s(&length, value, sizeof(value), "GALAXY_SKIP_PRESENT") == 0 && length > 1 &&
+               value[0] != '0';
+    }();
+    return enabled;
+}
+
 std::uint64_t smooth_realtime_present_max_wait_us() {
     static const std::uint64_t wait_us = [] {
         char value[32]{};
@@ -6361,6 +6373,9 @@ void RendererD3D12::pace_present_if_needed(
 }
 
 void RendererD3D12::present_to_swap_chain() {
+    if (skip_present_enabled()) {
+        return;
+    }
     const bool stall_watch = trace_stall_watch_enabled();
     const RenderConfig cfg = get_render_config();
     const UINT vsync = present_sync_interval(std::min(2u, cfg.vsync_interval), cfg.max_fps);

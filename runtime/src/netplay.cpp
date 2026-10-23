@@ -3,6 +3,7 @@
 #include "guest_access.h"
 
 #include <array>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +11,11 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 namespace galaxy {
 
@@ -20,6 +26,10 @@ namespace galaxy {
 // from kFrameReadSite (JUTException::readPad's call, a diagnostic, is not one). Channel 0's synthetic answer
 // (native_runtime.cpp) and channel 1's (coop_guest.cpp fill_partner_kpad) are both written by the time the
 // after-hook runs: the KPADStatus at the buffer and the sample count in r3.
+//
+// Probe switches: GALAXY_INPUT_RECORD / GALAXY_INPUT_REPLAY=<file>; GALAXY_STATE_HASH=<file> with _EVERY=<n>,
+// _FROM=<frame> and _CHUNKS=1 (per-megabyte hashes); GALAXY_STATE_DUMP=<frame>,<file>; GALAXY_STATE_EXIT_FRAME=<n>.
+// tools/agent/determinism.py drives them.
 
 namespace {
 
@@ -37,6 +47,8 @@ struct Netplay {
     std::FILE* record = nullptr;
     std::FILE* hashes = nullptr;
     std::uint32_t hash_every = 60u;
+    std::uint32_t hash_from = 0u;              // GALAXY_STATE_HASH_FROM: no hashes before this frame
+    std::uint32_t exit_frame = 0xFFFFFFFFu;    // GALAXY_STATE_EXIT_FRAME: quit when this frame starts
     bool hash_chunks = false;
     std::map<std::pair<std::uint32_t, std::uint32_t>, Sample> replay;  // (frame, channel)
     std::uint32_t frame = 0u;    // game frames so far (channel 0 reads at kFrameReadSite)
@@ -88,6 +100,12 @@ void initialize(Netplay& n) {
             n.hash_every = static_cast<std::uint32_t>(std::max(1, std::atoi(every.c_str())));
         }
         n.hash_chunks = !env("GALAXY_STATE_HASH_CHUNKS").empty();
+        if (const std::string from = env("GALAXY_STATE_HASH_FROM"); !from.empty()) {
+            n.hash_from = static_cast<std::uint32_t>(std::strtoul(from.c_str(), nullptr, 10));
+        }
+    }
+    if (const std::string exit_at = env("GALAXY_STATE_EXIT_FRAME"); !exit_at.empty()) {
+        n.exit_frame = static_cast<std::uint32_t>(std::strtoul(exit_at.c_str(), nullptr, 10));
     }
     if (const std::string dump = env("GALAXY_STATE_DUMP"); !dump.empty()) {
         if (const std::size_t comma = dump.find(','); comma != std::string::npos) {
@@ -152,8 +170,16 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
     n.buffer = context->gpr[4];
     if (n.channel == 0u) {
         // A frame starts: its state before this frame's input.
-        if (n.hashes != nullptr && n.frame % n.hash_every == 0u) write_hash(n, memory);
+        if (n.hashes != nullptr && n.frame >= n.hash_from && n.frame % n.hash_every == 0u) write_hash(n, memory);
         if (n.dump_frame == n.frame && !n.dump_path.empty()) write_dump(n, memory);
+        if (n.frame >= n.exit_frame) {
+            // A probe run is over: its files are flushed and nothing else of it matters.
+            if (n.hashes != nullptr) std::fclose(n.hashes);
+            if (n.record != nullptr) std::fclose(n.record);
+            std::fprintf(stderr, "[netplay] frame %u reached: exiting\n", n.frame);
+            std::fflush(stderr);
+            TerminateProcess(GetCurrentProcess(), 0);
+        }
     }
 }
 
@@ -205,6 +231,34 @@ std::uint32_t netplay_pending_channel() noexcept {
 
 std::uint32_t netplay_frame() noexcept {
     return netplay().frame;
+}
+
+namespace {
+std::FILE* trace_file() noexcept {
+    static std::FILE* file = [] {
+        std::FILE* f = nullptr;
+        const std::string path = env("GALAXY_DETERMINISTIC_TRACE");
+        if (!path.empty() && fopen_s(&f, path.c_str(), "w") != 0) f = nullptr;
+        return f;
+    }();
+    return file;
+}
+}  // namespace
+
+bool netplay_tracing() noexcept {
+    return trace_file() != nullptr;
+}
+
+void netplay_trace(const char* format, ...) noexcept {
+    std::FILE* file = trace_file();
+    if (file == nullptr) return;
+    std::fprintf(file, "%u ", netplay().frame);
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(file, format, args);
+    va_end(args);
+    std::fputc('\n', file);
+    std::fflush(file);
 }
 
 }  // namespace galaxy

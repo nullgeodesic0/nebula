@@ -2,6 +2,7 @@
 
 #include "galaxy/ai_dma_timing.h"
 #include "galaxy/native_audio_anomaly.h"
+#include "galaxy/netplay.h"
 #include "galaxy/native_audio_queue.h"
 #include "galaxy/agent.h"
 #include "galaxy/button_prompts.h"
@@ -15130,6 +15131,12 @@ void GuestAddressSpace::post_next_ipc_reply() {
     latched_reply_acked_ = false;
     latched_reply_read_by_handler_ = false;
     latched_reply_release_deferred_ = false;
+    if (galaxy::netplay_tracing()) {
+        galaxy::netplay_trace("ipc-reply req=%08x cmd=%u fd=%d t=%llu", physical_request,
+                              read_u32(physical_request), static_cast<int>(read_u32(physical_request + 8u)),
+                              static_cast<unsigned long long>(
+                                  tick_source_ != nullptr ? tick_source_(tick_source_user_) : 0u));
+    }
     write_storage_be32(
         hollywood_registers_, kIpcReplyRegisterOffset, physical_request);
     write_storage_be32(
