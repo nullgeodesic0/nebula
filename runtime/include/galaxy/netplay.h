@@ -53,6 +53,11 @@ struct NetplaySnapshotHooks {
     void (*load_image)(void* user, const std::uint8_t* data, std::size_t size) = nullptr;
     // The joiner catching up: unpaced and unrendered while on.
     void (*catch_up)(void* user, bool on) = nullptr;
+    // Rollback's ring (native_runtime.cpp): ring_save keeps frame `frame` and returns false, or true when
+    // ring_restore brought the machine back to it (ring_restore does not return); ring_has: still kept.
+    bool (*ring_save)(void* user, std::uint32_t frame) = nullptr;
+    void (*ring_restore)(void* user, std::uint32_t frame) = nullptr;
+    bool (*ring_has)(void* user, std::uint32_t frame) = nullptr;
 };
 // The snapshot hooks, for netplay_session.cpp.
 [[nodiscard]] const NetplaySnapshotHooks& netplay_snapshot_hooks() noexcept;

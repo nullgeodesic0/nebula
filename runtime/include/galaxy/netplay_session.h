@@ -76,6 +76,17 @@ void net_live_snapshot_taken(std::uint32_t frame, std::vector<std::uint8_t>&& im
 [[nodiscard]] const std::vector<std::uint8_t>* net_live_load_due(std::uint32_t frame);
 void net_live_resumed(std::uint32_t frame);  // joiner: running the host's game from its frame `frame`
 
+// Rollback (GALAXY_NET_ROLLBACK=1; GALAXY_NET_ROLLBACK_FRAMES, default 8, how far ahead of the peer's newest input a
+// PC may run). net_rollback_target, at a frame's start: the oldest frame that ran on a prediction now known wrong
+// (netplay.cpp restores it and simulates forward again), or 0xFFFFFFFF.
+[[nodiscard]] bool net_rollback_enabled() noexcept;
+// Whether `frame` may run on a prediction: rollback on, the peer connected, the session in lockstep. Only such
+// frames are kept for a rollback.
+[[nodiscard]] bool net_rollback_frame(std::uint32_t frame) noexcept;
+[[nodiscard]] std::uint32_t net_rollback_target(std::uint32_t frame);
+// Frames being simulated again: nothing of this PC (controller, peek answers) is sampled or sent anew.
+void net_set_resimulating(bool on) noexcept;
+
 // EFB peeks: this PC's answer for the `sequence`-th peek of `frame`, and the answer both PCs use (the host's,
 // from `delay + 1` frames earlier, or `local` before there is one).
 [[nodiscard]] std::uint32_t net_peek(std::uint32_t frame, std::uint32_t sequence, std::uint32_t local) noexcept;

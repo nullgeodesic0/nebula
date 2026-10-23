@@ -53,6 +53,8 @@ void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeService
 // a session's way back to it. While it passes the logo, both PCs' first player presses A.
 void rejoin_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc);
 [[nodiscard]] bool netplay_rejoin_press_a() noexcept;
+// A session's rejoin still playing its way back (its state is outside rollback's snapshot): no predictions then.
+[[nodiscard]] bool netplay_rejoin_active() noexcept;
 
 // Local hot join (docs/MULTIPLAYER.md "Drop in, drop out"): whether the second player is in the game, set by
 // coop_guest.cpp, read by the input thread to give him a controller of his own (native_host.cpp).

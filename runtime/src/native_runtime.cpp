@@ -88,6 +88,8 @@
 #include <Psapi.h>
 #include <iostream>
 #include <limits>
+#include <execution>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -5244,7 +5246,10 @@ void update_native_audio_output_gate(
     static const bool mute_during_fast_boot =
         read_env_flag("GALAXY_FAST_BOOT_MUTE_AUDIO", false);
     if (state.address_space != nullptr) {
-        const bool enabled = use_realtime_vi || !mute_during_fast_boot;
+        // Frames simulated again (a rollback) or caught up (a live join) were heard already, or are not this PC's
+        // to play: the host sink gets none of their samples. Only the output: the guest's audio timing is as ever.
+        const bool enabled = (use_realtime_vi || !mute_during_fast_boot) &&
+                             !g_hot_join_catch_up.load(std::memory_order_relaxed);
         if (!state.native_audio_output_gate_valid ||
             state.native_audio_output_gate_enabled != enabled) {
             state.address_space->set_native_audio_output_enabled(enabled);
@@ -26059,7 +26064,7 @@ void call_guest_impl_body(
             static bool s_r4zero_attempted = false;
             if (trace_runtime_scaffolding() && !s_r4zero_attempted) {
                 s_r4zero_attempted = true;
-                std::cout << "[io] fn_8041071C r4=0 → running real function"
+                std::cout << "[io] fn_8041071C r4=0 â†’ running real function"
                              " (fields clean, may trigger DVD reads)\n";
             }
             // Fall through - let the real translated function run.
@@ -30550,19 +30555,40 @@ bool rollback_save(void* user) {
         std::fprintf(stderr, "[rollback] %s took %.2f ms\n", what,
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - save_started).count());
     };
+    // GALAXY_ROLLBACK_TIMING=1: what each part of a save costs, in microseconds.
+    static const bool part_timing = read_env_flag("GALAXY_ROLLBACK_TIMING", false);
+    auto part_started = std::chrono::steady_clock::now();
+    std::string parts;
+    const auto part = [&](const char* name) {
+        if (!part_timing) return;
+        const auto now = std::chrono::steady_clock::now();
+        char text[48];
+        std::snprintf(text, sizeof(text), " %s=%lld", name, static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - part_started).count()));
+        parts += text;
+        part_started = now;
+    };
     rollback_copy_ram(s, true);
+    part("ram");
     s.registers = *s.context;
     s.callback_depth = g_branch_checkpoint_callback_depth;
     s.checkpoint_pc = g_active_branch_checkpoint_pc;
     rollback_save_runtime(*s.state, s.runtime);
+    part("runtime");
     if (s.devices == nullptr) s.devices = galaxy::host::GuestAddressSpace::make_device_snapshot();
     s.state->address_space->save_devices(*s.devices);
+    part("devices");
     if (s.gx == nullptr) s.gx = galaxy::gx::make_rollback_state();
     galaxy::gx::save_rollback_state(*s.gx);
+    part("gx");
     s.coop = galaxy::coop_rollback_save();
     s.odyssey = galaxy::odyssey_rollback_save();
     s.voice = galaxy::voice::save_playback();
-    if (!s.state->coop->save(s.scheduler)) {
+    part("coop+odyssey+voice");
+    const bool resumed = s.state->coop->save(s.scheduler);
+    if (!resumed) {
+        part("stacks");
+        if (part_timing) std::fprintf(stderr, "[rollback] save parts (us):%s\n", parts.c_str());
         log_time("save");
         return false;
     }
@@ -30602,6 +30628,294 @@ bool rollback_save(void* user) {
 void rollback_restore(void* user) {
     auto& s = *static_cast<RollbackSnapshot*>(user);
     s.state->coop->restore(s.scheduler);
+}
+
+// --- Rollback ring (netplay_session.cpp's prediction): a snapshot every frame, the guest RAM incrementally ---
+// One shadow copy of RAM holds it as of the newest saved frame. Each saved frame keeps an undo list: the 2 KiB
+// blocks written between it and the next saved frame, as they were at it (gx::harvest_rollback_dirty says which
+// were written). Restoring frame j puts back the blocks written since the newest save, then applies the undo lists
+// from the newest down to j's. The rest of the machine (stacks, registers, devices, GX, co-op state) is small and
+// is copied whole at every save. GALAXY_ROLLBACK_VERIFY=1 compares all of RAM with the shadow at every save, to
+// catch a writer the dirty record misses.
+constexpr std::size_t kRollbackRingSize = 16u;
+
+struct RollbackRingFrame {
+    bool valid = false;
+    std::uint32_t frame = 0u;
+    galaxy::coop::Scheduler::Snapshot scheduler;
+    RollbackRuntimeFields runtime;
+    std::shared_ptr<galaxy::host::GuestAddressSpace::DeviceSnapshot> devices;
+    std::shared_ptr<galaxy::gx::GxRollbackState> gx;
+    std::shared_ptr<galaxy::CoopRollbackState> coop;
+    std::shared_ptr<galaxy::OdysseyRollbackState> odyssey;
+    galaxy::voice::PlaybackState voice{};
+    galaxy::PpcContext registers{};
+    std::uint64_t callback_depth = 0u;
+    std::uint32_t checkpoint_pc = 0u;
+    std::vector<std::uint32_t> undo_blocks;  // physical block numbers
+    std::vector<std::byte> undo_bytes;       // kRollbackBlockBytes each, in undo_blocks order
+};
+
+struct RollbackRing {
+    std::array<RollbackRingFrame, kRollbackRingSize> frames;
+    std::size_t newest = 0u;       // slot of the newest saved frame
+    bool any = false;
+    std::byte* mem1 = nullptr;     // MEM1's and MEM2's host bytes (their first views)
+    std::byte* mem2 = nullptr;
+    std::vector<std::byte> shadow1, shadow2;
+    std::array<std::uint64_t, galaxy::gx::kRollbackDirtyWords> dirty{};
+    std::uint64_t saves = 0u;
+    double save_ms = 0.0;
+};
+
+RollbackRing& rollback_ring() {
+    static RollbackRing ring;
+    return ring;
+}
+
+// A physical 2 KiB block's live bytes and shadow bytes, or null outside MEM1/MEM2.
+std::pair<std::byte*, std::byte*> rollback_block(RollbackRing& r, std::uint32_t block) {
+    constexpr std::uint32_t kBlock = galaxy::gx::kRollbackBlockBytes;
+    const std::uint64_t physical = static_cast<std::uint64_t>(block) * kBlock;
+    if (physical + kBlock <= 0x01800000u) return {r.mem1 + physical, r.shadow1.data() + physical};
+    if (physical >= 0x10000000u && physical + kBlock <= 0x14000000u) {
+        const std::uint64_t at = physical - 0x10000000u;
+        return {r.mem2 + at, r.shadow2.data() + at};
+    }
+    return {nullptr, nullptr};
+}
+
+// The blocks written since the shadow was taken, found by comparing RAM with it, a megabyte per task in
+// parallel. The renderer's dirty record cannot say: translated stores publish to it only where the renderer needs
+// them, and device writes (audio, ARAM DMA) to other trackers or none (verify mode showed thousands unseen a frame).
+template <typename Visit>
+void rollback_for_each_dirty(RollbackRing& r, Visit&& visit) {
+    constexpr std::uint32_t kBlock = galaxy::gx::kRollbackBlockBytes;
+    constexpr std::uint32_t kChunkBytes = 0x00100000u;
+    constexpr std::uint32_t kMem1Chunks = 0x01800000u / kChunkBytes;
+    constexpr std::uint32_t kMem2Chunks = 0x04000000u / kChunkBytes;
+    std::array<std::vector<std::uint32_t>, kMem1Chunks + kMem2Chunks> changed;
+    std::array<std::uint32_t, kMem1Chunks + kMem2Chunks> chunks{};
+    for (std::uint32_t i = 0; i < chunks.size(); ++i) chunks[i] = i;
+    std::for_each(std::execution::par, chunks.begin(), chunks.end(), [&](std::uint32_t chunk) {
+        const bool mem1 = chunk < kMem1Chunks;
+        const std::size_t first = static_cast<std::size_t>(mem1 ? chunk : chunk - kMem1Chunks) * kChunkBytes;
+        const std::byte* live = (mem1 ? r.mem1 : r.mem2) + first;
+        const std::byte* shadow = (mem1 ? r.shadow1.data() : r.shadow2.data()) + first;
+        const std::uint32_t physical = (mem1 ? 0u : 0x10000000u) + static_cast<std::uint32_t>(first);
+        for (std::uint32_t at = 0; at < kChunkBytes; at += kBlock) {
+            if (std::memcmp(live + at, shadow + at, kBlock) != 0) changed[chunk].push_back((physical + at) / kBlock);
+        }
+    });
+    for (const auto& blocks : changed) {
+        for (const std::uint32_t block : blocks) visit(block);
+    }
+    r.dirty.fill(0u);
+}
+
+bool rollback_ring_attach(RollbackRing& r, const galaxy::GuestMemoryV1& memory) {
+    if (r.mem1 != nullptr) return true;
+    for (std::uint32_t i = 0; i < memory.region_count; ++i) {
+        const galaxy::GuestMemoryRegionV1& region = memory.regions[i];
+        if (region.host_base == nullptr || !rollback_region_is_first_view(memory, i)) continue;
+        if (region.size == 0x01800000u) r.mem1 = region.host_base;
+        if (region.size == 0x04000000u) r.mem2 = region.host_base;
+    }
+    if (r.mem1 == nullptr || r.mem2 == nullptr) return false;
+    r.shadow1.assign(r.mem1, r.mem1 + 0x01800000u);
+    r.shadow2.assign(r.mem2, r.mem2 + 0x04000000u);
+    r.dirty.fill(0u);
+    galaxy::gx::harvest_rollback_dirty(r.dirty.data());  // writes before the first save are in the shadow
+    r.dirty.fill(0u);
+    return true;
+}
+
+// Saves the machine as frame `frame`. Returns false; returns true when rollback_ring_restore brought the machine
+// back to this frame (the caller is then at the start of `frame` again).
+bool rollback_ring_save(std::uint32_t frame) {
+    RollbackSnapshot& s = rollback_snapshot();
+    RollbackRing& r = rollback_ring();
+    const auto started = std::chrono::steady_clock::now();
+    static const bool trace = read_env_flag("GALAXY_ROLLBACK_TRACE", false);
+    const auto step = [&](const char* what) {
+        if (trace) {
+            std::fprintf(stderr, "[rollback] save %u: %s\n", frame, what);
+            std::fflush(stderr);
+        }
+    };
+    step("start");
+    if (!rollback_ring_attach(r, *s.memory)) throw RuntimeFailure("rollback ring: no MEM1/MEM2 view");
+    step("attached");
+    // The blocks written since the newest save: their bytes at it go to its undo list, the shadow takes them on.
+    galaxy::gx::harvest_rollback_dirty(r.dirty.data());
+    step("harvested");
+    // The newest kept frame's undo list grows until the next kept frame (frames that cannot be kept are skipped),
+    // so a block can be in it more than once; a restore applies the list from its end, the first entry last.
+    RollbackRingFrame* previous = r.any ? &r.frames[r.newest] : nullptr;
+    constexpr std::uint32_t kBlock = galaxy::gx::kRollbackBlockBytes;
+    rollback_for_each_dirty(r, [&](std::uint32_t block) {
+        const auto [live, shadow] = rollback_block(r, block);
+        if (live == nullptr) return;
+        if (previous != nullptr) {
+            previous->undo_blocks.push_back(block);
+            previous->undo_bytes.insert(previous->undo_bytes.end(), shadow, shadow + kBlock);
+        }
+        std::memcpy(shadow, live, kBlock);
+    });
+    static const bool verify = read_env_flag("GALAXY_ROLLBACK_VERIFY", false);
+    if (verify) {
+        // Unseen writes, counted by 64 KiB area (physical), the busiest listed every 300 saves.
+        static std::map<std::uint32_t, std::uint64_t> s_unseen;
+        static std::uint64_t s_verified = 0u;
+        const auto check = [&](std::byte* live, std::byte* shadow, std::uint32_t size, std::uint32_t physical) {
+            for (std::uint32_t at = 0; at < size; at += kBlock) {
+                if (std::memcmp(live + at, shadow + at, kBlock) != 0) {
+                    ++s_unseen[(physical + at) & ~0xFFFFu];
+                    std::memcpy(shadow + at, live + at, kBlock);
+                }
+            }
+        };
+        check(r.mem1, r.shadow1.data(), 0x01800000u, 0u);
+        check(r.mem2, r.shadow2.data(), 0x04000000u, 0x10000000u);
+        if (++s_verified % 300u == 0u && !s_unseen.empty()) {
+            std::vector<std::pair<std::uint64_t, std::uint32_t>> busiest;
+            for (const auto& [area, count] : s_unseen) busiest.emplace_back(count, area);
+            std::sort(busiest.rbegin(), busiest.rend());
+            std::string line;
+            for (std::size_t i = 0; i < busiest.size() && i < 16u; ++i) {
+                char text[32];
+                std::snprintf(text, sizeof(text), " %08X:%llu", busiest[i].second,
+                              static_cast<unsigned long long>(busiest[i].first));
+                line += text;
+            }
+            std::fprintf(stderr, "[rollback] verify: blocks written unseen by 64 KiB area (%zu areas):%s\n",
+                         busiest.size(), line.c_str());
+        }
+    }
+    if (s.state->external_dispatch.active() || s.state->draw_done_submit_owed) {
+        // Not a frame a snapshot can hold (rollback_save_runtime): it is skipped, and a rollback to it goes back
+        // to an older kept frame instead. Its RAM is in the shadow: the next kept frame's undo covers it.
+        static std::uint64_t s_skipped = 0u;
+        if (s_skipped++ % 300u == 0u) {
+            std::fprintf(stderr, "[rollback] frame %u not kept (%s), %llu so far\n", frame,
+                         s.state->external_dispatch.active() ? "external dispatch" : "draw-done capture owed",
+                         static_cast<unsigned long long>(s_skipped));
+        }
+        return false;
+    }
+    const std::size_t slot = r.any ? (r.newest + 1u) % kRollbackRingSize : 0u;
+    RollbackRingFrame& f = r.frames[slot];
+    f.valid = true;
+    f.frame = frame;
+    f.undo_blocks.clear();
+    f.undo_bytes.clear();
+    f.registers = *s.context;
+    f.callback_depth = g_branch_checkpoint_callback_depth;
+    f.checkpoint_pc = g_active_branch_checkpoint_pc;
+    rollback_save_runtime(*s.state, f.runtime);
+    if (f.devices == nullptr) f.devices = galaxy::host::GuestAddressSpace::make_device_snapshot();
+    s.state->address_space->save_devices(*f.devices);
+    if (f.gx == nullptr) f.gx = galaxy::gx::make_rollback_state();
+    galaxy::gx::save_rollback_state(*f.gx);
+    f.coop = galaxy::coop_rollback_save();
+    f.odyssey = galaxy::odyssey_rollback_save();
+    f.voice = galaxy::voice::save_playback();
+    r.newest = slot;
+    r.any = true;
+    ++r.saves;
+    r.save_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    if (r.saves % 600u == 0u) {
+        std::fprintf(stderr, "[rollback] %llu saves, %.2f ms a save\n", static_cast<unsigned long long>(r.saves),
+                     r.save_ms / static_cast<double>(r.saves));
+    }
+    if (!s.state->coop->save(f.scheduler)) return false;
+    // Resumed by rollback_ring_restore, which put this slot back as the newest: the stacks are back; now the rest.
+    RollbackRingFrame& back = r.frames[r.newest];
+    galaxy::gx::restore_rollback_state(*back.gx);
+    if (!poll_draw_done_submissions(*s.state) || !s.state->pending_draw_done_submissions.empty()) {
+        throw RuntimeFailure("rollback ring restore left a render receipt outstanding");
+    }
+    galaxy::coop_rollback_restore(*back.coop);
+    galaxy::odyssey_rollback_restore(*back.odyssey);
+    galaxy::voice::restore_playback(back.voice);
+    rollback_restore_runtime(*s.state, back.runtime);
+    s.state->address_space->restore_devices(*back.devices);
+    *s.context = back.registers;
+    g_branch_checkpoint_callback_depth = back.callback_depth;
+    g_active_branch_checkpoint_pc = back.checkpoint_pc;
+    return true;
+}
+
+bool rollback_ring_save_logged(std::uint32_t frame) {
+    try {
+        return rollback_ring_save(frame);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "[rollback] save of frame %u failed: %s\n", frame, error.what());
+        std::fflush(stderr);
+        throw;
+    }
+}
+
+// The kept frame a rollback to `frame` restores: `frame` itself, or the newest kept one before it.
+std::size_t rollback_ring_slot_for(std::uint32_t frame) {
+    const RollbackRing& r = rollback_ring();
+    std::size_t best = kRollbackRingSize;
+    for (std::size_t i = 0; i < kRollbackRingSize; ++i) {
+        const RollbackRingFrame& f = r.frames[i];
+        if (f.valid && f.frame <= frame && (best == kRollbackRingSize || f.frame > r.frames[best].frame)) best = i;
+    }
+    return best;
+}
+
+// Whether a rollback to `frame` can be made.
+bool rollback_ring_has(std::uint32_t frame) {
+    return rollback_ring_slot_for(frame) != kRollbackRingSize;
+}
+
+// Back to the start of `frame` (a saved one): RAM first, then the jump into its save (rollback_ring_save returns
+// true there). Frames after it leave the ring.
+[[noreturn]] void rollback_ring_restore(std::uint32_t frame) {
+    RollbackSnapshot& s = rollback_snapshot();
+    RollbackRing& r = rollback_ring();
+    const std::size_t target = rollback_ring_slot_for(frame);
+    if (target == kRollbackRingSize) throw RuntimeFailure("rollback ring: frame " + std::to_string(frame) + " is gone");
+    constexpr std::uint32_t kBlock = galaxy::gx::kRollbackBlockBytes;
+    std::vector<std::uint32_t> touched;
+    // Written since the newest save: back to the shadow (the newest saved frame's bytes).
+    galaxy::gx::harvest_rollback_dirty(r.dirty.data());
+    rollback_for_each_dirty(r, [&](std::uint32_t block) {
+        const auto [live, shadow] = rollback_block(r, block);
+        if (live == nullptr) return;
+        std::memcpy(live, shadow, kBlock);
+        touched.push_back(block);
+    });
+    // Then back frame by frame, newest first, to the target; the frames after it are gone.
+    for (std::size_t slot = r.newest; slot != target;) {
+        slot = (slot + kRollbackRingSize - 1u) % kRollbackRingSize;
+        RollbackRingFrame& f = r.frames[slot];
+        for (std::size_t i = f.undo_blocks.size(); i-- > 0u;) {
+            const auto [live, shadow] = rollback_block(r, f.undo_blocks[i]);
+            if (live == nullptr) continue;
+            std::memcpy(live, f.undo_bytes.data() + i * kBlock, kBlock);
+            std::memcpy(shadow, f.undo_bytes.data() + i * kBlock, kBlock);
+            touched.push_back(f.undo_blocks[i]);
+        }
+        r.frames[(slot + 1u) % kRollbackRingSize].valid = false;
+    }
+    r.frames[target].undo_blocks.clear();
+    r.frames[target].undo_bytes.clear();
+    r.newest = target;
+    // Caches keyed on guest memory see the restored blocks as writes; the record those notifications leave behind
+    // is cleared, as RAM now equals the shadow.
+    std::sort(touched.begin(), touched.end());
+    touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+    for (const std::uint32_t block : touched) {
+        const std::uint32_t physical = block * kBlock;
+        galaxy::gx::notify_guest_memory_write(0x80000000u + physical, kBlock);  // the cached view of MEM1 or MEM2
+    }
+    galaxy::gx::harvest_rollback_dirty(r.dirty.data());
+    r.dirty.fill(0u);
+    s.state->coop->restore(r.frames[target].scheduler);  // does not return
 }
 
 // --- Hot join (docs/HOT_JOIN.md): a snapshot written to a file and resumed in another process ---
@@ -30768,7 +31082,13 @@ void hot_join_load(void* user, const char* path) {
 void hot_join_catch_up(void*, bool on) {
     g_hot_join_catch_up.store(on, std::memory_order_relaxed);
     galaxy::gx::set_render_suppressed(on);
-    std::fprintf(stderr, "[hot-join] catching up: %s\n", on ? "on" : "off");
+    if (RuntimeState* state = rollback_snapshot().state; state != nullptr) {
+        state->native_audio_output_gate_valid = false;  // update_native_audio_output_gate looks again
+        if (state->address_space != nullptr) state->address_space->set_native_audio_output_enabled(!on);
+    }
+    // A rollback's re-simulation switches this on and off often: logged for a live join only.
+    static std::uint64_t s_switches = 0u;
+    if (s_switches++ < 4u) std::fprintf(stderr, "[hot-join] catching up: %s\n", on ? "on" : "off");
 }
 
 void start_cooperative_scheduler(
@@ -30807,7 +31127,10 @@ void start_cooperative_scheduler(
         if (!profile_resim) return;
         g_sim_profiler.set_sampling(on);
         if (!on) g_sim_profiler.stop_and_print(std::cerr);
-    }, &hot_join_write, &hot_join_load, &hot_join_capture, &hot_join_load_image, &hot_join_catch_up});
+    }, &hot_join_write, &hot_join_load, &hot_join_capture, &hot_join_load_image, &hot_join_catch_up,
+        [](void*, std::uint32_t frame) { return rollback_ring_save_logged(frame); },
+        [](void*, std::uint32_t frame) { rollback_ring_restore(frame); },
+        [](void*, std::uint32_t frame) { return rollback_ring_has(frame); }});
     if (read_env_flag("GALAXY_SIM_PROFILE_RESIM", false)) g_sim_profiler.set_sampling(false);
     galaxy::netplay_set_digest_hook(
         [](void* user) {
