@@ -20,6 +20,25 @@ connects; the joiner first downloads the host's save and game settings, then bot
 `netplay-local-test.cmd` runs both on one PC: Mario on the controller (host window), Luigi on the keyboard (keep
 the joiner's window focused).
 
+### Joining a game in progress (F1 > Online)
+
+Without the scripts above, from the game itself (`runtime/src/net_lobby.cpp`):
+
+- The player who wants company turns **F1 > Online > Joinable** on (and picks the **Port**, UDP 7777 by default).
+  The page shows the address to give the friend.
+- The friend types that address on the **Join** row and presses Enter.
+- The host sees "<address> WANTS TO JOIN" at the top of the screen; on the Online page's status row Enter
+  accepts and Backspace declines.
+- Both games restart into a session (`GALAXY_NET_HOST` / `GALAXY_NET_JOIN`, co-op on) from the host's save as it
+  was last written, and play their way back to where the host was (`GALAXY_NET_REJOIN`: the file, Mario or
+  Luigi, the galaxy, the mission and the first player's position): past the logo, the file loaded, the stage
+  changed, the first player put on the spot and the friend, as the other brother, beside them. Everything the host
+  did since the last save (stars, coins) is not in the session.
+
+Before the session nothing is synchronised; each game plays on its own. `lobby-local-test.cmd` runs two
+ordinary games on one PC to try it. For tests, `GALAXY_NET_AUTOJOIN=<address>` asks a host at startup and
+`GALAXY_NET_AUTOACCEPT=1` accepts the first asker.
+
 Both PCs must run the same build and content (a mismatched build is refused).
 
 ## How it works

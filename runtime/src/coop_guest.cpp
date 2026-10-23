@@ -2683,6 +2683,7 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
     // KPADRead(chan, ...): the agent's frame, at the first player's controller read.
     if (id == call::kKpadRead && context->gpr[3] == 0u && services != nullptr && services->call_guest != nullptr) {
         agent_frame(context, memory, services, guest_pc);
+        rejoin_frame(context, memory, services, guest_pc);
         s_menu.kpad_buffer = context->gpr[4];
     }
     if (services == nullptr || services->call_guest == nullptr || !coop_enabled()) return;

@@ -9,6 +9,7 @@
 #include "galaxy/gx/render_config.h"
 #include "galaxy/gx/texture_cache.h"
 #include "galaxy/runtime_settings.h"
+#include "galaxy/net_lobby.h"
 #include "galaxy/button_prompts.h"
 #include "galaxy/scope_exit.h"
 #include "galaxy/native_host.h"
@@ -226,7 +227,11 @@ std::uint32_t s_handled_key_normalized = 0u;
 // Publish/consume both dimensions together; exchange cannot clear a newer size.
 std::atomic<std::uint64_t> s_pending_resize_extent{0};
 
-constexpr unsigned kNativeSettingsTabCount = 5;
+constexpr unsigned kNativeSettingsTabCount = 6;
+// ONLINE page (tab 5): online co-op's lobby (net_lobby.h): Joinable, its port, the address to join and the
+// lobby's state. Its settings save at once; the address row takes typed text.
+constexpr unsigned kOnlineTab = 5u;
+galaxy::NetLobbyHooks s_net_lobby{};
 
 // The GENERAL page's languages, in the order LEFT/RIGHT steps through them.
 constexpr GameLanguage kGameLanguages[] = {GameLanguage::English, GameLanguage::French, GameLanguage::Spanish};
@@ -715,6 +720,7 @@ unsigned native_settings_row_count(unsigned tab) {
     case 2: return controls_row_count();
     case 3: return 6u;
     case 4: return 8u;
+    case 5: return 4u;
     default: return 0u;
     }
 }
@@ -1280,6 +1286,68 @@ void adjust_native_setting_unlogged(int delta) {
         set_runtime_settings(settings);
         s_native_settings_dirty.store(true, std::memory_order_release);
     }
+    if (tab == kOnlineTab && (row == 0u || row == 1u)) {
+        // Joinable and its port change live: the lobby listens, or stops, at once.
+        if (row == 0u) {
+            settings.net_joinable = !settings.net_joinable;
+        } else {
+            settings.net_port = static_cast<unsigned>(std::clamp(static_cast<int>(settings.net_port) + delta, 1024, 65535));
+        }
+        set_runtime_settings(settings);
+        s_native_settings_dirty.store(true, std::memory_order_release);
+    }
+}
+
+// Keys on the ONLINE page: Enter toggles Joinable, joins from the address row and accepts a joiner on the
+// status row; the address row takes typed characters and Backspace; Backspace on the status row declines or
+// stops asking. Returns true when the key was handled here.
+bool handle_online_key(WPARAM key, bool was_down) {
+    const unsigned tab = s_native_settings_tab.load(std::memory_order_relaxed) % kNativeSettingsTabCount;
+    if (tab != kOnlineTab) return false;
+    const unsigned row = s_native_settings_row.load(std::memory_order_relaxed);
+    RuntimeSettings settings = get_runtime_settings();
+    if (key == VK_RETURN) {
+        if (was_down) return true;
+        if (row == 0u) {
+            adjust_native_setting(1);
+        } else if (row == 2u) {
+            flush_native_settings_if_dirty();
+            if (s_net_lobby.join != nullptr) s_net_lobby.join(settings.net_join_address.data());
+        } else if (row == 3u && s_net_lobby.answer != nullptr) {
+            s_net_lobby.answer(true);
+        }
+        return true;
+    }
+    if (key == VK_BACK) {
+        if (row == 2u) {
+            const std::size_t length = std::strlen(settings.net_join_address.data());
+            if (length != 0u) settings.net_join_address[length - 1u] = '\0';
+            set_runtime_settings(settings);
+            s_native_settings_dirty.store(true, std::memory_order_release);
+        } else if (row == 3u && s_net_lobby.cancel != nullptr && !was_down) {
+            s_net_lobby.cancel();
+        }
+        return true;
+    }
+    if (row != 2u) return false;
+    // An address: letters, digits, '.', '-' and ':' (Shift+;).
+    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    char typed = '\0';
+    if (key >= '0' && key <= '9' && !shift) typed = static_cast<char>(key);
+    if (key >= VK_NUMPAD0 && key <= VK_NUMPAD9) typed = static_cast<char>('0' + (key - VK_NUMPAD0));
+    if (key >= 'A' && key <= 'Z') typed = static_cast<char>(key - 'A' + 'a');
+    if (key == VK_OEM_PERIOD || key == VK_DECIMAL) typed = '.';
+    if (key == VK_OEM_MINUS || key == VK_SUBTRACT) typed = '-';
+    if (key == VK_OEM_1 && shift) typed = ':';
+    if (typed == '\0') return false;
+    const std::size_t length = std::strlen(settings.net_join_address.data());
+    if (length + 1u < settings.net_join_address.size()) {
+        settings.net_join_address[length] = typed;
+        settings.net_join_address[length + 1u] = '\0';
+        set_runtime_settings(settings);
+        s_native_settings_dirty.store(true, std::memory_order_release);
+    }
+    return true;
 }
 
 void move_native_setting_row(int delta) {
@@ -1414,6 +1482,10 @@ bool handle_native_settings_key(WPARAM key, bool was_down, bool from_pad = false
     }
     if (key != VK_F1 && s_native_settings_visible.load(std::memory_order_relaxed) &&
         handle_controls_key(key, was_down, from_pad)) {
+        return true;
+    }
+    if (key != VK_F1 && s_native_settings_visible.load(std::memory_order_relaxed) && !from_pad &&
+        handle_online_key(key, was_down)) {
         return true;
     }
     if (key == VK_F1) {
@@ -10032,6 +10104,22 @@ std::string native_settings_row_text(
         if (row == 6u) return std::string("CUSTOM VOICE: ") + (runtime.custom_voice ? "ON" : "OFF");
         if (row == 7u) return std::string("ODYSSEY MOVES: ") + (runtime.moveset.enabled ? "ON" : "OFF");
         return {};
+    case 5: {
+        const galaxy::NetLobbyView lobby = s_net_lobby.view != nullptr ? s_net_lobby.view() : galaxy::NetLobbyView{};
+        if (row == 0u) return std::string("JOINABLE: ") + (runtime.net_joinable ? "ON" : "OFF");
+        if (row == 1u) return "PORT: " + std::to_string(runtime.net_port);
+        if (row == 2u) {
+            std::string address = upper_ascii(runtime.net_join_address.data());
+            const bool caret = (GetTickCount64() / 500u) % 2u == 0u;
+            return "JOIN: " + address + (caret ? "_" : " ");
+        }
+        if (row == 3u) {
+            if (s_net_lobby.view == nullptr) return "ONLINE PLAY IS NOT AVAILABLE";
+            if (lobby.asking) return std::string(lobby.status) + "  ENTER ACCEPT";
+            return lobby.status;
+        }
+        return {};
+    }
     default:
         return {};
     }
@@ -10105,12 +10193,12 @@ void draw_native_settings_overlay(RendererD3D12& renderer) {
         "SETTINGS",
         text);
 
-    const char* tabs[] = {"DISPLAY", "GRAPHICS", "CONTROLS", "AUDIO", "GENERAL"};
+    const char* tabs[] = {"DISPLAY", "GRAPHICS", "CONTROLS", "AUDIO", "GENERAL", "ONLINE"};
     static_assert(std::size(tabs) == kNativeSettingsTabCount);
     int tab_x = panel_x + 28;
-    // Five labels share the panel width; the longest is eight 6-unit glyphs
+    // The labels share the panel width; the longest is eight 6-unit glyphs
     // plus a gap, so the label scale shrinks on narrow panels.
-    const int tab_step = (panel_w - 56) / 5;
+    const int tab_step = (panel_w - 56) / static_cast<int>(kNativeSettingsTabCount);
     const int tab_scale = std::clamp(tab_step / 54, 1, scale);
     for (unsigned i = 0; i < kNativeSettingsTabCount; ++i) {
         ui_text(
@@ -10235,8 +10323,28 @@ void draw_native_settings_overlay(RendererD3D12& renderer) {
         footer_y + footer_step * 2,
         footer_scale,
         controls_page ? "ENTER/A ADD INPUT  BACKSPACE/X CLEAR  ESC/B CLOSE"
-                      : "ARROWS/D-PAD MOVE+CHANGE  ESC/B CLOSE",
+        : tab == kOnlineTab ? "TYPE THE HOST'S ADDRESS  ENTER JOIN/ACCEPT  BACKSPACE DECLINE"
+                            : "ARROWS/D-PAD MOVE+CHANGE  ESC/B CLOSE",
         muted);
+}
+
+// While another PC asks to join and the menu is closed: one line at the top saying so.
+void draw_net_lobby_banner(RendererD3D12& renderer) {
+    if (s_net_lobby.view == nullptr || s_native_settings_visible.load(std::memory_order_relaxed) ||
+        s_bb_width < 427u || s_bb_height < 240u) {
+        return;
+    }
+    const galaxy::NetLobbyView lobby = s_net_lobby.view();
+    if (!lobby.asking) return;
+    const std::string line = std::string(lobby.asker) + " WANTS TO JOIN AS THE OTHER BROTHER  F1 > ONLINE";
+    const int scale = s_bb_height >= 1440u ? 3 : (s_bb_height >= 720u ? 2 : 1);
+    int text_w = -scale;
+    for (const char ch : line) text_w += (ch == ' ' ? 4 : 6) * scale;
+    const int pad = 4 * scale;
+    const int x = (static_cast<int>(s_bb_width) - text_w) / 2 - pad;
+    const int y = 8 * scale;
+    ui_rect(renderer, x, y, text_w + pad * 2, 7 * scale + pad * 2, {0.02f, 0.025f, 0.035f, 1.0f});
+    ui_text(renderer, x + pad, y + pad, scale, line, {0.15f, 0.72f, 0.85f, 1.0f});
 }
 
 // For the first seconds of a session, until the overlay is first opened, a
@@ -10579,6 +10687,7 @@ bool RendererD3D12::present(
         draw_file_select_options(*this);
         draw_native_settings_overlay(*this);
         draw_native_settings_hint(*this);
+        draw_net_lobby_banner(*this);
         if (stall_watch_overlay) {
             const double stall_watch_ms =
                 std::chrono::duration<double, std::milli>(
@@ -11235,6 +11344,11 @@ HostPointerState poll_host_pointer_state() noexcept {
 host::HostPointerTransitionPoll
 poll_host_pointer_transition(std::uint64_t after_sequence) noexcept {
     return s_pointer_transitions.read_after(after_sequence);
+}
+
+void set_net_lobby_hooks(const NetLobbyHooks& hooks) noexcept {
+    const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+    s_net_lobby = hooks;
 }
 
 bool native_settings_overlay_visible() noexcept {

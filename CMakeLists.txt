@@ -762,6 +762,7 @@ add_executable(NebulaRuntime
     runtime/src/coop_guest.cpp
     runtime/src/netplay.cpp
     runtime/src/netplay_session.cpp
+    runtime/src/net_lobby.cpp
     runtime/src/agent_guest.cpp
     runtime/src/voice_replacement.cpp
 )

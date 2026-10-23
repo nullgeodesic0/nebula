@@ -353,6 +353,30 @@ void netplay_kpad_after(PpcContext* context, GuestMemoryV1* memory, const Native
             net_local_input(n.frame, 1u, local.data());
         }
         const NetInput& input = net_input(n.frame, channel == 0u ? 0u : 1u);
+        if (channel == 0u) {
+            // A rejoin passing the logo (agent_guest.cpp): A for the first player, on both PCs alike.
+            static bool s_rejoin_a = false;
+            const bool press = netplay_rejoin_press_a();
+            if (press || s_rejoin_a) {
+                std::array<std::uint8_t, kStatusSize> status = input.status;
+                const auto get = [&](std::size_t at) {
+                    return (static_cast<std::uint32_t>(status[at]) << 24u) | (static_cast<std::uint32_t>(status[at + 1u]) << 16u) |
+                           (static_cast<std::uint32_t>(status[at + 2u]) << 8u) | status[at + 3u];
+                };
+                const auto put = [&](std::size_t at, std::uint32_t value) {
+                    for (int i = 0; i < 4; ++i) status[at + i] = static_cast<std::uint8_t>(value >> (24 - 8 * i));
+                };
+                const std::uint32_t a = coop::button::kA;
+                put(coop::kpad::kHold, press ? get(coop::kpad::kHold) | a : get(coop::kpad::kHold));
+                if (press && !s_rejoin_a) put(coop::kpad::kTrig, get(coop::kpad::kTrig) | a);
+                if (!press && s_rejoin_a) put(coop::kpad::kRelease, get(coop::kpad::kRelease) | a);
+                s_rejoin_a = press;
+                write(n.buffer, status.data(), kStatusSize);
+                context->gpr[3] = std::max<std::uint32_t>(input.count, 1u);
+                if (channel == kChannels - 1u) ++n.frame;
+                return;
+            }
+        }
         write(n.buffer, input.status.data(), kStatusSize);
         context->gpr[3] = input.count;
     } else if (auto it = n.replay.find({n.frame, channel}); it != n.replay.end()) {
