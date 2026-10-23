@@ -56,6 +56,7 @@ struct Netplay {
     std::map<std::pair<std::uint32_t, std::uint32_t>, Sample> replay;  // (frame, channel)
     std::uint32_t frame = 0u;    // game frames so far (channel 0 reads at kFrameReadSite)
     std::uint32_t peek_sequence = 0u;  // EFB peeks so far this frame (netplay_efb_peek)
+    std::uint32_t pending_command = 0u;  // a NetCommand from this frame's inputs (netplay_take_command)
     std::uint32_t channel = 0xFFFFFFFFu;
     std::uint32_t buffer = 0u;
     std::uint32_t other_channel = 0xFFFFFFFFu;  // a KPADRead off the frame site, online
@@ -354,6 +355,12 @@ void netplay_kpad_after(PpcContext* context, GuestMemoryV1* memory, const Native
         }
         const NetInput& input = net_input(n.frame, channel == 0u ? 0u : 1u);
         if (channel == 0u) {
+            // A player's online-menu command in this frame's inputs (either's): carried out at the next frame's
+            // start on both PCs (agent_guest.cpp rejoin_frame).
+            const std::uint32_t command = input.command | net_input(n.frame, 1u).command;
+            if (command != 0u) n.pending_command = command;
+        }
+        if (channel == 0u) {
             // A rejoin passing the logo (agent_guest.cpp): A for the first player, on both PCs alike.
             static bool s_rejoin_a = false;
             const bool press = netplay_rejoin_press_a();
@@ -400,6 +407,12 @@ std::uint32_t netplay_pending_channel() noexcept {
 
 std::uint32_t netplay_frame() noexcept {
     return netplay().frame;
+}
+
+std::uint32_t netplay_take_command() noexcept {
+    const std::uint32_t command = netplay().pending_command;
+    netplay().pending_command = 0u;
+    return command;
 }
 
 namespace {

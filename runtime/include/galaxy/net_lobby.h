@@ -42,16 +42,25 @@ using NetLobbyViewFn = NetLobbyView (*)();
 using NetLobbyJoinFn = void (*)(const char* address);  // "address[:port]"
 using NetLobbyAnswerFn = void (*)(bool accept);
 using NetLobbyCancelFn = void (*)();
+using NetLobbyMenuFn = void (*)(int row);  // the online menu's row chosen: 0 resume, 1 exit galaxy, 2 leave
 struct NetLobbyHooks {
     NetLobbyViewFn view = nullptr;
     NetLobbyJoinFn join = nullptr;
     NetLobbyAnswerFn answer = nullptr;
     NetLobbyCancelFn cancel = nullptr;
+    NetLobbyMenuFn menu = nullptr;
 };
+
+// Out of a session: this game restarts on its own, with this PC's own saves and settings.
+[[noreturn]] void net_restart_alone();
 
 namespace gx {
 // The renderer's copy of the lobby's hooks (none: the Online page shows the lobby as unavailable).
 void set_net_lobby_hooks(const NetLobbyHooks& hooks) noexcept;
+// The online menu (in a session, on this PC only, the game running on): + or HOME opens and closes it, the
+// D-pad or stick moves, A chooses, B closes. One controller poll's edges from the input thread; returns whether it
+// is open, when this PC's player's input must stay neutral.
+bool online_menu_poll(bool toggle, bool up, bool down, bool choose, bool back) noexcept;
 }  // namespace gx
 
 }  // namespace galaxy

@@ -88,6 +88,19 @@ PartnerInputSlot& local_input_slot() {
 }
 }  // namespace
 
+namespace {
+std::atomic<CoopOnlineMenuPoll> g_online_menu_poll{nullptr};
+}  // namespace
+
+void coop_set_online_menu_poll(CoopOnlineMenuPoll poll) noexcept {
+    g_online_menu_poll.store(poll, std::memory_order_release);
+}
+
+bool coop_online_menu_poll(bool toggle, bool up, bool down, bool choose, bool back) noexcept {
+    const CoopOnlineMenuPoll poll = g_online_menu_poll.load(std::memory_order_acquire);
+    return poll != nullptr && poll(toggle, up, down, choose, back);
+}
+
 void coop_publish_local_input(const coop::PartnerInput& input) noexcept {
     PartnerInputSlot& slot = local_input_slot();
     std::lock_guard lock(slot.mutex);

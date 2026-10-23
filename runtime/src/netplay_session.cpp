@@ -17,6 +17,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
@@ -41,8 +42,9 @@ namespace {
 //           then per frame: u32 count, u32 peek count, kNetMaxPeeks x u32 peeks, kNetStatusSize status bytes
 //   Hash: u32 frame, u64 MEM1 hash
 constexpr std::uint32_t kMagic = 0x504E424Eu;  // "NBNP"
-constexpr std::uint8_t kVersion = 1u;
-enum class Packet : std::uint8_t { Hello = 1, HelloAck = 2, Inputs = 3, Hash = 4, BundleRequest = 5, BundleChunk = 6 };
+constexpr std::uint8_t kVersion = 2u;
+// Bye: the sender has left the session (its online menu).
+enum class Packet : std::uint8_t { Hello = 1, HelloAck = 2, Inputs = 3, Hash = 4, BundleRequest = 5, BundleChunk = 6, Bye = 7 };
 constexpr std::uint32_t kChunkBytes = 1024u;
 constexpr const wchar_t* kNandMetaStream = L":galaxy.isfs.meta";  // native_host.cpp's per-file NAND metadata
 constexpr std::uint32_t kChunkBurst = 32u;
@@ -68,6 +70,7 @@ struct WireInput {
     std::uint32_t peek_count;
     std::uint32_t peeks[kNetMaxPeeks];
     std::uint8_t status[kNetStatusSize];
+    std::uint32_t command;
 };
 struct WireHello {
     Header header;
@@ -119,6 +122,8 @@ struct Session {
     std::vector<std::pair<std::uint32_t, std::uint64_t>> my_hashes;  // (frame, hash), recent
     std::uint64_t stalls = 0u;
     double stalled_ms = 0.0;
+    std::atomic<bool> peer_left{false};                 // set on the game thread, read by the lobby's
+    std::atomic<std::uint32_t> pending_command{0u};     // the next local input's NetCommand (the menu's thread)
     // The session bundle: the host's save files and game settings (host: built on the first request; joiner:
     // the chunks received so far).
     std::vector<std::uint8_t> bundle;
@@ -197,6 +202,7 @@ void send_inputs(Session& s) {
         wire.peek_count = from.input.peek_count;
         std::memcpy(wire.peeks, from.input.peeks.data(), sizeof(wire.peeks));
         std::memcpy(wire.status, from.input.status.data(), kNetStatusSize);
+        wire.command = from.input.command;
         std::memcpy(out + count * sizeof(WireInput), &wire, sizeof(wire));
         ++count;
     }
@@ -409,6 +415,11 @@ void handle_packet(Session& s, const std::uint8_t* data, int size, const sockadd
         return;
     }
     if (!s.connected) return;
+    if (type == Packet::Bye) {
+        if (!s.peer_left) std::fprintf(stderr, "[net] the other player left the session\n");
+        s.peer_left = true;
+        return;
+    }
     if (type == Packet::BundleRequest && s.host) {
         if (size < static_cast<int>(sizeof(WireBundleRequest))) return;
         WireBundleRequest request{};
@@ -454,6 +465,7 @@ void handle_packet(Session& s, const std::uint8_t* data, int size, const sockadd
             to.input.peek_count = std::min(wire.peek_count, kNetMaxPeeks);
             std::memcpy(to.input.peeks.data(), wire.peeks, sizeof(wire.peeks));
             std::memcpy(to.input.status.data(), wire.status, kNetStatusSize);
+            to.input.command = wire.command;
             if (!s.any_remote || frame > s.newest_remote_frame) s.newest_remote_frame = frame;
             s.any_remote = true;
         }
@@ -687,6 +699,13 @@ void join_session(Session& s, const std::string& host_label) {
         std::fwrite(merged.data(), 1, merged.size(), out);
         std::fclose(out);
     }
+    // This PC's own save directory and settings, for when the session ends (net_restart_alone): kept once, so a
+    // second session keeps the first's originals.
+    if (env_path(L"GALAXY_NET_HOME_SET").empty()) {
+        SetEnvironmentVariableW(L"GALAXY_NET_HOME_SET", L"1");
+        SetEnvironmentVariableW(L"GALAXY_NET_HOME_NAND_ROOT", env_path(L"GALAXY_NAND_ROOT").c_str());
+        SetEnvironmentVariableW(L"GALAXY_NET_HOME_SETTINGS", env_path(L"GALAXY_RUNTIME_SETTINGS_PATH").c_str());
+    }
     // Both environments: the save directory is read through the Win32 one, the settings path through the CRT's.
     SetEnvironmentVariableW(L"GALAXY_NAND_ROOT", saves.c_str());
     _wputenv_s(L"GALAXY_NAND_ROOT", saves.c_str());
@@ -733,6 +752,25 @@ bool net_is_host() noexcept {
     return net_session_requested() && session().host;
 }
 
+void net_request_command(NetCommand command) noexcept {
+    session().pending_command = static_cast<std::uint32_t>(command);
+}
+
+bool net_peer_left() noexcept {
+    return session().peer_left;
+}
+
+void net_leave() {
+    Session& s = session();
+    const Header bye{kMagic, static_cast<std::uint8_t>(Packet::Bye), kVersion, 0u};
+    for (int i = 0; i < 5; ++i) {
+        send_raw(s, &bye, sizeof(bye));
+        Sleep(10);
+    }
+    std::fprintf(stderr, "[net] leaving the session\n");
+    net_restart_alone();
+}
+
 void net_frame_begin(std::uint32_t frame, const GuestMemoryV1* memory) {
     Session& s = session();
     if (!s.requested) return;
@@ -763,6 +801,7 @@ void net_local_input(std::uint32_t frame, std::uint32_t count, const std::uint8_
     to.input = NetInput{};
     to.input.count = count;
     if (status != nullptr) std::memcpy(to.input.status.data(), status, kNetStatusSize);
+    to.input.command = s.pending_command.exchange(0u);
     if (s.host && frame >= 1u) {
         // The host's peek answers of the frame just finished go with this input: both PCs use them at `target`.
         const std::uint32_t previous = frame - 1u;
@@ -797,6 +836,12 @@ const NetInput& net_input(std::uint32_t frame, unsigned player) {
             std::fprintf(stderr, "[net] frame %u: waiting for the %s\n", frame,
                          s.connected ? "peer's input" : (s.host ? "joiner to connect" : "host to answer"));
             last_log = now;
+        }
+        // A peer silent for 15 s once connected is gone (its game closed or its network dropped): the lobby
+        // restarts this game on its own (net_lobby.cpp).
+        if (s.connected && now - started > s.frequency.QuadPart * 15 && !s.peer_left) {
+            std::fprintf(stderr, "[net] nothing from the other player for 15 s: the session is over\n");
+            s.peer_left = true;
         }
         galaxy::gx::pump_messages();
         Sleep(0);

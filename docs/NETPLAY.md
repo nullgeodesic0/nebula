@@ -35,6 +35,14 @@ Without the scripts above, from the game itself (`runtime/src/net_lobby.cpp`):
   changed, the first player put on the spot and the friend, as the other brother, beside them. Everything the host
   did since the last save (stars, coins) is not in the session.
 
+### In a session
+
+There is no pause: + and HOME open this PC's own menu while the game plays on (its player stands still):
+**Resume**, **Exit the galaxy** (both players back to the Observatory, on both PCs at the same frame: the command
+travels with the input) and **Leave the session** (the other PC is told; both games restart on their own, the
+joiner with its own saves and settings again). A peer silent for 15 s ends the session the same way.
+`GALAXY_NET_TEST_MENU=<frame>:<row>[,...]` chooses rows in tests.
+
 Before the session nothing is synchronised; each game plays on its own. `lobby-local-test.cmd` runs two
 ordinary games on one PC to try it. For tests, `GALAXY_NET_AUTOJOIN=<address>` asks a host at startup and
 `GALAXY_NET_AUTOACCEPT=1` accepts the first asker.

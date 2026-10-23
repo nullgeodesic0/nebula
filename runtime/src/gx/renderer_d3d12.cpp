@@ -10328,6 +10328,37 @@ void draw_native_settings_overlay(RendererD3D12& renderer) {
         muted);
 }
 
+// The online menu (net_lobby.h online_menu_poll): this PC's own, while the session plays on.
+std::atomic<bool> s_online_menu_open{false};
+std::atomic<int> s_online_menu_row{0};
+constexpr const char* kOnlineMenuRows[] = {"RESUME", "EXIT THE GALAXY (BOTH PLAYERS)", "LEAVE THE SESSION"};
+
+void draw_online_menu(RendererD3D12& renderer) {
+    if (!s_online_menu_open.load(std::memory_order_acquire) || s_bb_width < 427u || s_bb_height < 240u) return;
+    const int scale = s_bb_height >= 1440u ? 4 : (s_bb_height >= 720u ? 3 : 1);
+    const int row_step = scale * 7 + 10 * scale;
+    const int width = 60 * 6 * scale / 2;
+    const int height = row_step * 4 + 16 * scale;
+    const int x = (static_cast<int>(s_bb_width) - width) / 2;
+    const int y = (static_cast<int>(s_bb_height) - height) / 2;
+    const std::array<float, 4> panel{0.02f, 0.025f, 0.035f, 0.94f};
+    const std::array<float, 4> text{0.88f, 0.94f, 0.96f, 1.0f};
+    const std::array<float, 4> accent{0.15f, 0.72f, 0.85f, 1.0f};
+    const std::array<float, 4> selected{0.10f, 0.18f, 0.22f, 1.0f};
+    ui_rect(renderer, x, y, width, height, panel);
+    ui_rect(renderer, x, y, 6, height, {0.0f, 0.42f, 0.62f, 1.0f});
+    ui_text(renderer, x + 8 * scale, y + 6 * scale, scale, "ONLINE  (THE GAME KEEPS PLAYING)", accent);
+    const int chosen = s_online_menu_row.load(std::memory_order_acquire);
+    for (int row = 0; row < 3; ++row) {
+        const int row_y = y + 6 * scale + row_step * (row + 1);
+        if (row == chosen) {
+            ui_rect(renderer, x + 4 * scale, row_y - 3 * scale, width - 8 * scale, scale * 7 + 6 * scale, selected);
+            ui_text(renderer, x + 6 * scale, row_y, scale, ">", accent);
+        }
+        ui_text(renderer, x + 14 * scale, row_y, scale, kOnlineMenuRows[row], text);
+    }
+}
+
 // While another PC asks to join and the menu is closed: one line at the top saying so.
 void draw_net_lobby_banner(RendererD3D12& renderer) {
     if (s_net_lobby.view == nullptr || s_native_settings_visible.load(std::memory_order_relaxed) ||
@@ -10688,6 +10719,7 @@ bool RendererD3D12::present(
         draw_native_settings_overlay(*this);
         draw_native_settings_hint(*this);
         draw_net_lobby_banner(*this);
+        draw_online_menu(*this);
         if (stall_watch_overlay) {
             const double stall_watch_ms =
                 std::chrono::duration<double, std::milli>(
@@ -11344,6 +11376,32 @@ HostPointerState poll_host_pointer_state() noexcept {
 host::HostPointerTransitionPoll
 poll_host_pointer_transition(std::uint64_t after_sequence) noexcept {
     return s_pointer_transitions.read_after(after_sequence);
+}
+
+bool online_menu_poll(bool toggle, bool up, bool down, bool choose, bool back) noexcept {
+    bool open = s_online_menu_open.load(std::memory_order_acquire);
+    if (toggle) {
+        open = !open;
+        s_online_menu_row.store(0, std::memory_order_release);
+    } else if (open) {
+        int row = s_online_menu_row.load(std::memory_order_acquire);
+        if (up) row = (row + 2) % 3;
+        if (down) row = (row + 1) % 3;
+        s_online_menu_row.store(row, std::memory_order_release);
+        if (back) open = false;
+        if (choose) {
+            open = false;
+            NetLobbyMenuFn menu = nullptr;
+            {
+                const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+                menu = s_net_lobby.menu;
+            }
+            s_online_menu_open.store(false, std::memory_order_release);
+            if (menu != nullptr) menu(row);
+        }
+    }
+    s_online_menu_open.store(open, std::memory_order_release);
+    return open;
 }
 
 void set_net_lobby_hooks(const NetLobbyHooks& hooks) noexcept {

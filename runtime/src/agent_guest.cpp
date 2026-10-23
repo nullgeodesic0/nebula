@@ -710,6 +710,16 @@ NetRejoin current_location(const Guest& guest, const GuestMemoryV1* memory) {
     return where;
 }
 
+// MR::requestChangeStageInGameMoving(stage, mission), the name on the guest stack.
+void request_stage(const Guest& guest, const std::string& stage, int mission) {
+    Guest::Frame frame(guest);
+    const std::uint32_t text = frame.scratch();
+    for (std::size_t i = 0; i <= stage.size(); ++i) {
+        guest.set_u8(text + static_cast<std::uint32_t>(i), i < stage.size() ? static_cast<std::uint8_t>(stage[i]) : 0u);
+    }
+    guest.call(fn::kRequestChangeStage, text, static_cast<std::uint32_t>(mission));
+}
+
 struct Rejoin {
     bool active = false;
     NetRejoin to;
@@ -788,13 +798,7 @@ void step_rejoin(Rejoin& r, const Guest& guest) {
         r.settle = there && settled(guest, scene) ? r.settle + 1u : 0u;
         if (r.settle < 90u) return;
         if (r.phase == 3 && !r.to.stage.empty() && scene.stage != r.to.stage) {
-            Guest::Frame frame(guest);
-            const std::uint32_t text = frame.scratch();
-            for (std::size_t i = 0; i <= r.to.stage.size(); ++i) {
-                guest.set_u8(text + static_cast<std::uint32_t>(i),
-                             i < r.to.stage.size() ? static_cast<std::uint8_t>(r.to.stage[i]) : 0u);
-            }
-            guest.call(fn::kRequestChangeStage, text, static_cast<std::uint32_t>(std::max(r.to.mission, 1)));
+            request_stage(guest, r.to.stage, std::max(r.to.mission, 1));
             std::fprintf(stderr, "[rejoin] to %s mission %d\n", r.to.stage.c_str(), r.to.mission);
             r.phase = 4;
             r.settle = 0u;
@@ -819,6 +823,17 @@ void step_rejoin(Rejoin& r, const Guest& guest) {
 
 void rejoin_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc) {
     Rejoin& r = rejoin_state();
+    // A player's online-menu command (netplay_session.h NetCommand), on both PCs at this same frame.
+    if (const std::uint32_t command = netplay_take_command(); command != 0u) {
+        const Guest guest(context, memory, services, guest_pc);
+        const Scene scene = read_scene(guest);
+        if (command == static_cast<std::uint32_t>(NetCommand::ExitGalaxy) && scene.in_game && !r.active &&
+            scene.stage != "AstroGalaxy" && scene.stage != "FileSelect") {
+            SavedContext saved(guest.context());
+            request_stage(guest, "AstroGalaxy", 1);
+            std::fprintf(stderr, "[net] exiting %s for the Observatory\n", scene.stage.c_str());
+        }
+    }
     if (!r.active && !net_location_wanted()) return;
     const Guest guest(context, memory, services, guest_pc);
     if (r.active) {

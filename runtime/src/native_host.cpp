@@ -9490,6 +9490,30 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
         local.pointer_valid = pointer_active;
         local.pointer_x = s_pointer_x;
         local.pointer_y = s_pointer_y;
+        // No pause online: + and HOME open this PC's own menu instead (the game plays on for both), which takes
+        // the D-pad or stick, A and B while it is open. Buttons held as it closes stay out of the game until
+        // released, so the A that chose a row is not a jump.
+        static std::uint32_t s_previous = 0u;
+        static std::uint32_t s_hidden = 0u;
+        static int s_stick_previous = 0;
+        const std::uint32_t pressed = local.buttons & ~s_previous;
+        s_previous = local.buttons;
+        const int stick = stick_y > 0.6f ? 1 : (stick_y < -0.6f ? -1 : 0);
+        const bool stick_up = stick == 1 && s_stick_previous != 1;
+        const bool stick_down = stick == -1 && s_stick_previous != -1;
+        s_stick_previous = stick;
+        const bool open = galaxy::coop_online_menu_poll(
+            (pressed & (button::kPlus | button::kHome)) != 0u, (pressed & button::kUp) != 0u || stick_up,
+            (pressed & button::kDown) != 0u || stick_down, (pressed & button::kA) != 0u,
+            (pressed & button::kB) != 0u);
+        if (open) {
+            s_hidden = local.buttons;
+            local = galaxy::coop::PartnerInput{};
+            local.connected = true;
+        } else {
+            s_hidden &= local.buttons;
+            local.buttons &= ~(s_hidden | button::kPlus | button::kHome);
+        }
         galaxy::coop_publish_local_input(local);
     }
 
