@@ -53,7 +53,8 @@ use std::{fs, path::Path};
 // 27: hooks around JKRSolidHeap::allocFromHead/allocFromTail (stage heap overflow); regenerate every module.
 // 28: co-op lives, HUD and launch star hooks, some of them skippable; regenerate every module.
 // 29: co-op hooks for the partner's power-up archives and player-on-player attacks.
-pub const GENERATION_VERSION: u32 = 34;
+// 35: co-op Star Pointer hooks (split-screen pointing, Pull Stars for either brother, no Co-Star actions).
+pub const GENERATION_VERSION: u32 = 35;
 
 /// Shard size and per-shard source budget of the qualified module build.
 pub const MODULE_SHARD_SIZE: usize = 64;

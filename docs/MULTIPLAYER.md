@@ -39,17 +39,40 @@ The first player plays whichever character the save file plays; the second playe
 - One controller: the keyboard and mouse are the first player's, the controller is the second player's.
 
 The second player uses their controller's own bindings (F1 > Controls); the spin is the shake binding or a
-real shake. They have the game's orange second Star Pointer ("P2", Co-Star's): it collects Star Bits, grabs
-Pull Stars and stops enemies with A, and shoots Star Bits with B. A gyro controller (DualSense, Switch) aims it
+real shake. They have the game's second Star Pointer ("P2"). A gyro controller (DualSense, Switch) aims it
 while the right stick turns their camera; otherwise the right stick aims it and the D-pad turns their camera.
 The recenter button centres it, and it hides when left still. The game counts it as a connected second Remote
-(WPad::mIsConnected, set by coop_guest.cpp each frame). In split screen it points across the whole picture.
+(WPad::mIsConnected, set by coop_guest.cpp each frame).
+
+### Star Pointers
+
+Each brother's pointer is his own, as the first player's is in one-player play:
+
+- Both collect Star Bits, and the second also shoots them with B.
+- Pull Stars answer the brother whose pointer is on them: his A grabs, and the Pull Star pulls him. The game
+  wired them to the first Remote only (GCapture reads channel 0); while the second player's pointer has them,
+  GCapture and GCaptureTarget run with him as the game's player and his pointer and A as channel 0's: calls into
+  their code (hook 77, `capture_code_begin`) and their nerve steps (Spine::update, hook 82, since their nerves
+  reach them by tail branches). A bind by the other brother's body, standing next to him, is refused (requestBind
+  skipped, false). They change hands only while nobody is being pulled.
+- The game's Co-Star help on the second pointer's A is off, since A is the second player's jump: it no longer
+  makes the other brother jump (MarioActor::isRequestJump2P and kin), holds enemies
+  (MR::isStarPointerPointing2POnPressButton/OnTriggerButton) or fires launch stars
+  (MR::isPlayerPointedBy2POnTriggerButton). Their results are zeroed (hook 81).
+- In split screen a pointer hits what is drawn under it, in either half: the game tests targets with one camera,
+  the shared one, so each pointer's tests (isStarPointerPointingCore, hook 74) are given the camera and
+  projection of the half its cursor is over, as that half was drawn (`pointer_half_begin`), and GCapture's
+  choice of the nearest Pull Star (MR::calcScreenPosition, hook 75) likewise for the capturing brother's pointer.
+  The cursors are drawn where they are aimed, as before. Checked with the agent: each brother's pointer on a
+  Star Bit in the other's half collects it.
 
 ## What happens in game
 
 - Both characters' models are loaded at the start (the player heap grows by 2 MB for it).
 - The second player appears beside the first when the first is placed in a level, and moves through the
-  game's own player code each frame with their own controller.
+  game's own player code each frame with their own controller. He is kept out of the game's movement list
+  (suspended): a galaxy's start resumes the scene's suspended objects, and the game would then move him a second
+  time each frame with the first player's controller.
 - The players bump into each other: when their bodies (50 units round, 150 tall) overlap, each is pushed
   half the overlap apart through the game's own `Mario::push`, so walls and floors still hold them.
 - The camera looks at the point between the players. When one is about to leave the picture the screen splits
@@ -72,10 +95,17 @@ again when both are back within 60% of the shared picture (the gap keeps it from
 3. Joining runs the same backwards, and the single screen comes back only when both halves show one
    picture again.
 
-The second player's camera trails them 1000 units behind and 380 above along their gravity. They steer it
-with the stick bound to the pointer (usually the right stick; it has no pointer in co-op) or the D-pad: left
-and right orbit it around them, up and down raise or lower it; C puts it behind them again. It stops short of
-walls between it and the player (the game's `MR::getFirstPolyOnLineToMap`).
+The second player's camera is the game's own camera system run a second time for them: a second
+CameraDirector (`make_second_director`, made when they are, as CameraDirector's constructor makes its parts:
+its own camera holder with every camera type, camera man, target (the second player), pose, interpolation,
+shaker; the stage's camera parameters, rails and registers shared with the game's). It runs each frame right
+after the game's camera (`run_second_director`, movement category 2) with the second player as the game's player
+and as MR::getCameraDirector's answer, and CameraContext is the game camera's again after it. So their half gets
+the stage's camera areas (CubeCamera), ground camera codes and every camera type as the first player's does: the
+Pull Star stretches in Space Junk frame the same for either brother. They turn it as the first player turns
+theirs (their controller's camera buttons). `GALAXY_COOP_GAME_CAMERA=0` falls back to the old follow camera: 1000
+units behind and 380 above along their gravity, steered with the pointer stick or the D-pad, short of walls.
+Event cameras (warps, launch stars, cutscenes) remain the game camera's, handed over as below.
 
 A camera event the second player sets off (a warp, launch star or pipe) plays in their half with the game's
 own camera (easing in from the second player's), and the first player's half keeps its view from before,
@@ -103,8 +133,9 @@ Lives work as in New Super Mario Bros. Wii, without the bubble:
 - Each player has their own lives and life meter. The first player's lives are the game's own (in the save);
   the second player's start with as many each time a save is loaded (the game starts the first player at 4) and are kept while the game runs.
 - A player who goes down (no health left, a fall, a crush) while the other plays on spends one of their lives,
-  vanishes after their fall and comes back beside the other about two seconds later, with full health. The
-  game's own miss (the "Too Bad!", the restart from the checkpoint) does not happen.
+  vanishes after their fall and comes back beside the other about two seconds later, with full health, standing
+  (MarioActor::_B90, which keeps the down pose, is cleared). The game's own miss (the "Too Bad!", the restart
+  from the checkpoint) does not happen.
 - With no lives left a player sits out, carried along hidden beside the other, until the stage reloads.
 - Both down at once is the game's own miss, and each spends a life; game over only when both are out of lives.
 - A coin heals both players.
