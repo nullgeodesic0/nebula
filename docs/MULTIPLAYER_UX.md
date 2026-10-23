@@ -24,8 +24,11 @@ from the pause menu, and changed at any time. Every menu looks like the game's o
 
 ## Player flows
 
-1. **Local drop-in.** On a controller nobody is using, press Start (+). A small game-style card appears for about
-   2 s: "Luigi joins! (DualSense)", using the controller's own glyphs. Luigi appears beside Mario and the split
+1. **Local drop-in.** One join button on every controller: Start on the Wii layout (+), Menu on Xbox, Options on
+   DualSense. While a controller is connected but not playing, a small prompt sits in the corner: "[glyph] Join as
+   Luigi", with that controller's own glyph (one line per waiting controller, fading out after 10 s of no input
+   and back when the controller is touched). Pressing it on that controller drops the player in. A small
+   game-style card appears for about 2 s: "Luigi joins! (DualSense)". Luigi appears beside Mario and the split
    screen opens when they part. On a Luigi save, the joiner is Mario.
 2. **Local drop-out.** From the pause menu's Players panel, choose "Leave", or hold − for 1 s. If the
    controller disconnects, a card says "Luigi's controller disconnected: Start to rejoin", and Luigi steps out
@@ -50,6 +53,7 @@ from the pause menu, and changed at any time. Every menu looks like the game's o
 | --- | --- | --- |
 | Players panel | File select (beside the save files; replaces the current Multiplayer/Odyssey text panel), and the pause menu (a panel beside the game's own pause window) | Device slots, Joinable, Online (Join, recent hosts), Leave |
 | Join request | Over the game, at the top, while play continues | Name, Accept/Deny with this PC's button glyphs |
+| Join prompt | Bottom corner, while a controller waits unassigned | "[join glyph] Join as Luigi" per waiting controller |
 | Status cards | Top centre, short-lived | Joins, leaves, disconnects, connecting |
 | Settings (F1) | As now, rethemed | All current pages |
 
