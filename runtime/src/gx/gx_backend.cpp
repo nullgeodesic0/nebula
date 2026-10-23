@@ -4921,24 +4921,30 @@ void GxBackend::drain_guest_memory_writes(
             // concurrent additions.
             std::uint64_t bits = dirty_page_words_[candidate].exchange(
                 0u, std::memory_order_relaxed);
+            // A run of consecutive dirty pages at a time (a written buffer sets whole words).
             while (bits != 0u) {
-                const unsigned bit_index =
+                const unsigned first =
                     static_cast<unsigned>(std::countr_zero(bits));
-                bits &= bits - 1u;
+                const unsigned run =
+                    static_cast<unsigned>(std::countr_zero(~(bits >> first)));
+                const unsigned end = first + run;
+                bits = end >= 64u ? 0u : bits & (~std::uint64_t{0} << end);
                 const std::uint32_t page = static_cast<std::uint32_t>(
-                    candidate * 64u + bit_index);
+                    candidate * 64u + first);
                 if (page >= kDirtyPageCount) {
                     continue;
                 }
+                const std::uint32_t pages =
+                    std::min<std::uint32_t>(run, kDirtyPageCount - page);
 
                 const std::uint32_t addr =
                     kDirtyTrackedBase + page * kDirtyPageSize;
                 if (have_pending &&
                     pending_range.guest_addr + pending_range.size == addr) {
-                    pending_range.size += kDirtyPageSize;
+                    pending_range.size += pages * kDirtyPageSize;
                 } else {
                     flush_pending();
-                    pending_range = GuestWriteRange{addr, kDirtyPageSize};
+                    pending_range = GuestWriteRange{addr, pages * kDirtyPageSize};
                     have_pending = true;
                 }
             }
