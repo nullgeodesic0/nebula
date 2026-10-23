@@ -175,7 +175,6 @@ constexpr std::uint32_t kShowModel = 0x803DD758u;        // MR::showModel(LiveAc
 constexpr std::uint32_t kHideModel = 0x803DD794u;        // MR::hideModel(LiveActor*)
 constexpr std::uint32_t kValidateHitSensors = 0x803C27B8u;    // MR::validateHitSensors(LiveActor*)
 constexpr std::uint32_t kInvalidateHitSensors = 0x803C27CCu;  // MR::invalidateHitSensors(LiveActor*)
-constexpr std::uint32_t kMarioIncLife = 0x802B1CE4u;     // MarioActor::incLife(u32)
 constexpr std::uint32_t kChangeGameOverAnimation = 0x802AF7BCu;  // MarioActor::changeGameOverAnimation()
 constexpr std::uint32_t kChangeAnimationNonStop = 0x802AF660u;  // MarioActor::changeAnimationNonStop(const char*)
 // Pipes (EarthenPipe.cpp).
@@ -232,6 +231,7 @@ constexpr std::uint32_t kEndActorCamera = 0x803BCB8Cu;        // MR::endActorCam
 // And what the fall left on the player (MarioActor::exeGameOverBlackHole2 starts them; a miss never stopped them).
 constexpr std::uint32_t kStopEffectForce = 0x802DDCA8u;       // MarioActor::stopEffectForce(const char*)
 constexpr std::uint32_t kBlackHoleEffect = 0x805A64EAu;         // the game's "共通ブラックホール"
+constexpr std::uint32_t kForceDeleteEffectAll = 0x803CBCDCu;   // MR::forceDeleteEffectAll(LiveActor*)
 constexpr std::uint32_t kActivateDefaultGameLayout = 0x803F78B0u;  // MR::activateDefaultGameLayout()
 constexpr std::uint32_t kIsActiveDefaultGameLayout = 0x803F78F8u;  // MR::isActiveDefaultGameLayout()
 constexpr std::uint32_t kEndGlobalEventCamera = 0x803C7A3Cu;  // MR::endGlobalEventCamera(const char*, s32, bool)
@@ -559,8 +559,6 @@ struct State {
     std::uint32_t first_meter = 0u;
     std::uint32_t first_left = 0u;
     std::uint32_t hud_call_this = 0u;  // the MeterLayout or PlayerLeft a mirrored call was made on
-    std::uint32_t heal_amount = 0u;
-    bool heal_second_turn = false;
     std::uint32_t star_swapped = 0u;  // a launch star whose step runs with the second player as the game's
     std::uint32_t pipe_swapped = 0u;  // the same for a pipe the second player goes through
     std::uint32_t pipe_out = 0u;      // the pipe of the exePlayerOut in flight
@@ -1389,18 +1387,39 @@ bool near_other_player(const Guest& guest, const State& s) {
     return std::isfinite(s.near_distance) && coop::length(player - at) < s.near_distance;
 }
 
-// A call into a star bunny's code from outside it (its nerve steps, sensor answers, catch): the code runs with the
-// brother nearer the bunny as the game's player, so the one who comes up to it is the one it talks to, runs
-// from and is caught by (the caught scene binds him), and the other is left where he is.
+// The actors whose code runs as the brother at them (nearer_player_code, and their nerve steps through
+// Spine::update): the star bunnies, and Koopa shells (JetTurtle, GoldenTurtle), which go back to their place when
+// far from the player and are taken by him.
+constexpr std::uint32_t kJetTurtleVtable = 0x80582464u;
+constexpr std::uint32_t kGoldenTurtleVtable = 0x805823E0u;
+bool is_rabbit(std::uint32_t vtable) { return vtable >= 0x8059E000u && vtable < 0x805A2000u; }  // not a constructor's
+bool is_shell(std::uint32_t vtable) { return vtable == kJetTurtleVtable || vtable == kGoldenTurtleVtable; }
+
+// Which brother the code of `actor` runs as: one whose sensor is an argument of the call (the one touching it,
+// taking it), else the nearer.
+bool second_for_actor_code(const Guest& guest, const State& s, std::uint32_t actor) {
+    if (s.down[0].down) return true;
+    for (const unsigned r : {4u, 5u}) {
+        const std::uint32_t sensor = guest.context()->gpr[r];
+        if (!plausible(sensor)) continue;
+        const std::uint32_t host = guest.u32(sensor + kSensorHost);
+        if (host == s.second) return true;
+        if (host == s.first) return false;
+    }
+    const coop::Vec3 at = guest.vec(actor + actor::kPosition);
+    return coop::length(guest.vec(s.second + actor::kPosition) - at) < coop::length(guest.vec(s.first + actor::kPosition) - at);
+}
+
+// A call into a star bunny's or a Koopa shell's code from outside it (its nerve steps, sensor answers, catch): the
+// code runs with the brother at it as the game's player, so the one who comes up to it is the one it talks to,
+// runs from, is caught by (the caught scene binds him) or is taken by, and the other is left where he is.
 void nearer_player_code(const Guest& guest, State& s) {
     const std::uint32_t actor = guest.context()->gpr[3];
     if (!plausible(actor) || !plausible(s.first) || !plausible(s.second) || s.down[1].down) return;
     const std::uint32_t vtable = guest.u32(actor);
-    if (vtable < 0x8059E000u || vtable >= 0x805A2000u) return;  // the rabbits' vtables (not a constructor)
-    const coop::Vec3 at = guest.vec(actor + actor::kPosition);
-    const bool second = s.down[0].down ||
-        coop::length(guest.vec(s.second + actor::kPosition) - at) < coop::length(guest.vec(s.first + actor::kPosition) - at);
-    if (second) s.second_scene = 30u;
+    if (!is_rabbit(vtable) && !is_shell(vtable)) return;
+    const bool second = second_for_actor_code(guest, s, actor);
+    if (second && is_rabbit(vtable)) s.second_scene = 30u;
     if (second == s.moving_second) return;
     SavedContext saved(guest.context());
     s.nearer_back_to_second = s.moving_second;
@@ -1725,11 +1744,20 @@ void talk_window_in_world(const Guest& guest, State& s, PpcContext* context) {
     }
 }
 
-// After MR::getPlayerPos in SwitchArea::movement (its `this` in r31), which turns its switch on with the player
-// inside it: the second player inside, the first not, answers with the second's position. Areas that let star
-// bunnies out of hiding, start events and so on then see either brother.
+// After MR::getPlayerPos in SwitchArea::movement, which turns its switch on with the player inside it: the second
+// player inside, the first not, answers with the second's position. Areas that let star bunnies out of hiding,
+// start boss fights (Dino Piranha's SwitchSphere) and so on then see either brother. Its `this` is in r30 (r31
+// holds a flag), taken by its vtable.
+constexpr std::uint32_t kSwitchAreaVtable = 0x8055154Cu;
 void switch_area_player_pos(const Guest& guest, const State& s, PpcContext* context) {
-    const std::uint32_t area = context->gpr[31];
+    std::uint32_t area = 0u;
+    for (const unsigned r : {30u, 31u, 29u}) {
+        const std::uint32_t candidate = context->gpr[r];
+        if (plausible(candidate) && guest.u32(candidate) == kSwitchAreaVtable) {
+            area = candidate;
+            break;
+        }
+    }
     if (!plausible(area) || !plausible(s.first) || !plausible(s.second) || s.down[1].down) return;
     bool first_in = false;
     bool second_in = false;
@@ -1887,9 +1915,12 @@ void capture_spine_begin(const Guest& guest, State& s) {
     const std::uint32_t spine = guest.context()->gpr[3];
     const std::uint32_t actor = plausible(spine) ? guest.u32(spine) : 0u;  // Spine::mExecutor
     const std::uint32_t vtable = plausible(actor) ? guest.u32(actor) : 0u;
-    if (vtable == kStarPieceVtable) {
-        // A Star Bit's nerve step, as the brother nearer it (star_piece_code_begin).
-        if (s.piece_spine_swapped || !second_nearer_piece(guest, s, actor)) return;
+    if (vtable == kStarPieceVtable || is_shell(vtable)) {
+        // A Star Bit's nerve step, as the brother nearer it (star_piece_code_begin), or a Koopa shell's
+        // (nearer_player_code).
+        const bool second = vtable == kStarPieceVtable ? second_nearer_piece(guest, s, actor)
+                                                       : plausible(s.second) && second_nearer(guest, s, actor);
+        if (s.piece_spine_swapped || !second || s.moving_second) return;
         SavedContext saved(guest.context());
         set_game_player(guest, s, true);
         s.piece_spine_swapped = true;
@@ -2265,6 +2296,9 @@ void respawn_player(const Guest& guest, std::uint32_t actor_address, coop::Vec3 
     // and the effect off. (He still stands twisted, his up vector the hole's, until he first moves.)
     for (const std::uint32_t axis : {0x24u, 0x28u, 0x2Cu}) guest.set_f32(actor_address + axis, 1.0f);  // LiveActor::mScale
     guest.call(fn::kStopEffectForce, actor_address, fn::kBlackHoleEffect);
+    // And the trail of his colour (red, green) drawn after him from the hole on: all his effects end (the fall
+    // reset his power-up; dust and the rest are emitted afresh as he moves).
+    guest.call(fn::kForceDeleteEffectAll, actor_address);
 }
 
 // ---- Drop in, drop out (docs/MULTIPLAYER.md "Drop in, drop out") ----
@@ -3218,11 +3252,6 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         s.hud_call_this = context->gpr[3];
         return;
     }
-    if (id == call::kIncPlayerLife) {
-        s.heal_amount = context->gpr[3];
-        s.heal_second_turn = s.moving_second;
-        return;
-    }
     if (id >= call::kStarStepFirst && id <= call::kStarStepLast) {
         // A launch star the second player rides: its step runs with them as the game's player (its animations,
         // its end of the ride and its jump off are the rider's).
@@ -3369,13 +3398,17 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
             }
         }
         if (his) {
-            context->pc = kCoopSkipCall;
-            ensure_second_lives(guest, s);
-            s.second_lives = std::min(s.second_lives + 1, 99);
-            if (plausible(s.second_left)) {
-                guest.set_u32(s.second_left + kPlayerLeftCount, static_cast<std::uint32_t>(s.second_lives));
-                guest.call(fn::kPlayerLeftCalls[1], s.second_left);  // PlayerLeft::forceAppear
+            {
+                // The calls below write the context (its pc too): the skip is set after them.
+                SavedContext saved(context);
+                ensure_second_lives(guest, s);
+                s.second_lives = std::min(s.second_lives + 1, 99);
+                if (plausible(s.second_left)) {
+                    guest.set_u32(s.second_left + kPlayerLeftCount, static_cast<std::uint32_t>(s.second_lives));
+                    guest.call(fn::kPlayerLeftCalls[1], s.second_left);  // PlayerLeft::forceAppear
+                }
             }
+            context->pc = kCoopSkipCall;
             trace("1-Up for the second player: %d lives", s.second_lives);
         }
         return;
@@ -3548,17 +3581,7 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
         }
         return;
     }
-    if (id == call::kIncPlayerLife) {
-        // A coin heals both players.
-        const std::uint32_t other = s.heal_second_turn ? s.first : s.second;
-        const unsigned other_index = s.heal_second_turn ? 0u : 1u;
-        if (plausible(s.second) && plausible(other) && !s.down[other_index].down && s.heal_amount > 0u &&
-            s.heal_amount < 16u) {
-            SavedContext saved(context);
-            guest.call(fn::kMarioIncLife, other, s.heal_amount);
-        }
-        return;
-    }
+    if (id == call::kIncPlayerLife) return;  // a coin heals the brother who took it (the game's player then) only
     if (id == call::kAddArchive) {
         add_partner_archive(guest, s);
         return;

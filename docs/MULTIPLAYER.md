@@ -170,12 +170,13 @@ Lives work as in New Super Mario Bros. Wii, without the bubble:
 - A black hole is a fall like any other: one life, and back beside the other. The black hole's cameras (its
   actor camera and the global "ブラックホール" event) never take the camera from the one still playing, and end
   when the fallen player is back, so the camera follows him again; the HUD the fall puts away stays up, and the
-  fall's shrink and effect are undone. A fall's later steps (exeGameOverBlackHole2) do not count it again.
-- A 1-Up (a mushroom, or a stomp chain's) the second player collects is his (`MR::incPlayerLeft` hook 89: a
-  1-Up item nearer him, or his own trample jump).
+  fall's shrink, effect and the trail of his colour drawn after him are undone (`MR::forceDeleteEffectAll`). A
+  fall's later steps (exeGameOverBlackHole2) do not count it again.
+- A 1-Up (a mushroom, or a stomp chain's) goes to the brother who collects it only (`MR::incPlayerLeft` hook 89:
+  a 1-Up item nearer the second player, or his own trample jump, is his).
 - With no lives left a player sits out, carried along hidden beside the other, until the stage reloads.
 - Both down at once is the game's own miss, and each spends a life; game over only when both are out of lives.
-- A coin heals both players.
+- A coin heals the brother who takes it only (it is taken in his turn, so `MR::incPlayerLife` heals him).
 
 HUD: the second player's life meter, tinted green, stands where the first player's would (top right), the first player's just left of it; the second player's lives counter,
 with their face, stands where the first player's would (bottom left), the first player's above it (comet timers
@@ -222,8 +223,13 @@ Level of detail: objects choose their detailed, middle or low model by the dista
 
 Items: coins, purple coins and star chips are collected by whichever brother touches them (checked with the
 agent's `actors` command). `MR::isNearPlayer` and `isNearPlayerAnyTime` count either brother; switch areas
-(`SwitchArea`, which let star bunnies out, start events and the like) see the second player when he is inside
-and the first is not; star bunnies (`TrickRabbit`, `RunawayRabbit`) run from the nearer brother.
+(`SwitchArea`: SwitchCube, SwitchSphere, SwitchCylinder, which let star bunnies out, start boss fights and the
+like) see the second player when he is inside and the first is not; star bunnies (`TrickRabbit`,
+`RunawayRabbit`) run from the nearer brother. Koopa shells (`JetTurtle`, `GoldenTurtle`) run their code as the
+brother at them (hook 53, and their nerve steps through Spine::update): far from the first brother a shell stays
+in place for the second (it went back to its place, far from the game's player), and is taken by the one whose
+sensor touches it. Checked with the agent in Tear Drop: each brother, 5900 units from the other, took a shell
+and carried it.
 
 Star Bits: a Star Bit tests the pointers only within 150 m of the game's player (`StarPiece::tryGotJudge`) and
 then flies to him, so far from the first brother the second's pointer did nothing. A Star Bit's code runs with the
@@ -249,7 +255,11 @@ Boss arenas: when a cutscene starts (or a boss's music, `MR::startBossBGM`, hook
 and his ship, Kamella, Topmaniac, Bugaboom, Dino Piranha, Fiery Dino Piranha, Major Burrows, Kingfin, Bouldergeist,
 Tarantox, Megaleg, Baron Brr) is within 8000 units of a brother while the other is away, the other is brought
 beside him (`gather_for_boss`). Other cutscenes move nobody. Checked with the agent on Dino Piranha's intro, Luigi
-24000 units away.
+24000 units away. Either brother starts a fight: a boss whose start is a switch area (Dino Piranha, Topmaniac,
+Bugaboom, Kingfin, Kamella's) starts for the second player entering it, and the first is then brought beside
+him (checked with the agent on Dino Piranha's planet, Mario 23000 units away). An area that also wants the
+player standing (arg0 set, Topmaniac's) waits for the first player to be on the ground, wherever he is.
+
 
 Online, each PC shows only its own brother's cursor: around the other brother's pointer layout's draw
 (`StarPointerLayout::drawDecoration`, hook 85) the renderer clips everything away, with the same host-side marker
