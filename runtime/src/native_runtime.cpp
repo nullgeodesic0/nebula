@@ -30296,11 +30296,21 @@ RollbackSnapshot& rollback_snapshot() {
     return snapshot;
 }
 
+// Whether region r is the first view of its host memory: MEM1 and MEM2 are each registered under several guest
+// aliases (cached, uncached, physical) over the same bytes, which are copied once.
+bool rollback_region_is_first_view(const galaxy::GuestMemoryV1& memory, std::uint32_t r) {
+    const galaxy::GuestMemoryRegionV1& region = memory.regions[r];
+    for (std::uint32_t earlier = 0; earlier < r; ++earlier) {
+        if (memory.regions[earlier].host_base == region.host_base) return false;
+    }
+    return true;
+}
+
 void rollback_copy_ram(RollbackSnapshot& s, bool to_snapshot) {
     s.ram.resize(s.memory->region_count);
     for (std::uint32_t r = 0; r < s.memory->region_count; ++r) {
         const galaxy::GuestMemoryRegionV1& region = s.memory->regions[r];
-        if (region.host_base == nullptr) continue;
+        if (region.host_base == nullptr || !rollback_region_is_first_view(*s.memory, r)) continue;
         if (to_snapshot) {
             s.ram[r].assign(region.host_base, region.host_base + region.size);
         } else {
@@ -30344,7 +30354,9 @@ bool rollback_save(void* user) {
     // Every cache keyed on guest memory (textures, display lists, decoded vertices) sees the restore as a write.
     for (std::uint32_t r = 0; r < s.memory->region_count; ++r) {
         const galaxy::GuestMemoryRegionV1& region = s.memory->regions[r];
-        if (region.host_base != nullptr) galaxy::gx::notify_guest_memory_write(region.guest_base, region.size);
+        if (region.host_base != nullptr && rollback_region_is_first_view(*s.memory, r)) {
+            galaxy::gx::notify_guest_memory_write(region.guest_base, region.size);
+        }
     }
     std::fprintf(stderr, "[rollback] restore took %.2f ms\n",
                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - restore_started).count());
