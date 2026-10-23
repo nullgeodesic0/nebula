@@ -58,7 +58,8 @@ use std::{fs, path::Path};
 //     quantized and gather-pipe lanes out of line.
 // 36: both of the above together; regenerate every module.
 // 37: co-op hook around MarioActor::addRushSensor (vehicles ridden by the first player only).
-pub const GENERATION_VERSION: u32 = 37;
+// 38: co-op hooks: boss music, the pointer layout's decoration, Star Bits, 3D sound, the 2-argument frustum test.
+pub const GENERATION_VERSION: u32 = 38;
 
 /// Shard size and per-shard source budget of the qualified module build.
 pub const MODULE_SHARD_SIZE: usize = 64;
