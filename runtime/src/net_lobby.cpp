@@ -179,6 +179,7 @@ bool receive_message(SOCKET s, sockaddr_in& from, Header& header, std::string& t
     for (const auto& [name, value] : variables) SetEnvironmentVariableW(name.c_str(), value.c_str());
     SetEnvironmentVariableW(L"GALAXY_TWO_PLAYERS", L"1");
     SetEnvironmentVariableW(L"GALAXY_NET_WAIT_PID", std::to_wstring(GetCurrentProcessId()).c_str());
+    SetEnvironmentVariableW(L"GALAXY_AGENT_RESUMED", L"1");  // agent_guest.cpp: no command runs twice
     wchar_t exe[MAX_PATH]{};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     std::wstring command_line = GetCommandLineW();
@@ -208,8 +209,26 @@ std::wstring widen(const std::string& text) {
     return std::wstring(text.begin(), text.end());
 }
 
-// The host accepted: ask the game where it is (a second at most), tell the joiner, restart as the host.
+// Live join (docs/HOT_JOIN.md): the Accept's text that tells the joiner to take the host's running game.
+constexpr const char* kLiveAccept = "live";
+
+// The host accepted. A game booted Joinable takes the joiner live: its session opens on this port and it plays on
+// (netplay_session.cpp). Otherwise (Joinable switched on later, so not deterministic from boot): ask the game where
+// it is (a second at most), tell the joiner, restart as the host.
 void accept_joiner(Lobby& l, std::unique_lock<std::mutex>& lock) {
+    if (net_live_can_accept()) {
+        for (int i = 0; i < 5; ++i) {
+            send_message(l.listen, l.asker, Message::Accept, l.build, kLiveAccept);
+            Sleep(20);
+        }
+        const unsigned port = l.listen_port;
+        close_socket(l.listen);
+        l.asked = false;
+        l.in_session = true;
+        std::fprintf(stderr, "[lobby] %s joins the running game\n", l.asker_text.c_str());
+        net_live_accept(port);
+        return;
+    }
     l.location_fresh = false;
     l.location_wanted.store(true, std::memory_order_release);
     const auto asked = Clock::now();
@@ -301,6 +320,10 @@ void step(Lobby& l, std::unique_lock<std::mutex>& lock) {
                 close_socket(l.ask);
                 l.message = text.empty() ? std::string("THE HOST SAID NO") : text;
                 return;
+            } else if (type == Message::Accept && text == kLiveAccept) {
+                close_socket(l.ask);
+                std::fprintf(stderr, "[lobby] %s accepted: taking its running game\n", l.host_text.c_str());
+                restart_into_session({{L"GALAXY_NET_JOIN", widen(l.host_text)}, {L"GALAXY_NET_HOTJOIN", L"1"}});
             } else if (type == Message::Accept) {
                 close_socket(l.ask);
                 std::fprintf(stderr, "[lobby] %s accepted; the session starts at %s\n", l.host_text.c_str(),
@@ -358,6 +381,8 @@ void run() {
         }
         {
             std::unique_lock lock(l.mutex);
+            // A live host plays on its own until it takes a joiner, and again if that joiner goes away.
+            l.in_session = net_session_requested() && !net_live_can_accept();
             if (auto_accept && l.asked) l.accept = true;
             if (!l.in_session) step(l, lock);
         }
@@ -533,7 +558,7 @@ void net_restart_alone() {
         SetEnvironmentVariableW(L"GALAXY_NET_HOME_SET", nullptr);
     }
     for (const wchar_t* name : {L"GALAXY_NET_HOST", L"GALAXY_NET_JOIN", L"GALAXY_NET_REJOIN", L"GALAXY_NET_AUTOJOIN",
-                                L"GALAXY_NET_AUTOACCEPT"}) {
+                                L"GALAXY_NET_AUTOACCEPT", L"GALAXY_NET_HOTJOIN"}) {
         SetEnvironmentVariableW(name, nullptr);
     }
     restart_into_session({});

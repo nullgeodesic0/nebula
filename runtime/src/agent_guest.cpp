@@ -148,6 +148,18 @@ Agent& agent_state() {
             std::fprintf(stderr, "[agent] commands from %s\\commands.txt\n", value);
         }
         std::free(value);
+        // A game the online lobby restarted (net_lobby.cpp) goes on from where the old process was in the command
+        // file: commands that already ran there must not run again here, on one PC only.
+        value = nullptr;
+        if (made.enabled && _dupenv_s(&value, &length, "GALAXY_AGENT_RESUMED") == 0 && value != nullptr) {
+            if (FILE* file = _fsopen((made.directory + "\\commands.txt").c_str(), "rb", _SH_DENYNO)) {
+                if (_fseeki64(file, 0, SEEK_END) == 0) made.read_offset = _ftelli64(file);
+                std::fclose(file);
+            }
+            SetEnvironmentVariableA("GALAXY_AGENT_RESUMED", nullptr);
+            _putenv_s("GALAXY_AGENT_RESUMED", "");
+        }
+        std::free(value);
         return made;
     }();
     return a;
@@ -832,6 +844,23 @@ void rejoin_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServic
             SavedContext saved(guest.context());
             request_stage(guest, "AstroGalaxy", 1);
             std::fprintf(stderr, "[net] exiting %s for the Observatory\n", scene.stage.c_str());
+        }
+        if (command == static_cast<std::uint32_t>(NetCommand::Join)) coop_request_drop_in();
+        if (command == static_cast<std::uint32_t>(NetCommand::TestStarAppear) && scene.in_game) {
+            // The first PowerStar (its vtable) among the live actors: PowerStar::requestAppear, its appear cutscene.
+            constexpr std::uint32_t kPowerStarVtable = 0x80587430u;
+            constexpr std::uint32_t kPowerStarRequestAppear = 0x8020EE98u;
+            SavedContext saved(guest.context());
+            const std::uint32_t group = guest.call(fn::kGetAllLiveActorGroup);
+            const std::uint32_t count = plausible(group) ? std::min(guest.u32(group + 0x10u), 4096u) : 0u;
+            const std::uint32_t objects = plausible(group) ? guest.u32(group + 0x14u) : 0u;
+            for (std::uint32_t i = 0u; i < count && plausible(objects); ++i) {
+                const std::uint32_t actor = guest.u32(objects + 4u * i);
+                if (!plausible(actor) || guest.u32(actor) != kPowerStarVtable) continue;
+                guest.call(kPowerStarRequestAppear, actor);
+                std::fprintf(stderr, "[net] test: Power Star %08X appears\n", actor);
+                break;
+            }
         }
     }
     if (!r.active && !net_location_wanted()) return;
