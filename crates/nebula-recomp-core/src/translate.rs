@@ -8000,9 +8000,9 @@ fn site_hook_call(pc: u32, kind: &str, argument: u32) -> String {
 }
 
 /// Co-op calls the runtime may skip from CoopBeforeCall (a player down while the other plays on, the second
-/// player's 2D updates, a Pull Star's bind of the brother not capturing).
+/// player's 2D updates, a Pull Star's bind of the brother not capturing, the second player mounting a vehicle).
 fn coop_call_skippable(id: u32) -> bool {
-    matches!(id, 19..=25 | 43..=45 | 47 | 63..=68 | 77)
+    matches!(id, 19..=25 | 43..=45 | 47 | 63..=68 | 77 | 83)
 }
 
 /// Game calls the Mario and Luigi co-op watches (CoopBeforeCall/CoopAfterCall, argument the id). The ids
@@ -8119,6 +8119,8 @@ fn coop_call_id(target: u32) -> Option<u32> {
         // MarioActor::isRequestJump2P, isKeepJump2P, isRequestSpinJump2P, MR::isPlayerPointedBy2POnTriggerButton,
         // MR::isStarPointerPointing2POnPressButton, MR::isStarPointerPointing2POnTriggerButton.
         0x802B_B578 | 0x802B_B644 | 0x802B_BB04 | 0x803F_269C | 0x803F_AF94 | 0x803F_B04C => Some(81),
+        // Vehicles (the Star Ball, the manta ray) are the first player's; the second rides along (skippable):
+        0x802C_824C => Some(83), // MarioActor::addRushSensor(HitSensor*, bool)
         _ => None,
     }
 }

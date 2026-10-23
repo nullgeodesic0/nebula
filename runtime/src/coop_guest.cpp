@@ -120,6 +120,7 @@ constexpr std::uint32_t kPointerScreenPos = 79u;  // MR::getStarPointerScreenPos
 constexpr std::uint32_t kStrokeMoment = 80u;      // MR::calcStarPointerStrokeRotateMoment(TVec3f*, const TVec3f&, f32, s32)
 constexpr std::uint32_t kCoStar = 81u;            // the second pointer's Co-Star actions (MarioActor::isRequestJump2P, ...)
 constexpr std::uint32_t kSpineUpdate = 82u;       // Spine::update(): an actor's nerve step
+constexpr std::uint32_t kAddRushSensor = 83u;     // MarioActor::addRushSensor(HitSensor*, bool) (skippable)
 }  // namespace call
 
 namespace fn {
@@ -326,6 +327,11 @@ constexpr std::uint32_t kMarioRushSensor = 0x924u;
 constexpr std::uint32_t kSensorHost = 0x24u;
 constexpr std::uint32_t kSuperSpinDriverVtable = 0x8058FF8Cu;
 constexpr std::uint32_t kSpinDriverVtable = 0x8058C5ACu;
+// Vehicles the first player rides and the second rides along with (docs/MULTIPLAYER.md "Vehicles"): the Star Ball
+// and the manta ray. (Room for each brother's own later: the second is refused only in coop_before_call.)
+constexpr std::uint32_t kTamakoroVtable = 0x805BC798u;  // __vt__8Tamakoro
+constexpr std::uint32_t kSurfRayVtable = 0x805BBFECu;   // __vt__7SurfRay
+constexpr bool is_vehicle(std::uint32_t vtable) { return vtable == kTamakoroVtable || vtable == kSurfRayVtable; }
 // Star-shaped launchers (SuperSpinDriver, SpinDriver): the actor riding them.
 constexpr std::uint32_t kStarBindActor = 0x8Cu;
 // EarthenPipe (Petari EarthenPipe.hpp): its up vector, the top joint's matrix (the mouth at column 3) and the
@@ -469,6 +475,10 @@ struct State {
     // player has been in ordinary play.
     bool travelling = false;
     bool sticky_travel = false;
+    // A cutscene (or the first player's controls held) holds the second player where he stood.
+    bool held_here = false;
+    coop::Vec3 held_at{};
+    bool riding_along = false;  // on the first player's vehicle with him
     bool level_start = false;
     unsigned controllable_frames = 0u;
     coop::CameraMatrices second_view;
@@ -763,6 +773,8 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     s.level_start = true;
     s.travelling = true;
     s.sticky_travel = false;
+    s.held_here = false;
+    s.riding_along = false;
     s.controllable_frames = 0u;
     s.follow.reset();
     // A new stage: both players in play (one out of lives comes back), its own HUD.
@@ -999,6 +1011,13 @@ void remember_first_camera(const Guest& guest, State& s) {
 // After the game moves its players, the second player: one MarioActor::movement with the game's player,
 // character and controller switched to it. Then the shared camera, and the warp back to the first player.
 // Whether a player rides a launch star (the launcher they rush with is a SuperSpinDriver or SpinDriver).
+// The vehicle a player rides (its rush partner's host is a Star Ball or manta ray), or 0.
+std::uint32_t ridden_vehicle(const Guest& guest, std::uint32_t actor_address) {
+    const std::uint32_t sensor = guest.u32(actor_address + kMarioRushSensor);
+    const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
+    return plausible(host) && is_vehicle(guest.u32(host)) ? host : 0u;
+}
+
 bool rides_star(const Guest& guest, std::uint32_t actor_address) {
     const std::uint32_t sensor = guest.u32(actor_address + kMarioRushSensor);
     if (!plausible(sensor)) return false;
@@ -2192,7 +2211,7 @@ void move_second_player(const Guest& guest, State& s) {
                       (guest.call(fn::kIsTimeKeepDemoActive) & 0xFFu) != 0u;
     if (first_held != s.second_waiting_input || demo != s.second_waiting_demo) {
         trace("second player %s (first player's controls held %d, cutscene %d)",
-              first_held || demo ? "goes beside the first" : "is free again", first_held ? 1 : 0, demo ? 1 : 0);
+              first_held || demo ? "waits" : "is free again", first_held ? 1 : 0, demo ? 1 : 0);
         s.second_waiting_input = first_held;
         s.second_waiting_demo = demo;
     }
@@ -2211,8 +2230,12 @@ void move_second_player(const Guest& guest, State& s) {
     if (s.second_scene != 0u) --s.second_scene;
     if (s.talk.candidate_frames != 0u) --s.talk.candidate_frames;
     const bool piping = s.pipe.waiting != 0u || s.pipe.follow_pipe != 0u || s.second_scene != 0u;
-    const bool first_busy =
-        !piping && (coop::second_player_waits(first_held, demo) || first_parked || s.sticky_travel);
+    // Only the flight into a galaxy (from a dome) takes the second player along with the first. A cutscene, or
+    // the game holding the first player's controls, holds the second where he stands instead (he is not brought
+    // to the first, nor left there after it).
+    const bool first_travels = !piping && (first_parked || s.sticky_travel);
+    const bool held_in_place = !piping && !first_travels && coop::second_player_waits(first_held, demo);
+    const bool first_busy = first_travels || held_in_place;
     // A level start lasts through the mission's opening camera and any event camera of the first player's
     // arrival, not just until they look controllable.
     const bool arriving = s.level_start && ((guest.call(fn::kIsOpeningCamera) & 0xFFu) != 0u ||
@@ -2225,8 +2248,19 @@ void move_second_player(const Guest& guest, State& s) {
         land_beside = true;
         trace("level start over: the second player joins the first");
     }
-    s.travelling = !piping && coop::keep_travelling(s.travelling, s.level_start || first_busy, s.controllable_frames);
+    s.travelling = !piping && coop::keep_travelling(s.travelling, s.level_start || first_travels, s.controllable_frames);
     const bool beside_first = s.travelling;
+    // The first player on a vehicle (Star Ball, manta ray): the second rides along with him, unseen and
+    // untouchable at his side, and gets off beside him when the ride ends.
+    const bool riding_along = !s.down[0].down && !s.down[1].down && !s.level_start && ridden_vehicle(guest, s.first) != 0u;
+    const bool ride_over = s.riding_along && !riding_along;
+    if (riding_along != s.riding_along) {
+        trace(riding_along ? "the first player rides a vehicle: the second rides along" : "ride over: the second gets off");
+        s.riding_along = riding_along;
+    }
+    const bool hold_here = held_in_place && !beside_first && !riding_along && !s.down[1].down;
+    if (hold_here && !s.held_here) s.held_at = guest.vec(s.second + actor::kPosition);
+    s.held_here = hold_here;
 
     const coop::Character partner = coop::partner_of(s.own);
     s.moving_second = true;
@@ -2255,14 +2289,17 @@ void move_second_player(const Guest& guest, State& s) {
     if (plausible(first_mario)) update_down_player(guest, s, 1u, first_now, guest.vec(first_mario + kMarioSideVec));
     // While the first player flies in at a level start, the second waits unseen and untouchable, out of the
     // camera's picture; they appear beside the first as they land.
-    if (s.level_start != s.second_hidden_for_start && !s.down[1].down) {
-        s.second_hidden_for_start = s.level_start;
-        guest.call(s.level_start ? fn::kHideModel : fn::kShowModel, s.second);
-        guest.set_u8(s.second + kMarioActorHidden, s.level_start ? 1u : 0u);
-        guest.call(s.level_start ? fn::kInvalidateHitSensors : fn::kValidateHitSensors, s.second);
+    // Riding along on the first player's vehicle, the same.
+    const bool hidden = s.level_start || riding_along;
+    if (hidden != s.second_hidden_for_start && !s.down[1].down) {
+        s.second_hidden_for_start = hidden;
+        guest.call(hidden ? fn::kHideModel : fn::kShowModel, s.second);
+        guest.set_u8(s.second + kMarioActorHidden, hidden ? 1u : 0u);
+        guest.call(hidden ? fn::kInvalidateHitSensors : fn::kValidateHitSensors, s.second);
     }
-    // Out of the picture: down, or waiting for the first player at a level start (still parked meanwhile).
-    const bool second_down = s.down[1].down || s.level_start;
+    // Out of the picture: down, waiting for the first player at a level start (still parked meanwhile), or riding
+    // along.
+    const bool second_down = s.down[1].down || s.level_start || riding_along;
     if ((beside_first || land_beside) && plausible(first_mario) && !s.down[1].down) {
         // Still the second player's turn: MR::setPlayerPos moves the scene's player. A puppeted first player's
         // actor sits at the origin, and at a level start the first is still flying in: the second player then
@@ -2272,6 +2309,16 @@ void move_second_player(const Guest& guest, State& s) {
                                                                        s.parked_position);
         Guest::Frame frame(guest);
         guest.call(fn::kSetPlayerPos, frame.vec(0, there));
+    } else if (riding_along) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, first_now));
+    } else if (ride_over && plausible(first_mario)) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, coop::travel_position(first_now, guest.vec(first_mario + kMarioSideVec),
+                                                                         first_now)));
+    } else if (hold_here) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, s.held_at));
     }
 
     const coop::Vec3 first_position = guest.vec(s.first + actor::kPosition);
@@ -2301,7 +2348,9 @@ void move_second_player(const Guest& guest, State& s) {
             s.layout.reset();
         }
         if (std::isfinite(distance)) share.offset = (second_position - first_position) * (0.5f * (1.0f - s.split.eased()));
-        too_far = !std::isfinite(distance) || distance >= tuning.split_warp;
+        // No tether while split: each brother may explore the whole level alone (only a lost position brings
+        // the second back).
+        too_far = !std::isfinite(distance);
     } else {
         share = coop::shared_camera(first_position, second_position);
         too_far = share.out_of_range;
@@ -2814,6 +2863,16 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         pointers_before(id, Guest(context, memory, services, guest_pc), s, context, guest_pc);
         return;
     }
+    if (id == call::kAddRushSensor) {
+        // A vehicle is the first player's to mount; the second rides along with him (move_second_player).
+        const Guest guest(context, memory, services, guest_pc);
+        const std::uint32_t sensor = context->gpr[4];
+        const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
+        if (plausible(s.second) && context->gpr[3] == s.second && plausible(host) && is_vehicle(guest.u32(host))) {
+            context->pc = kCoopSkipCall;
+        }
+        return;
+    }
     if (id == call::kGetPlayerPos) return;
     if (id == call::kAddArchive) {
         s.archive_collector = context->gpr[3];
@@ -3052,6 +3111,7 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
         pointers_after(id, guest, s, context);
         return;
     }
+    if (id == call::kAddRushSensor) return;
     if (id == call::kNearerPlayerCode) {
         if (s.nearer_depth == 0u || --s.nearer_depth != 0u || !s.nearer_swapped) return;
         SavedContext saved(context);
