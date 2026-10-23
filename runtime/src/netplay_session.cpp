@@ -531,6 +531,13 @@ void initialize(Session& s) {
     s.requested = true;
     s.host = !host_port.empty();
     coop_set_partner_input_source(&synchronised_partner_input);
+    // The other PC waits on this one's every frame: no power throttling (EcoQoS slowing a background process,
+    // or its timer resolution being ignored) even when this window is behind another or minimised.
+    PROCESS_POWER_THROTTLING_STATE throttling{};
+    throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+    throttling.StateMask = 0u;
+    (void)SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
     if (const std::string delay = env("GALAXY_NET_DELAY"); !delay.empty()) {
         s.delay = static_cast<std::uint32_t>(std::clamp(std::atoi(delay.c_str()), 1, 30));
     }
@@ -742,10 +749,16 @@ void net_frame_begin(std::uint32_t frame, const GuestMemoryV1* memory) {
         s.pace_origin_frame = frame;
         deadline = now;
     }
+    // A high-resolution waitable timer, not Sleep: Windows ignores a background or occluded process's timer
+    // resolution, which makes Sleep(1) last a whole 15.6 ms tick and the frame late.
+    static const HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                       TIMER_ALL_ACCESS);
     while (now < deadline) {
         const double remaining_ms = 1000.0 * static_cast<double>(deadline - now) / static_cast<double>(s.frequency.QuadPart);
-        if (remaining_ms > 1.5) {
-            Sleep(1);
+        if (remaining_ms > 1.0 && timer != nullptr) {
+            LARGE_INTEGER due{};
+            due.QuadPart = -static_cast<LONGLONG>((remaining_ms - 0.5) * 10000.0);  // 100 ns units, relative
+            if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, 50);
         } else {
             SwitchToThread();
         }
