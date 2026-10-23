@@ -230,6 +230,7 @@ constexpr bool in_capture_target(std::uint32_t pc) { return pc >= 0x801E1630u &&
 constexpr bool in_capture_code(std::uint32_t pc) {
     return (pc >= 0x801DEBA4u && pc < 0x801E0CF8u) || in_capture_target(pc);
 }
+constexpr bool in_star_pointer_layout(std::uint32_t pc) { return pc >= 0x803861D4u && pc < 0x803893A4u; }
 constexpr bool in_capture_receive(std::uint32_t pc) { return pc >= 0x801DF0ECu && pc < 0x801DF164u; }  // receiveOtherMsg
 
 // CameraContext (scene object 0x17), reached as MR::getCameraViewMtx does: *(r13 - 0x3A78) -> +0x24 -> +0xAC ->
@@ -2817,6 +2818,12 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
         return;
     }
     if (id == call::kPadButtonA || id == call::kPadTriggerA) {
+        // The second pointer's Co-Star grip (StarPointerLayout's Grip and Hold, with their sound) is not shown: its
+        // A is the second player's jump.
+        if (in_star_pointer_layout(guest_pc) && s.talk.pad_channel == 1u) {
+            context->gpr[3] = 0u;
+            return;
+        }
         talk_either_a(guest, s, context, id == call::kPadButtonA ? fn::kTestPadButtonA : fn::kTestPadTriggerA, guest_pc);
         return;
     }
