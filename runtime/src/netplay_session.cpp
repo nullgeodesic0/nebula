@@ -13,7 +13,11 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cstddef>
+#include <filesystem>
+#include <stdexcept>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -34,7 +38,15 @@ namespace {
 //   Hash: u32 frame, u64 MEM1 hash
 constexpr std::uint32_t kMagic = 0x504E424Eu;  // "NBNP"
 constexpr std::uint8_t kVersion = 1u;
-enum class Packet : std::uint8_t { Hello = 1, HelloAck = 2, Inputs = 3, Hash = 4 };
+enum class Packet : std::uint8_t { Hello = 1, HelloAck = 2, Inputs = 3, Hash = 4, BundleRequest = 5, BundleChunk = 6 };
+constexpr std::uint32_t kChunkBytes = 1024u;
+constexpr std::uint32_t kChunkBurst = 32u;
+
+// Settings that change what the game computes: the joiner plays with the host's. Its own controls stay.
+constexpr const char* kHostSettingKeys[] = {
+    "text_speed", "language", "motion_style", "custom_animations", "custom_model", "custom_voice", "odyssey_moveset",
+    "moveset_", "coop", "audio_",
+};
 constexpr std::uint32_t kInputsPerPacket = 8u;  // every packet repeats the last frames: a lost one costs nothing
 constexpr std::uint32_t kRing = 1024u;          // frames of inputs kept
 constexpr std::uint32_t kHashEvery = 120u;
@@ -62,6 +74,17 @@ struct WireHash {
     Header header;
     std::uint32_t frame;
     std::uint64_t hash;
+};
+struct WireBundleRequest {
+    Header header;
+    std::uint32_t first_chunk;
+};
+struct WireBundleChunk {
+    Header header;
+    std::uint32_t index;
+    std::uint32_t total_size;
+    std::uint16_t length;
+    std::uint8_t data[kChunkBytes];
 };
 #pragma pack(pop)
 static_assert(sizeof(WireHello) == sizeof(Header) + 12u && sizeof(WireHash) == sizeof(Header) + 12u);
@@ -95,6 +118,13 @@ struct Session {
     std::vector<std::pair<std::uint32_t, std::uint64_t>> my_hashes;  // (frame, hash), recent
     std::uint64_t stalls = 0u;
     double stalled_ms = 0.0;
+    // The session bundle: the host's save files and game settings (host: built on the first request; joiner:
+    // the chunks received so far).
+    std::vector<std::uint8_t> bundle;
+    bool bundle_built = false;
+    std::vector<bool> bundle_have;
+    std::uint32_t bundle_size = 0u;
+    bool bundle_size_known = false;
 };
 
 Session& session() {
@@ -177,6 +207,136 @@ void send_inputs(Session& s) {
     send_raw(s, packet.data(), static_cast<int>(sizeof(Header) + 12u + count * sizeof(WireInput)));
 }
 
+// The game's save directory (GALAXY_NAND_ROOT or %LOCALAPPDATA%\SuperMarioGalaxy\nand) and settings file
+// (GALAXY_RUNTIME_SETTINGS_PATH or %LOCALAPPDATA%\Nebula\runtime_settings.ini), as the runtime resolves them.
+std::filesystem::path env_path(const wchar_t* name) {
+    wchar_t value[MAX_PATH]{};
+    const DWORD length = GetEnvironmentVariableW(name, value, MAX_PATH);
+    return length != 0u && length < MAX_PATH ? std::filesystem::path(value) : std::filesystem::path{};
+}
+
+std::filesystem::path nand_root() {
+    if (auto root = env_path(L"GALAXY_NAND_ROOT"); !root.empty()) return root;
+    return env_path(L"LOCALAPPDATA") / L"SuperMarioGalaxy" / L"nand";
+}
+
+std::filesystem::path settings_file() {
+    if (auto path = env_path(L"GALAXY_RUNTIME_SETTINGS_PATH"); !path.empty()) return path;
+    return env_path(L"LOCALAPPDATA") / L"Nebula" / L"runtime_settings.ini";
+}
+
+std::FILE* open_file(const std::filesystem::path& path, const wchar_t* mode) {
+    std::FILE* file = nullptr;
+    return _wfopen_s(&file, path.c_str(), mode) == 0 ? file : nullptr;
+}
+
+std::string to_utf8(const std::filesystem::path& path) {
+    const std::wstring& wide = path.native();
+    if (wide.empty()) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<std::size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), size, nullptr, nullptr);
+    return out;
+}
+
+std::filesystem::path from_utf8(const std::string& text) {
+    if (text.empty()) return {};
+    const int size = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring wide(static_cast<std::size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), size);
+    return std::filesystem::path(wide);
+}
+
+bool is_host_setting(const std::string& line) {
+    for (const char* key : kHostSettingKeys) {
+        if (line.rfind(key, 0) == 0) return true;
+    }
+    return false;
+}
+
+std::vector<std::string> read_lines(const std::filesystem::path& path) {
+    std::vector<std::string> lines;
+    if (std::FILE* file = open_file(path, L"rb")) {
+        char buffer[4096];
+        while (std::fgets(buffer, sizeof(buffer), file) != nullptr) {
+            std::string line(buffer);
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+            lines.push_back(line);
+        }
+        std::fclose(file);
+    }
+    return lines;
+}
+
+void put_u32(std::vector<std::uint8_t>& out, std::uint32_t value) {
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
+}
+
+std::uint32_t get_u32(const std::vector<std::uint8_t>& in, std::size_t& at) {
+    if (at + 4u > in.size()) throw std::runtime_error("truncated session bundle");
+    std::uint32_t value = 0u;
+    for (int i = 0; i < 4; ++i) value |= static_cast<std::uint32_t>(in[at + i]) << (8 * i);
+    at += 4u;
+    return value;
+}
+
+// Bundle: u32 file count, per file (u32 path length, path in UTF-8 relative to the save directory, u32 size,
+// bytes), then u32 settings length and the host's game settings lines.
+std::vector<std::uint8_t> build_bundle() {
+    std::vector<std::uint8_t> out;
+    const std::filesystem::path root = nand_root();
+    std::vector<std::filesystem::path> files;
+    std::error_code error;
+    for (auto it = std::filesystem::recursive_directory_iterator(root, error);
+         !error && it != std::filesystem::recursive_directory_iterator(); it.increment(error)) {
+        if (it->is_regular_file(error)) files.push_back(it->path());
+    }
+    put_u32(out, static_cast<std::uint32_t>(files.size()));
+    for (const auto& file : files) {
+        std::string relative = to_utf8(std::filesystem::relative(file, root, error));
+        std::replace(relative.begin(), relative.end(), '\\', '/');
+        std::vector<std::uint8_t> bytes;
+        if (std::FILE* in = open_file(file, L"rb")) {
+            std::uint8_t buffer[65536];
+            std::size_t n = 0u;
+            while ((n = std::fread(buffer, 1, sizeof(buffer), in)) > 0u) bytes.insert(bytes.end(), buffer, buffer + n);
+            std::fclose(in);
+        }
+        put_u32(out, static_cast<std::uint32_t>(relative.size()));
+        out.insert(out.end(), relative.begin(), relative.end());
+        put_u32(out, static_cast<std::uint32_t>(bytes.size()));
+        out.insert(out.end(), bytes.begin(), bytes.end());
+    }
+    std::string settings;
+    for (const std::string& line : read_lines(settings_file())) {
+        if (is_host_setting(line)) settings += line + "\n";
+    }
+    put_u32(out, static_cast<std::uint32_t>(settings.size()));
+    out.insert(out.end(), settings.begin(), settings.end());
+    std::fprintf(stderr, "[net] session bundle: %zu save files from %s, %zu bytes\n", files.size(),
+                 to_utf8(root).c_str(), out.size());
+    return out;
+}
+
+void send_bundle_chunks(Session& s, std::uint32_t first) {
+    if (!s.bundle_built) {
+        s.bundle = build_bundle();
+        s.bundle_built = true;
+    }
+    const auto total = static_cast<std::uint32_t>(s.bundle.size());
+    for (std::uint32_t index = first; index < first + kChunkBurst && index * kChunkBytes < total + (total == 0u ? 1u : 0u);
+         ++index) {
+        WireBundleChunk chunk{};
+        chunk.header = {kMagic, static_cast<std::uint8_t>(Packet::BundleChunk), kVersion, 0u};
+        chunk.index = index;
+        chunk.total_size = total;
+        const std::uint32_t at = index * kChunkBytes;
+        chunk.length = static_cast<std::uint16_t>(std::min(kChunkBytes, total - std::min(at, total)));
+        if (chunk.length != 0u) std::memcpy(chunk.data, s.bundle.data() + at, chunk.length);
+        send_raw(s, &chunk, static_cast<int>(offsetof(WireBundleChunk, data) + chunk.length));
+    }
+}
+
 void handle_packet(Session& s, const std::uint8_t* data, int size, const sockaddr_in& from) {
     if (size < static_cast<int>(sizeof(Header))) return;
     Header header{};
@@ -213,6 +373,32 @@ void handle_packet(Session& s, const std::uint8_t* data, int size, const sockadd
         return;
     }
     if (!s.connected) return;
+    if (type == Packet::BundleRequest && s.host) {
+        if (size < static_cast<int>(sizeof(WireBundleRequest))) return;
+        WireBundleRequest request{};
+        std::memcpy(&request, data, sizeof(request));
+        send_bundle_chunks(s, request.first_chunk);
+        return;
+    }
+    if (type == Packet::BundleChunk && !s.host) {
+        if (size < static_cast<int>(offsetof(WireBundleChunk, data))) return;
+        WireBundleChunk chunk{};
+        std::memcpy(&chunk, data, std::min<std::size_t>(sizeof(chunk), static_cast<std::size_t>(size)));
+        if (!s.bundle_size_known) {
+            s.bundle_size = chunk.total_size;
+            s.bundle_size_known = true;
+            s.bundle.assign(s.bundle_size, 0u);
+            s.bundle_have.assign((s.bundle_size + kChunkBytes - 1u) / kChunkBytes, false);
+        }
+        if (chunk.index < s.bundle_have.size() && !s.bundle_have[chunk.index]) {
+            const std::uint32_t at = chunk.index * kChunkBytes;
+            if (at + chunk.length <= s.bundle.size()) {
+                std::memcpy(s.bundle.data() + at, chunk.data, chunk.length);
+                s.bundle_have[chunk.index] = true;
+            }
+        }
+        return;
+    }
     if (type == Packet::Inputs) {
         if (size < static_cast<int>(sizeof(Header) + 12u)) return;
         std::uint32_t fields[3]{};
@@ -265,6 +451,9 @@ void receive(Session& s) {
         handle_packet(s, buffer, size, from);
     }
 }
+
+void join_session(Session& s, const std::string& host_label);
+std::int64_t now_qpc();
 
 void initialize(Session& s) {
     s.initialized = true;
@@ -320,7 +509,94 @@ void initialize(Session& s) {
         s.peer_known = true;
         (void)bind(s.socket, reinterpret_cast<const sockaddr*>(&local), sizeof(local));
         std::fprintf(stderr, "[net] joining %s, input delay %u frames\n", join.c_str(), s.delay);
+        join_session(s, join);
     }
+}
+
+// Joiner, at startup (before the game reads its save or settings): fetch the host's bundle and play from it.
+// The save goes to %LOCALAPPDATA%\Nebula\netplay\<host>\saves (the rejoin cache; never the joiner's own saves),
+// the settings to ...\runtime_settings.ini: the joiner's own file with the host's game settings in place of its.
+void join_session(Session& s, const std::string& host_label) {
+    const std::int64_t started = now_qpc();
+    std::int64_t last_send = 0;
+    std::int64_t last_log = started;
+    for (;;) {
+        receive(s);
+        if (s.bundle_size_known &&
+            std::all_of(s.bundle_have.begin(), s.bundle_have.end(), [](bool have) { return have; })) {
+            break;
+        }
+        const std::int64_t now = now_qpc();
+        if (now - last_send > s.frequency.QuadPart / 20) {
+            if (!s.connected) {
+                send_hello(s, Packet::Hello);
+            } else {
+                std::uint32_t first = 0u;
+                while (first < s.bundle_have.size() && s.bundle_have[first]) ++first;
+                const WireBundleRequest request{{kMagic, static_cast<std::uint8_t>(Packet::BundleRequest), kVersion, 0u},
+                                                first};
+                send_raw(s, &request, sizeof(request));
+            }
+            last_send = now;
+        }
+        if (now - last_log > s.frequency.QuadPart * 5) {
+            std::fprintf(stderr, "[net] waiting for the host's %s\n", s.connected ? "save" : "answer");
+            last_log = now;
+        }
+        Sleep(1);
+    }
+    std::string label = host_label;
+    for (char& c : label) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '-') c = '_';
+    }
+    const std::filesystem::path session_dir = env_path(L"LOCALAPPDATA") / L"Nebula" / L"netplay" / label;
+    const std::filesystem::path saves = session_dir / L"saves";
+    std::error_code error;
+    std::filesystem::remove_all(saves, error);
+    std::filesystem::create_directories(saves, error);
+    std::size_t at = 0u;
+    const std::uint32_t files = get_u32(s.bundle, at);
+    for (std::uint32_t i = 0; i < files; ++i) {
+        const std::uint32_t path_length = get_u32(s.bundle, at);
+        if (at + path_length > s.bundle.size()) throw std::runtime_error("truncated session bundle");
+        const std::string relative(reinterpret_cast<const char*>(s.bundle.data() + at), path_length);
+        at += path_length;
+        const std::uint32_t size = get_u32(s.bundle, at);
+        if (at + size > s.bundle.size()) throw std::runtime_error("truncated session bundle");
+        const std::filesystem::path target = saves / from_utf8(relative);
+        // A path from the peer stays inside the session's save directory.
+        const auto normal = target.lexically_normal().native();
+        if (normal.rfind(saves.lexically_normal().native(), 0) != 0 || relative.find("..") != std::string::npos) {
+            throw std::runtime_error("session bundle names a file outside its save directory");
+        }
+        std::filesystem::create_directories(target.parent_path(), error);
+        if (std::FILE* out = open_file(target, L"wb")) {
+            std::fwrite(s.bundle.data() + at, 1, size, out);
+            std::fclose(out);
+        }
+        at += size;
+    }
+    const std::uint32_t settings_length = get_u32(s.bundle, at);
+    if (at + settings_length > s.bundle.size()) throw std::runtime_error("truncated session bundle");
+    const std::string host_settings(reinterpret_cast<const char*>(s.bundle.data() + at), settings_length);
+    std::string merged;
+    for (const std::string& line : read_lines(settings_file())) {
+        if (!is_host_setting(line)) merged += line + "\n";
+    }
+    merged += host_settings;
+    const std::filesystem::path session_settings = session_dir / L"runtime_settings.ini";
+    if (std::FILE* out = open_file(session_settings, L"wb")) {
+        std::fwrite(merged.data(), 1, merged.size(), out);
+        std::fclose(out);
+    }
+    // Both environments: the save directory is read through the Win32 one, the settings path through the CRT's.
+    SetEnvironmentVariableW(L"GALAXY_NAND_ROOT", saves.c_str());
+    _wputenv_s(L"GALAXY_NAND_ROOT", saves.c_str());
+    SetEnvironmentVariableW(L"GALAXY_RUNTIME_SETTINGS_PATH", session_settings.c_str());
+    _wputenv_s(L"GALAXY_RUNTIME_SETTINGS_PATH", session_settings.c_str());
+    std::fprintf(stderr, "[net] playing the host's save: %u files, %zu bytes, in %s\n", files, s.bundle.size(),
+                 to_utf8(session_dir).c_str());
+    s.bundle.clear();
 }
 
 std::uint64_t mem1_hash(const GuestMemoryV1* memory) {
