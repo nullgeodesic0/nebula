@@ -9451,7 +9451,8 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
         local.stick_x = stick_x;
         local.stick_y = stick_y;
         local.shake = shake_pressed || held(WiiTarget::NunchukShake) || motion_shake_nunchuk;
-        local.pointer_valid = ir_active;
+        // Not ir_active: the emulated Remote's IR camera state does not matter to a status built from this.
+        local.pointer_valid = pointer_active;
         local.pointer_x = s_pointer_x;
         local.pointer_y = s_pointer_y;
         galaxy::coop_publish_local_input(local);

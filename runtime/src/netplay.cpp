@@ -342,7 +342,13 @@ void netplay_kpad_after(PpcContext* context, GuestMemoryV1* memory, const Native
             // The game's Remote is neutral in deterministic mode (native_host.cpp): this PC's player is its
             // controller as the input thread published it, a KPAD status a frame.
             static coop::KpadSynth s_local_kpad;
-            const coop::KpadStatusBytes local = s_local_kpad.next(coop_local_input());
+            const coop::PartnerInput controller = coop_local_input();
+            const coop::KpadStatusBytes local = s_local_kpad.next(controller);
+            if (n.rate_every != 0u && n.frame % n.rate_every == 0u) {
+                std::fprintf(stderr, "[netplay-input] frame %u: buttons=%04x stick=(%.2f,%.2f) pointer=%d (%.2f,%.2f)\n",
+                             n.frame, controller.buttons, controller.stick_x, controller.stick_y,
+                             controller.pointer_valid ? 1 : 0, controller.pointer_x, controller.pointer_y);
+            }
             net_local_input(n.frame, 1u, local.data());
         }
         const NetInput& input = net_input(n.frame, channel == 0u ? 0u : 1u);
