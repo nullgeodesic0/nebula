@@ -116,6 +116,14 @@ Replays run unpaced (`GALAXY_DETERMINISTIC_UNPACED=1`: no waiting for real time,
 copies replay 2400 frames in about ten seconds. `--paced` replays at real-time speed. Use a run folder of its own
 (`--run`), since the copies keep the executable open.
 
+`snapshot --replay <file.rec> --save N --restore M` checks rollback: one copy replays straight, another saves the
+whole machine when frame N starts and rolls back to it when frame M starts (`GALAXY_SNAPSHOT_TEST`), and every
+frame replayed after the rollback must hash as the straight copy's did. `--dump F --symbols map` also diffs MEM1 at
+frame F. A snapshot (native_runtime.cpp `RollbackSnapshot`) is every guest thread's stack and the scheduler, guest
+RAM, the runtime's clock and deadlines, every emulated device, the native DSP and its ARAM mirror, the GX parse
+state, co-op, the Odyssey moveset and the replacement voices. State a snapshot misses shows up as a difference;
+`--env GALAXY_DETERMINISTIC_TRACE=<file-{i}>` adds per-frame digests of device and DSP state to find which.
+
 ## Found with it
 
 - Space Junk mission 1 in co-op: fixed (the second player's view unclipped the arena's web coins).
