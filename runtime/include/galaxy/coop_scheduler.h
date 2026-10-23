@@ -123,6 +123,8 @@ public:
         void (*call_guest)(void* user, std::uint32_t function, PpcContext* context) = nullptr;
         // Parks the running chain's state in `parked` and installs `resumed`.
         void (*exchange_chain)(void* user, ChainState& parked, const ChainState& resumed) = nullptr;
+        // Optional: save() has just captured, every fiber parked, on the simulation thread's own context.
+        void (*captured)(void* user) = nullptr;
     };
 
     Scheduler(Host host, GuestRam ram, PpcContext* shared_context);
@@ -167,6 +169,9 @@ public:
     // Called on a fiber: puts every fiber back as `in` captured it and resumes the fiber that called save(in),
     // inside that call (which returns true). This call does not return.
     [[noreturn]] void restore(const Snapshot& in);
+    // Hot join, before restore(in) of another process's snapshot: every stack slot `in` uses exists here, at the
+    // same place and size (the pool is at fixed addresses). Throws if one cannot be.
+    void adopt_stacks(const Snapshot& in);
 
     // SDK SelectThread(yield) on the shared register file. Returns with r3 = 0,
     // the SDK's value whether or not this thread was switched away and back.
@@ -199,6 +204,7 @@ private:
     static void fiber_entry(void* parameter);
     static void boot_entry(void* parameter);
     int acquire_stack(std::size_t size);
+    void add_stack(std::size_t size);
     void switch_context(int to_slot);
     void switch_to(std::uint32_t next);
     [[noreturn]] void return_to_boot() noexcept;

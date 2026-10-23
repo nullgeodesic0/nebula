@@ -1,4 +1,5 @@
 #include "galaxy/coop_scheduler.h"
+#include "galaxy/hot_join.h"
 
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
@@ -31,6 +32,9 @@ constexpr SIZE_T kBootStack = 256u * 1024u * 1024u;
 constexpr SIZE_T kGuardPage = 4096u;
 // coop_context_x64.asm's frame: 0x100 bytes of saved state below the return address.
 constexpr std::size_t kContextFrame = 0x100u;
+// The stack pool's fixed place: slot i at kStackPoolBase + i * kStackPoolStride (above the flat guest view).
+constexpr std::uintptr_t kStackPoolBase = 0x0000200000000000ull;
+constexpr std::uintptr_t kStackPoolStride = 0x20000000ull;  // 512 MiB: the boot stack and its guard fit
 
 extern "C" void coop_context_switch(void** save_sp, void* load_sp);
 extern "C" void coop_context_trampoline();
@@ -152,6 +156,24 @@ Scheduler::~Scheduler() {
     }
 }
 
+void Scheduler::add_stack(std::size_t size) {
+    // Slot i lives at kStackPoolBase + i * kStackPoolStride in every process, so a snapshot's stacks (and the
+    // pointers they hold into each other) are valid in another process (hot join, docs/HOT_JOIN.md).
+    void* const wanted = reinterpret_cast<void*>(kStackPoolBase + stacks_.size() * kStackPoolStride);
+    auto* base = static_cast<std::byte*>(VirtualAlloc(wanted, size + kGuardPage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (base == nullptr) {
+        std::fprintf(stderr, "[coop] stack slot %zu cannot be placed at %p; snapshots will not move to another process\n",
+                     stacks_.size(), wanted);
+        base = static_cast<std::byte*>(VirtualAlloc(nullptr, size + kGuardPage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    }
+    if (base == nullptr) {
+        throw std::runtime_error("cannot allocate a guest thread stack: " + std::to_string(GetLastError()));
+    }
+    DWORD old = 0;
+    VirtualProtect(base, kGuardPage, PAGE_NOACCESS, &old);
+    stacks_.push_back(Stack{base, base + kGuardPage + size, nullptr, false});
+}
+
 int Scheduler::acquire_stack(std::size_t size) {
     // The lowest free slot of that size, so the same sequence of thread creations gets the same stacks.
     for (std::size_t i = 0; i < stacks_.size(); ++i) {
@@ -160,15 +182,26 @@ int Scheduler::acquire_stack(std::size_t size) {
             return static_cast<int>(i);
         }
     }
-    auto* base = static_cast<std::byte*>(
-        VirtualAlloc(nullptr, size + kGuardPage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-    if (base == nullptr) {
-        throw std::runtime_error("cannot allocate a guest thread stack: " + std::to_string(GetLastError()));
-    }
-    DWORD old = 0;
-    VirtualProtect(base, kGuardPage, PAGE_NOACCESS, &old);
-    stacks_.push_back(Stack{base, base + kGuardPage + size, nullptr, true});
+    add_stack(size);
+    stacks_.back().in_use = true;
     return static_cast<int>(stacks_.size() - 1u);
+}
+
+void Scheduler::adopt_stacks(const Snapshot& in) {
+    for (const Snapshot::StackImage& image : in.stacks) {
+        const auto top = reinterpret_cast<std::uintptr_t>(image.sp) + image.bytes.size();
+        const std::uintptr_t base = kStackPoolBase + static_cast<std::uintptr_t>(image.slot) * kStackPoolStride;
+        if (top <= base + kGuardPage || top > base + kStackPoolStride) {
+            throw std::runtime_error("hot join: stack slot " + std::to_string(image.slot) + " is not in the pool");
+        }
+        while (stacks_.size() <= static_cast<std::size_t>(image.slot)) {
+            add_stack(stacks_.size() == static_cast<std::size_t>(image.slot) ? top - base - kGuardPage : kFiberStack);
+        }
+        const Stack& stack = stacks_[static_cast<std::size_t>(image.slot)];
+        if (reinterpret_cast<std::uintptr_t>(stack.base) != base || reinterpret_cast<std::uintptr_t>(stack.top) != top) {
+            throw std::runtime_error("hot join: stack slot " + std::to_string(image.slot) + " differs in this process");
+        }
+    }
 }
 
 void Scheduler::switch_context(int to_slot) {
@@ -210,7 +243,9 @@ void Scheduler::run_boot(void (*entry)(void*), void* argument) {
             host_save(*save_target_);
             resume = requester_slot_;
         } else if (request == HostRequest::Restore) {
+            hot_join::trace("host_restore");
             resume = host_restore(*restore_source_);
+            hot_join::trace("host_restore done; switching to the saved fiber");
         } else {
             break;
         }
@@ -230,6 +265,7 @@ bool Scheduler::save(Snapshot& out) {
     resumed_by_restore_ = false;
     switch_context(kNoSlot);
     // Resumed after the capture, or by restore() (which set resumed_by_restore_).
+    hot_join::trace("Scheduler::save resumed");
     const bool restored = resumed_by_restore_;
     resumed_by_restore_ = false;
     return restored;
@@ -266,6 +302,7 @@ void Scheduler::host_save(Snapshot& out) {
     out.idle_entries = idle_entries_;
     out.idle_passes = idle_passes_;
     out.valid = true;
+    if (host_.captured != nullptr) host_.captured(host_.user);
 }
 
 int Scheduler::host_restore(const Snapshot& in) {
