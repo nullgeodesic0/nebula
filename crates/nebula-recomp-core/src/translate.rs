@@ -5681,9 +5681,12 @@ fn lower_words_with_config(
             Opcode::Mtmsr => {
                 let source = gpr_rt(word);
                 let resume_pc = pc.wrapping_add(4);
+                // A compiler barrier keeps the MSR write before the checkpoint. No other thread reads the
+                // context's MSR (interrupts are published through pending_event_mask), so no interlocked
+                // fence: OSDisableInterrupts/OSRestoreInterrupts run thousands of times a frame.
                 writeln!(
                     output,
-                    "    context->msr = context->gpr[{source}];\n    std::atomic_thread_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x{pc:08X}u, 0x{resume_pc:08X}u, context, memory);"
+                    "    context->msr = context->gpr[{source}];\n    std::atomic_signal_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x{pc:08X}u, 0x{resume_pc:08X}u, context, memory);"
                 )
                 .map_err(|_| TranslationError::Formatting)?;
             }
@@ -13002,7 +13005,7 @@ mod tests {
 
     #[test]
     fn transfer_returns_follow_every_checkpoint_and_interrupt_boundary() {
-        let body = "call_return_80004008:\n    galaxy::call_return_checkpoint(services, 0x80004004u, 0x80004008u, context, memory);\n    if (--checkpoint_budget__ == 0u) [[unlikely]] { checkpoint_budget__ = galaxy::kBranchCheckpointBudget; galaxy::branch_checkpoint_taken_budgeted(services, 0x80004010u, 0x80004000u, context, memory); }\n    context->msr = context->gpr[3];\n    std::atomic_thread_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x80004014u, 0x80004018u, context, memory);\n    if (const std::uint64_t counted__ = galaxy::call_return_checkpoint_due(services); counted__ != 0u) [[unlikely]] { galaxy::call_return_checkpoint_counted(services, 0x80004020u, 0x80004024u, context, memory, counted__); GALAXY_RETURN_IF_TRANSFER_PENDING(services); }\n".to_owned();
+        let body = "call_return_80004008:\n    galaxy::call_return_checkpoint(services, 0x80004004u, 0x80004008u, context, memory);\n    if (--checkpoint_budget__ == 0u) [[unlikely]] { checkpoint_budget__ = galaxy::kBranchCheckpointBudget; galaxy::branch_checkpoint_taken_budgeted(services, 0x80004010u, 0x80004000u, context, memory); }\n    context->msr = context->gpr[3];\n    std::atomic_signal_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x80004014u, 0x80004018u, context, memory);\n    if (const std::uint64_t counted__ = galaxy::call_return_checkpoint_due(services); counted__ != 0u) [[unlikely]] { galaxy::call_return_checkpoint_counted(services, 0x80004020u, 0x80004024u, context, memory, counted__); GALAXY_RETURN_IF_TRANSFER_PENDING(services); }\n".to_owned();
         let out = apply_transfer_returns(body);
         assert!(out.contains("call_return_80004008:\n    GALAXY_CALL_RETURN_CHECKPOINT(services, 0x80004004u, 0x80004008u, context, memory);\n"));
         assert!(out.contains("GALAXY_BRANCH_CHECKPOINT_TAKEN_BUDGETED(services, 0x80004010u, 0x80004000u, context, memory); }"));

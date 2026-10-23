@@ -54,7 +54,10 @@ use std::{fs, path::Path};
 // 28: co-op lives, HUD and launch star hooks, some of them skippable; regenerate every module.
 // 29: co-op hooks for the partner's power-up archives and player-on-player attacks.
 // 35: co-op Star Pointer hooks (split-screen pointing, Pull Stars for either brother, no Co-Star actions).
-pub const GENERATION_VERSION: u32 = 35;
+// 35 (a parallel branch): mtmsr orders the MSR write with a compiler barrier, not an interlocked fence; psq_st's
+//     quantized and gather-pipe lanes out of line.
+// 36: both of the above together; regenerate every module.
+pub const GENERATION_VERSION: u32 = 36;
 
 /// Shard size and per-shard source budget of the qualified module build.
 pub const MODULE_SHARD_SIZE: usize = 64;

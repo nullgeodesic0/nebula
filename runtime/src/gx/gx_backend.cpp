@@ -430,8 +430,18 @@ public:
     [[nodiscard]] std::size_t draw_payload_size(
         std::uint8_t vtxfmt,
         std::uint16_t vertex_count) const override {
-        return VertexLoader::source_vertex_size(state_.vertex_desc(vtxfmt)) *
-               static_cast<std::size_t>(vertex_count);
+        // Vertex sizes per format, kept while the state's vertex layout revision stands (the sink lives for one
+        // scan, the only time its state is mutated by one parser). Revision 0 means unknown: decode every time.
+        const std::uint64_t revision = state_.dependency_shape_revision();
+        if (revision != vertex_size_revision_ || revision == 0u) {
+            vertex_sizes_.fill(kUnknownVertexSize);
+            vertex_size_revision_ = revision;
+        }
+        std::size_t& size = vertex_sizes_[vtxfmt & 7u];
+        if (size == kUnknownVertexSize) {
+            size = VertexLoader::source_vertex_size(state_.vertex_desc(vtxfmt));
+        }
+        return size * static_cast<std::size_t>(vertex_count);
     }
 
     void on_draw(
@@ -494,8 +504,43 @@ public:
     void on_invalidate_vertex_cache() override {}
 
 private:
+    static constexpr std::size_t kUnknownVertexSize = ~std::size_t{0};
     GxState& state_;
     const NativeServicesV1* services_;
+    mutable std::array<std::size_t, 8> vertex_sizes_{};
+    mutable std::uint64_t vertex_size_revision_ = 0u;
+};
+
+// The PE-event sink's parse without its events: GALAXY_GX_RESUME_VERIFY's full-state shadow parse.
+class SilentStateSink final : public FifoSink {
+public:
+    explicit SilentStateSink(GxState& state) : state_(state) {}
+    [[nodiscard]] std::size_t draw_payload_size(std::uint8_t vtxfmt, std::uint16_t vertex_count) const override {
+        return VertexLoader::source_vertex_size(state_.vertex_desc(vtxfmt)) * static_cast<std::size_t>(vertex_count);
+    }
+    void on_draw(PrimitiveClass, std::uint8_t vtxfmt, FifoCursor& cursor) override {
+        const std::uint16_t vertex_count = cursor.read_u16();
+        (void)cursor.take(draw_payload_size(vtxfmt, vertex_count));
+    }
+    [[nodiscard]] bool on_cached_prepared_draw_run(PrimitiveClass, std::uint8_t, std::span<const std::byte>,
+                                                   std::size_t, std::size_t, std::uint8_t, std::size_t) override {
+        return true;
+    }
+    [[nodiscard]] bool on_cached_packet_draw_run(std::uint64_t, std::size_t, PrimitiveClass, std::uint8_t,
+                                                 std::span<const std::byte>, std::size_t,
+                                                 std::span<const CachedDrawPacket>, std::uint32_t, std::uint32_t,
+                                                 std::span<const std::uint16_t>) override {
+        return true;
+    }
+    void on_efb_copy(std::uint32_t) override {}
+    void on_pe_finish() override {}
+    void on_pe_token(std::uint16_t, bool) override {}
+    void on_invalidate_textures() override {}
+    void on_tlut_load() override {}
+    void on_invalidate_vertex_cache() override {}
+
+private:
+    GxState& state_;
 };
 
 bool trace_efb_copy_enabled() {
@@ -3134,7 +3179,16 @@ void GxBackend::reset_fifo_session_state() {
     // Every dirty guest range reaches the event parser before its next scan (render_frame), so its cached
     // display lists need no byte comparison. GALAXY_GX_EVENT_DL_VERIFY=1 compares them anyway.
     event_parser_.set_display_list_bytes_trusted(!env_flag_enabled("GALAXY_GX_EVENT_DL_VERIFY"));
+    // It looks for events alone (XF loads and event-free display lists skipped), more than halving the
+    // simulation thread's parse; the renderer keeps the full state.
+    event_parser_.set_event_classification_only(true);
     event_pending_fifo_.clear();
+    resume_verify_.reset();
+    if (env_flag_enabled("GALAXY_GX_RESUME_VERIFY")) {
+        resume_verify_ = std::make_unique<ResumeVerifyParse>();
+        resume_verify_->parser.set_dump_dir("generated");
+        resume_verify_->parser.set_display_list_bytes_trusted(true);
+    }
 
     dependency_state_ = GxState{};
     dependency_state_.mark_all_dirty();
@@ -4905,24 +4959,30 @@ void GxBackend::drain_guest_memory_writes(
             // concurrent additions.
             std::uint64_t bits = dirty_page_words_[candidate].exchange(
                 0u, std::memory_order_relaxed);
+            // A run of consecutive dirty pages at a time (a written buffer sets whole words).
             while (bits != 0u) {
-                const unsigned bit_index =
+                const unsigned first =
                     static_cast<unsigned>(std::countr_zero(bits));
-                bits &= bits - 1u;
+                const unsigned run =
+                    static_cast<unsigned>(std::countr_zero(~(bits >> first)));
+                const unsigned end = first + run;
+                bits = end >= 64u ? 0u : bits & (~std::uint64_t{0} << end);
                 const std::uint32_t page = static_cast<std::uint32_t>(
-                    candidate * 64u + bit_index);
+                    candidate * 64u + first);
                 if (page >= kDirtyPageCount) {
                     continue;
                 }
+                const std::uint32_t pages =
+                    std::min<std::uint32_t>(run, kDirtyPageCount - page);
 
                 const std::uint32_t addr =
                     kDirtyTrackedBase + page * kDirtyPageSize;
                 if (have_pending &&
                     pending_range.guest_addr + pending_range.size == addr) {
-                    pending_range.size += kDirtyPageSize;
+                    pending_range.size += pages * kDirtyPageSize;
                 } else {
                     flush_pending();
-                    pending_range = GuestWriteRange{addr, kDirtyPageSize};
+                    pending_range = GuestWriteRange{addr, pages * kDirtyPageSize};
                     have_pending = true;
                 }
             }
@@ -5512,6 +5572,9 @@ void GxBackend::scan_pe_events_on_sim_thread(
                         static_cast<std::ptrdiff_t>(consumed));
             }
         }
+        if (resume_verify_) {
+            resume_verify_scan(fifo_data, fifo_size, memory);
+        }
     } catch (const GxFatalError& e) {
         std::cerr << "[GxBackend] fatal PE event scan error: " << e.what()
                   << " at offset 0x" << std::hex << e.fifo_offset()
@@ -5521,8 +5584,42 @@ void GxBackend::scan_pe_events_on_sim_thread(
     }
 }
 
+void GxBackend::resume_verify_scan(
+    const std::byte* fifo_data, std::size_t fifo_size, GuestMemoryV1* memory) {
+    ResumeVerifyParse& verify = *resume_verify_;
+    SilentStateSink sink(verify.state);
+    verify.pending.insert(verify.pending.end(), fifo_data, fifo_data + fifo_size);
+    const std::size_t consumed = verify.parser.run_available(verify.pending, memory, sink, verify.state);
+    verify.pending.erase(verify.pending.begin(), verify.pending.begin() + static_cast<std::ptrdiff_t>(consumed));
+}
+
+void GxBackend::resume_verify_compare(unsigned submissions_since_resume) const {
+    const GxState& truth = resume_verify_->state;
+    std::size_t cp = 0, bp = 0, xf = 0;
+    std::string listed;
+    for (unsigned reg = 0; reg < 0x100u; ++reg) {
+        if (state_.cp(static_cast<std::uint8_t>(reg)) != truth.cp(static_cast<std::uint8_t>(reg))) ++cp;
+        if (reg != 0xFEu && state_.bp(static_cast<std::uint8_t>(reg)) != truth.bp(static_cast<std::uint8_t>(reg))) {
+            if (++bp <= 12u) listed += " bp" + std::to_string(reg);
+        }
+    }
+    // XF registers (0x1000-0x1057: channels, texgens, viewport, projection), not matrix memory, which every draw
+    // loads again.
+    for (std::uint16_t address = 0x1000u; address < 0x1058u; ++address) {
+        if (state_.xf(address) != truth.xf(address)) {
+            if (++xf <= 12u) listed += " xf" + std::to_string(address - 0x1000u);
+        }
+    }
+    std::cerr << "[gx-resume-verify] after=" << submissions_since_resume << " cp-differ=" << cp << " bp-differ=" << bp << " xf-reg-differ=" << xf
+              << listed << '\n';
+}
+
 void GxBackend::save_rollback_state(RollbackState& out) {
     wait_for_render_idle();
+    if (resume_verify_) {
+        resume_verify_->saved_state = resume_verify_->state;
+        resume_verify_->saved_pending = resume_verify_->pending;
+    }
     out.event_state = event_state_;
     out.event_pending = event_pending_fifo_;
     out.dependency_state = dependency_state_;
@@ -5533,6 +5630,13 @@ void GxBackend::save_rollback_state(RollbackState& out) {
 
 void GxBackend::restore_rollback_state(const RollbackState& in) {
     wait_for_render_idle();
+    if (resume_verify_) {
+        resume_verify_->state = resume_verify_->saved_state;
+        resume_verify_->pending = resume_verify_->saved_pending;
+        resume_verify_->parser = FifoParser{};
+        resume_verify_->parser.set_dump_dir("generated");
+        resume_verify_->parser.set_display_list_bytes_trusted(true);
+    }
     event_state_ = in.event_state;
     event_pending_fifo_ = in.event_pending;
     dependency_state_ = in.dependency_state;
@@ -5608,6 +5712,7 @@ FramePeCompletionToken GxBackend::render_frame(
         drain_guest_memory_writes(chunk.dirty_ranges);
         coalesce_dirty_ranges(chunk.dirty_ranges);
         invalidate_dirty_display_list_ranges(event_parser_, chunk.dirty_ranges);
+        if (resume_verify_) invalidate_dirty_display_list_ranges(resume_verify_->parser, chunk.dirty_ranges);
         render_frame_on_thread(chunk);
         return chunk.pe_completion_token;
     }
@@ -5636,6 +5741,7 @@ FramePeCompletionToken GxBackend::render_frame(
         // Re-simulation: PE events exactly as a rendered frame raises them, nothing for the GPU. The writes go on
         // to the next rendered frame; the event parser's display-list cache sees them now.
         invalidate_dirty_display_list_ranges(event_parser_, drained_dirty_ranges);
+        if (resume_verify_) invalidate_dirty_display_list_ranges(resume_verify_->parser, drained_dirty_ranges);
         pending_async_dirty_ranges_.insert(
             pending_async_dirty_ranges_.end(), drained_dirty_ranges.begin(), drained_dirty_ranges.end());
         coalesce_dirty_ranges(pending_async_dirty_ranges_);
@@ -5647,15 +5753,28 @@ FramePeCompletionToken GxBackend::render_frame(
         std::lock_guard<std::mutex> lock(queue_mutex_);
         return frame_pe_completions_.issue_event_free();
     }
+    if (resume_verify_ && resume_verify_submissions_ != 0u && !resume_from_event_state_) {
+        wait_for_render_idle();
+        resume_verify_compare(9u - resume_verify_submissions_);
+        --resume_verify_submissions_;
+    }
     if (resume_from_event_state_) {
-        // The renderer missed the re-simulated frames: it takes their GX state from the PE-event parser, which
-        // parsed every one of them, and redraws everything from scratch.
+        // The renderer missed the re-simulated frames. The PE-event parser read every one of them, but only for
+        // events: its CP registers (vertex formats, arrays, matrix indices), BP write mask and command tail are
+        // exact, and the renderer takes those. XF and BP stay as the rollback restored them, from the frame the
+        // re-simulation started at: a game resends its draw state every frame, so a register a skipped frame
+        // changed and the next one does not send again is rare and only draws with its older value until sent.
+        // Everything is redrawn from scratch.
         resume_from_event_state_ = false;
         wait_for_render_idle();
-        state_ = event_state_;
+        state_.adopt_command_processor_state(event_state_);
+        if (resume_verify_) {
+            resume_verify_compare(0u);
+            resume_verify_submissions_ = 8u;
+        }
         state_.mark_all_dirty();
         pending_fifo_ = event_pending_fifo_;
-        dependency_state_ = event_state_;
+        dependency_state_ = state_;
         dependency_state_.mark_all_dirty();
         dependency_pending_fifo_ = event_pending_fifo_;
         invalidate_guest_derived_caches();
@@ -5668,6 +5787,7 @@ FramePeCompletionToken GxBackend::render_frame(
             invalidate_dirty_display_list_ranges(
                 event_parser_,
                 drained_dirty_ranges);
+            if (resume_verify_) invalidate_dirty_display_list_ranges(resume_verify_->parser, drained_dirty_ranges);
             if (display_list_dirty_invalidate_enabled() && !worker_snapshot) {
                 for (const GuestWriteRange& range : drained_dirty_ranges) {
                     (void)pe_event_classifier_
@@ -5726,6 +5846,7 @@ FramePeCompletionToken GxBackend::render_frame(
     if (!timing.vi_render_fifo_wait && !timing.pe_events_gpu_fence) {
         // The event parser trusts dirty ranges for its display-list cache: they reach it before it scans.
         invalidate_dirty_display_list_ranges(event_parser_, drained_dirty_ranges);
+        if (resume_verify_) invalidate_dirty_display_list_ranges(resume_verify_->parser, drained_dirty_ranges);
         scan_pe_events_on_sim_thread(fifo_data, fifo_size, memory, services);
         chunk.pe_events_scanned_on_sim_thread = true;
     }
@@ -5852,6 +5973,7 @@ FramePeCompletionToken GxBackend::render_frame(
         invalidate_immutable_range_cache(chunk.dirty_ranges);
     }
     invalidate_dirty_display_list_ranges(event_parser_, drained_dirty_ranges);
+    if (resume_verify_) invalidate_dirty_display_list_ranges(resume_verify_->parser, drained_dirty_ranges);
     // invalidate_dependency_range_cache above invalidates the CPU-owned dependency parser. Worker
     // mode does so in its ordered prepass.
     if (timing.pe_events_gpu_fence) {

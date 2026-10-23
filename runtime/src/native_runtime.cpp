@@ -937,6 +937,7 @@ public:
             std::clamp<std::uint64_t>(read_env_u64("GALAXY_SIM_PROFILE_FN_ROWS", 60u), 8u, 100000u));
         print_functions(out, tag("-host-fn").c_str(), host_buckets_, function_rows, pct);
         print_functions(out, tag("-other-fn").c_str(), other_buckets_, function_rows, pct);
+        print_functions(out, tag("-host-incl").c_str(), host_inclusive_buckets_, function_rows, pct);
         print_functions(out, tag("-other-caller-fn").c_str(), other_caller_buckets_, function_rows, pct);
         print_addresses(out, tag("-other-caller").c_str(), other_caller_buckets_, 32u, pct);
         print_addresses(out, tag("-blocked-site").c_str(), blocked_sites_, 24u, pct);
@@ -1237,6 +1238,7 @@ private:
             return;
         }
         ++running_samples_;
+        count_inclusive(rip, frames, frame_count);
         if (guest_index(rip, index)) {
             ++guest_counts_[index];
             ++module_buckets_[(rip - module_base_) >> 4u];
@@ -1268,6 +1270,22 @@ private:
         }
     }
 
+    // Every runtime function on the sampled stack, once per sample (by its 16-byte bucket), so a
+    // function's row is its inclusive time: the code it runs and everything it calls, guest code too.
+    void count_inclusive(std::uintptr_t rip, const std::uintptr_t* frames, std::size_t frame_count) {
+        std::uintptr_t seen[kMaxFrames + 1u]{};
+        std::size_t seen_count = 0u;
+        const auto add = [&](std::uintptr_t address) {
+            if (!in_host(address)) return;
+            const std::uintptr_t bucket = address >> 4u;
+            for (std::size_t i = 0; i < seen_count; ++i) if (seen[i] == bucket) return;
+            seen[seen_count++] = bucket;
+            ++host_inclusive_buckets_[bucket];
+        };
+        add(rip);
+        for (std::size_t i = 0; i < frame_count; ++i) add(frames[i]);
+    }
+
     HANDLE target_{};
     void* teb_{};
     std::string tag_ = "sim-profile";
@@ -1282,6 +1300,7 @@ private:
     std::vector<std::uint64_t> guest_caller_counts_;
     std::vector<std::uint64_t> guest_blocked_counts_;
     std::unordered_map<std::uintptr_t, std::uint64_t> host_buckets_;
+    std::unordered_map<std::uintptr_t, std::uint64_t> host_inclusive_buckets_;
     // Module samples by 16-byte RVA bucket, resolved offline with the
     // module's linker map (function records only name the nearest entry).
     std::unordered_map<std::uintptr_t, std::uint64_t> module_buckets_;
@@ -33807,6 +33826,8 @@ int wmain(int argc, wchar_t** argv) {
     if (read_env_flag("GALAXY_SIM_PROFILE", false) && function_records_fn != nullptr) {
         const galaxy::FunctionRecordV1* records = nullptr;
         const std::size_t record_count = function_records_fn(&records);
+        // A re-simulation profile samples nothing until the first re-simulation (boot left out).
+        if (read_env_flag("GALAXY_SIM_PROFILE_RESIM", false)) g_sim_profiler.set_sampling(false);
         g_sim_profiler.start(records, record_count, module);
     }
     if (read_env_flag("GALAXY_RENDER_PROFILE", false)) {

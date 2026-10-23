@@ -241,6 +241,16 @@ public:
     }
     void mark_all_dirty() { dirty_ = ~0u; }
 
+    // Takes `other`'s CP registers and BP write mask, the state a PE-event classification parse keeps exact
+    // (FifoParser::set_event_classification_only); XF and the other BP registers stay as they are.
+    void adopt_command_processor_state(const GxState& other) {
+        if (cp_ != other.cp_) {
+            cp_ = other.cp_;
+            invalidate_dependency_shape();
+        }
+        bp_mask_ = other.bp_mask_;
+    }
+
 private:
     friend class GxBackendMemorySnapshotTestAccess;
     void invalidate_dependency_shape() noexcept {
