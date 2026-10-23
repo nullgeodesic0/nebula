@@ -1050,6 +1050,8 @@ public:
     DspAudioStats dsp_audio_stats() const { return dsp_audio_stats_; }
     IpcDebugSnapshot ipc_debug_snapshot() const;
     bool ipc_interrupt_pending() const;
+    // PI_INTSR as a pure observation (no device service), for the deterministic trace.
+    [[nodiscard]] std::uint32_t peek_processor_interrupt_cause() const { return processor_interrupt_cause(); }
 
     // Filled by the WGPIPE write intercept.
     // The observable GX stream: every complete staged burst lands first.

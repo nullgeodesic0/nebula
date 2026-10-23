@@ -16767,8 +16767,9 @@ bool dispatch_external_interrupt(
         if (!galaxy::netplay_tracing() || context == nullptr || memory == nullptr || state.services == nullptr) {
             return coop_dispatch_external_interrupt(state, resume_address, context, memory, exact_idle_ee);
         }
-        const std::uint32_t cause = galaxy::guest_load_u32(memory, 0xCC003000u, state.services, resume_address) &
-                                    galaxy::guest_load_u32(memory, 0xCC003004u, state.services, resume_address);
+        // Passive reads only (the cause register, the virtual counter): the trace must not change the run.
+        const std::uint32_t cause =
+            state.address_space != nullptr ? state.address_space->peek_processor_interrupt_cause() : 0u;
         const bool delivered =
             coop_dispatch_external_interrupt(state, resume_address, context, memory, exact_idle_ee);
         if (delivered) {
