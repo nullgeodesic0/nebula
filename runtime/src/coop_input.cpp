@@ -2,6 +2,7 @@
 
 #include "galaxy/agent.h"
 
+#include <atomic>
 #include <mutex>
 
 namespace galaxy {
@@ -32,6 +33,15 @@ AgentPadSlots& agent_pad_slots() {
 }
 
 }  // namespace
+
+namespace {
+// Whether the second player is in the game (hot join, coop_guest.cpp), for the input thread's controller routing.
+std::atomic<bool> g_second_present{false};
+}  // namespace
+
+void coop_set_second_present(bool present) noexcept { g_second_present.store(present, std::memory_order_release); }
+
+bool coop_second_present() noexcept { return g_second_present.load(std::memory_order_acquire); }
 
 void coop_publish_partner_input(const coop::PartnerInput& input) noexcept {
     PartnerInputSlot& slot = partner_input_slot();
@@ -77,6 +87,19 @@ PartnerInputSlot& local_input_slot() {
     return slot;
 }
 }  // namespace
+
+namespace {
+std::atomic<CoopOnlineMenuPoll> g_online_menu_poll{nullptr};
+}  // namespace
+
+void coop_set_online_menu_poll(CoopOnlineMenuPoll poll) noexcept {
+    g_online_menu_poll.store(poll, std::memory_order_release);
+}
+
+bool coop_online_menu_poll(bool toggle, bool up, bool down, bool choose, bool back) noexcept {
+    const CoopOnlineMenuPoll poll = g_online_menu_poll.load(std::memory_order_acquire);
+    return poll != nullptr && poll(toggle, up, down, choose, back);
+}
 
 void coop_publish_local_input(const coop::PartnerInput& input) noexcept {
     PartnerInputSlot& slot = local_input_slot();

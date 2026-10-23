@@ -240,7 +240,6 @@ struct SplitTuning {
     float split_extent = 0.85f;
     float merge_extent = 0.6f;
     float split_at = 6000.0f;
-    float split_warp = 15000.0f;
     // The second player's camera: `distance` behind and `height` above the point it looks at, which is
     // `look_height` above the player; it trails the player (a lazy follow) and eases by `follow` a frame.
     float distance = 1000.0f;

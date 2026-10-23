@@ -8844,14 +8844,40 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     // first player's input and goes to coop_guest.cpp as Wii Remote channel 1.
     constexpr std::size_t kNoPartnerPad = static_cast<std::size_t>(-1);
     std::size_t partner_pad = kNoPartnerPad;
+    // Hot join (docs/MULTIPLAYER.md "Drop in, drop out"): while the second player sits out every controller drives
+    // the first, and one that is not the first player's (not the one driving) is the candidate whose + drops the
+    // second player in (its + goes to him, not to the first player's pause). Once he is in, the controller that
+    // joined is his (`s_partner_pad`; the default rule below when the game started with him in).
+    std::size_t join_pad = kNoPartnerPad;
+    static std::uint32_t s_partner_pad = 0u;
+    static bool s_partner_pad_known = false;
+    const std::uint32_t driving_before = s_driving_pad;
     galaxy::coop::PartnerInput partner_input{};
     // Online, each PC is one player: every controller here is theirs.
-    if (galaxy::coop_enabled() && use_pads && !galaxy::net_session_requested()) {
-        std::size_t connected = 0u;
-        for (std::size_t index = 0; index < live_pads.size(); ++index) {
-            if (!live_pads[index].sample.connected) continue;
-            if (connected < 2u) partner_pad = index;
-            ++connected;
+    if (galaxy::coop_available() && use_pads && !galaxy::net_session_requested()) {
+        const bool present = galaxy::coop_second_present() || !galaxy::coop_hot_join();
+        if (present) {
+            if (s_partner_pad_known) {
+                for (std::size_t index = 0; index < live_pads.size(); ++index) {
+                    if (live_pads[index].sample.connected && pad_key(live_pads[index]) == s_partner_pad) partner_pad = index;
+                }
+            } else {
+                // The second connected controller, or the only one (the keyboard and mouse are then the first's).
+                std::size_t connected = 0u;
+                for (std::size_t index = 0; index < live_pads.size(); ++index) {
+                    if (!live_pads[index].sample.connected) continue;
+                    if (connected < 2u) partner_pad = index;
+                    ++connected;
+                }
+                if (partner_pad != kNoPartnerPad) {
+                    s_partner_pad = pad_key(live_pads[partner_pad]);
+                    s_partner_pad_known = true;
+                }
+            }
+        } else {
+            for (std::size_t index = 0; index < live_pads.size() && join_pad == kNoPartnerPad; ++index) {
+                if (live_pads[index].sample.connected && pad_key(live_pads[index]) != driving_before) join_pad = index;
+            }
         }
     }
     if (use_pads) {
@@ -8889,6 +8915,15 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
                 update_partner_pointer(partner_input, pad, pad_logic, tuning, gyro_pointing);
                 continue;
             }
+            if (index == join_pad) {
+                // Its + asks for the second player (coop_guest.cpp update_presence) and becomes his controller.
+                partner_input = galaxy::coop::partner_input_from(pad_logic, false);
+                if (pad_logic.held(galaxy::input::WiiTarget::Plus)) {
+                    s_partner_pad = pad_key(pad);
+                    s_partner_pad_known = true;
+                }
+                pad_logic.pressed &= ~galaxy::input::wii_target_bit(galaxy::input::WiiTarget::Plus);
+            }
             const float speed = pad.sample.scheme == galaxy::input::ControlScheme::Xbox
                 ? xinput_pointer_speed_or(tuning.pointer_speed) : tuning.pointer_speed;
             if (tuning.invert_pointer_y) pad_logic.pointer_y = -pad_logic.pointer_y;
@@ -8914,7 +8949,7 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     } else {
         s_pad_previous_pressed = {};
     }
-    if (galaxy::coop_enabled()) galaxy::coop_publish_partner_input(partner_input);
+    if (galaxy::coop_available()) galaxy::coop_publish_partner_input(partner_input);
     galaxy::input::LogicalInput keyboard_logic{};
     if (use_keyboard) {
         keyboard_logic = galaxy::input::evaluate_keyboard_bindings(keyboard_table, keyboard_levels);
@@ -9455,6 +9490,30 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
         local.pointer_valid = pointer_active;
         local.pointer_x = s_pointer_x;
         local.pointer_y = s_pointer_y;
+        // No pause online: + and HOME open this PC's own menu instead (the game plays on for both), which takes
+        // the D-pad or stick, A and B while it is open. Buttons held as it closes stay out of the game until
+        // released, so the A that chose a row is not a jump.
+        static std::uint32_t s_previous = 0u;
+        static std::uint32_t s_hidden = 0u;
+        static int s_stick_previous = 0;
+        const std::uint32_t pressed = local.buttons & ~s_previous;
+        s_previous = local.buttons;
+        const int stick = stick_y > 0.6f ? 1 : (stick_y < -0.6f ? -1 : 0);
+        const bool stick_up = stick == 1 && s_stick_previous != 1;
+        const bool stick_down = stick == -1 && s_stick_previous != -1;
+        s_stick_previous = stick;
+        const bool open = galaxy::coop_online_menu_poll(
+            (pressed & (button::kPlus | button::kHome)) != 0u, (pressed & button::kUp) != 0u || stick_up,
+            (pressed & button::kDown) != 0u || stick_down, (pressed & button::kA) != 0u,
+            (pressed & button::kB) != 0u);
+        if (open) {
+            s_hidden = local.buttons;
+            local = galaxy::coop::PartnerInput{};
+            local.connected = true;
+        } else {
+            s_hidden &= local.buttons;
+            local.buttons &= ~(s_hidden | button::kPlus | button::kHome);
+        }
         galaxy::coop_publish_local_input(local);
     }
 

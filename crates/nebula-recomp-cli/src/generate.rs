@@ -53,7 +53,13 @@ use std::{fs, path::Path};
 // 27: hooks around JKRSolidHeap::allocFromHead/allocFromTail (stage heap overflow); regenerate every module.
 // 28: co-op lives, HUD and launch star hooks, some of them skippable; regenerate every module.
 // 29: co-op hooks for the partner's power-up archives and player-on-player attacks.
-pub const GENERATION_VERSION: u32 = 34;
+// 35: co-op Star Pointer hooks (split-screen pointing, Pull Stars for either brother, no Co-Star actions).
+// 35 (a parallel branch): mtmsr orders the MSR write with a compiler barrier, not an interlocked fence; psq_st's
+//     quantized and gather-pipe lanes out of line.
+// 36: both of the above together; regenerate every module.
+// 37: co-op hook around MarioActor::addRushSensor (vehicles ridden by the first player only).
+// 38: co-op hooks: boss music, the pointer layout's decoration, Star Bits, 3D sound, the 2-argument frustum test.
+pub const GENERATION_VERSION: u32 = 38;
 
 /// Shard size and per-shard source budget of the qualified module build.
 pub const MODULE_SHARD_SIZE: usize = 64;

@@ -57,6 +57,7 @@ struct Netplay {
     std::map<std::pair<std::uint32_t, std::uint32_t>, Sample> replay;  // (frame, channel)
     std::uint32_t frame = 0u;    // game frames so far (channel 0 reads at kFrameReadSite)
     std::uint32_t peek_sequence = 0u;  // EFB peeks so far this frame (netplay_efb_peek)
+    std::uint32_t pending_command = 0u;  // a NetCommand from this frame's inputs (netplay_take_command)
     std::uint32_t channel = 0xFFFFFFFFu;
     std::uint32_t buffer = 0u;
     std::uint32_t other_channel = 0xFFFFFFFFu;  // a KPADRead off the frame site, online
@@ -187,17 +188,18 @@ void write_hash(Netplay& n, const GuestMemoryV1* memory) {
 
 // GALAXY_STATE_DUMP="<frame>,<path>": MEM1 as it is when that frame starts, raw, to diff two runs' state.
 void write_dump(Netplay& n, const GuestMemoryV1* memory) {
+    // MEM1 to the path, MEM2 (64 MB) beside it as <path>.mem2.
     if (memory == nullptr) return;
     for (std::uint32_t r = 0; r < memory->region_count; ++r) {
         const GuestMemoryRegionV1& region = memory->regions[r];
-        if (region.host_base == nullptr || region.size != 0x01800000u) continue;
+        if (region.host_base == nullptr || (region.size != 0x01800000u && region.size != 0x04000000u)) continue;
+        const std::string path = region.size == 0x01800000u ? n.dump_path : n.dump_path + ".mem2";
         std::FILE* file = nullptr;
-        if (fopen_s(&file, n.dump_path.c_str(), "wb") == 0 && file != nullptr) {
+        if (fopen_s(&file, path.c_str(), "wb") == 0 && file != nullptr) {
             std::fwrite(region.host_base, 1, region.size, file);
             std::fclose(file);
-            std::fprintf(stderr, "[netplay] MEM1 at frame %u dumped to %s\n", n.frame, n.dump_path.c_str());
+            std::fprintf(stderr, "[netplay] guest memory at frame %u dumped to %s\n", n.frame, path.c_str());
         }
-        return;
     }
 }
 
@@ -386,6 +388,36 @@ void netplay_kpad_after(PpcContext* context, GuestMemoryV1* memory, const Native
             net_local_input(n.frame, 1u, local.data());
         }
         const NetInput& input = net_input(n.frame, channel == 0u ? 0u : 1u);
+        if (channel == 0u) {
+            // A player's online-menu command in this frame's inputs (either's): carried out at the next frame's
+            // start on both PCs (agent_guest.cpp rejoin_frame).
+            const std::uint32_t command = input.command | net_input(n.frame, 1u).command;
+            if (command != 0u) n.pending_command = command;
+        }
+        if (channel == 0u) {
+            // A rejoin passing the logo (agent_guest.cpp): A for the first player, on both PCs alike.
+            static bool s_rejoin_a = false;
+            const bool press = netplay_rejoin_press_a();
+            if (press || s_rejoin_a) {
+                std::array<std::uint8_t, kStatusSize> status = input.status;
+                const auto get = [&](std::size_t at) {
+                    return (static_cast<std::uint32_t>(status[at]) << 24u) | (static_cast<std::uint32_t>(status[at + 1u]) << 16u) |
+                           (static_cast<std::uint32_t>(status[at + 2u]) << 8u) | status[at + 3u];
+                };
+                const auto put = [&](std::size_t at, std::uint32_t value) {
+                    for (int i = 0; i < 4; ++i) status[at + i] = static_cast<std::uint8_t>(value >> (24 - 8 * i));
+                };
+                const std::uint32_t a = coop::button::kA;
+                put(coop::kpad::kHold, press ? get(coop::kpad::kHold) | a : get(coop::kpad::kHold));
+                if (press && !s_rejoin_a) put(coop::kpad::kTrig, get(coop::kpad::kTrig) | a);
+                if (!press && s_rejoin_a) put(coop::kpad::kRelease, get(coop::kpad::kRelease) | a);
+                s_rejoin_a = press;
+                write(n.buffer, status.data(), kStatusSize);
+                context->gpr[3] = std::max<std::uint32_t>(input.count, 1u);
+                if (channel == kChannels - 1u) ++n.frame;
+                return;
+            }
+        }
         write(n.buffer, input.status.data(), kStatusSize);
         context->gpr[3] = input.count;
     } else if (auto it = n.replay.find({n.frame, channel}); it != n.replay.end()) {
@@ -409,6 +441,12 @@ std::uint32_t netplay_pending_channel() noexcept {
 
 std::uint32_t netplay_frame() noexcept {
     return netplay().frame;
+}
+
+std::uint32_t netplay_take_command() noexcept {
+    const std::uint32_t command = netplay().pending_command;
+    netplay().pending_command = 0u;
+    return command;
 }
 
 namespace {

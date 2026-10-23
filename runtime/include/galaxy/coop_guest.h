@@ -49,6 +49,15 @@ void coop_request_second_player_mode(std::uint16_t mode) noexcept;
 
 // The agent's per-frame step (agent_guest.cpp), at the first player's controller read: with or without co-op.
 void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc);
+// Online co-op's rejoin (agent_guest.cpp, net_lobby.h), at the same read: the location the lobby asks for, and
+// a session's way back to it. While it passes the logo, both PCs' first player presses A.
+void rejoin_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc);
+[[nodiscard]] bool netplay_rejoin_press_a() noexcept;
+
+// Local hot join (docs/MULTIPLAYER.md "Drop in, drop out"): whether the second player is in the game, set by
+// coop_guest.cpp, read by the input thread to give him a controller of his own (native_host.cpp).
+void coop_set_second_present(bool present) noexcept;
+[[nodiscard]] bool coop_second_present() noexcept;
 
 // The second player's controller, published by the input thread and read once a game frame.
 void coop_publish_partner_input(const coop::PartnerInput& input) noexcept;
@@ -62,6 +71,10 @@ void coop_set_partner_input_source(CoopPartnerInputSource source) noexcept;
 // input thread. The game's own Remote reads see a neutral Remote in deterministic mode, so netplay.cpp builds this
 // PC's player's KPAD status from this instead.
 void coop_publish_local_input(const coop::PartnerInput& input) noexcept;
+// Online play's own menu (net_lobby.h gx::online_menu_poll), reached from the input thread through this hook.
+using CoopOnlineMenuPoll = bool (*)(bool toggle, bool up, bool down, bool choose, bool back) noexcept;
+void coop_set_online_menu_poll(CoopOnlineMenuPoll poll) noexcept;
+[[nodiscard]] bool coop_online_menu_poll(bool toggle, bool up, bool down, bool choose, bool back) noexcept;
 [[nodiscard]] coop::PartnerInput coop_local_input();
 
 }  // namespace galaxy

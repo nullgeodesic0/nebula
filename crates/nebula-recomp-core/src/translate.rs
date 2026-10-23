@@ -5681,9 +5681,12 @@ fn lower_words_with_config(
             Opcode::Mtmsr => {
                 let source = gpr_rt(word);
                 let resume_pc = pc.wrapping_add(4);
+                // A compiler barrier keeps the MSR write before the checkpoint. No other thread reads the
+                // context's MSR (interrupts are published through pending_event_mask), so no interlocked
+                // fence: OSDisableInterrupts/OSRestoreInterrupts run thousands of times a frame.
                 writeln!(
                     output,
-                    "    context->msr = context->gpr[{source}];\n    std::atomic_thread_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x{pc:08X}u, 0x{resume_pc:08X}u, context, memory);"
+                    "    context->msr = context->gpr[{source}];\n    std::atomic_signal_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x{pc:08X}u, 0x{resume_pc:08X}u, context, memory);"
                 )
                 .map_err(|_| TranslationError::Formatting)?;
             }
@@ -7997,9 +8000,9 @@ fn site_hook_call(pc: u32, kind: &str, argument: u32) -> String {
 }
 
 /// Co-op calls the runtime may skip from CoopBeforeCall (a player down while the other plays on, the second
-/// player's 2D updates).
+/// player's 2D updates, a Pull Star's bind of the brother not capturing, the second player mounting a vehicle).
 fn coop_call_skippable(id: u32) -> bool {
-    matches!(id, 19..=25 | 43..=45 | 47 | 63..=68)
+    matches!(id, 19..=25 | 43..=45 | 47 | 63..=68 | 77 | 83)
 }
 
 /// Game calls the Mario and Luigi co-op watches (CoopBeforeCall/CoopAfterCall, argument the id). The ids
@@ -8100,6 +8103,33 @@ fn coop_call_id(target: u32) -> Option<u32> {
         0x8016_6C6C => Some(72), // LodCtrl::calcDistanceToCamera() const
         // Co-op talk windows stand in the world at their NPC (from TalkBalloon::updateBalloon, by call site).
         0x802A_0028 => Some(73), // TalkMessageCtrl::updateBalloonPos()
+        // Co-op Star Pointers. In split screen each pointer tests targets with its own half's camera.
+        // isStarPointerPointingCore(StarPointerTargetInfo*, const LiveActor*, s32 channel, ...):
+        0x803F_A488 => Some(74),
+        0x803C_6E04 => Some(75), // MR::calcScreenPosition(TVec2f*, const TVec3f&) (GCapture's, by call site)
+        // Pull Stars answer the brother whose pointer is on them: GCapture and GCaptureTarget run with him as
+        // the game's player and his pointer as channel 0's.
+        0x801E_0C14 => Some(76), // MR::isOnTractTrigger(): the capturing brother's A only
+        0x801D_EBA4..=0x801E_0CF7 | 0x801E_1630..=0x801E_2407 => Some(77), // GCapture, GCaptureTarget
+        0x8016_FAE8 => Some(82), // Spine::update(): their nerve steps (reached by tail branches) as well
+        0x803F_A9A8 => Some(78), // MR::isStarPointerPointing(const LiveActor*, s32, bool, const char*)
+        0x803F_B5BC => Some(79), // MR::getStarPointerScreenPosition(s32)
+        0x803F_BDE0 => Some(80), // MR::calcStarPointerStrokeRotateMoment(TVec3f*, const TVec3f&, f32, s32)
+        // Co-Star actions on the second pointer's A (jump assist, enemies held, launch stars fired) are off:
+        // MarioActor::isRequestJump2P, isKeepJump2P, isRequestSpinJump2P, MR::isPlayerPointedBy2POnTriggerButton,
+        // MR::isStarPointerPointing2POnPressButton, MR::isStarPointerPointing2POnTriggerButton.
+        0x802B_B578 | 0x802B_B644 | 0x802B_BB04 | 0x803F_269C | 0x803F_AF94 | 0x803F_B04C => Some(81),
+        // Vehicles (the Star Ball, the manta ray) are the first player's; the second rides along (skippable):
+        0x802C_824C => Some(83), // MarioActor::addRushSensor(HitSensor*, bool)
+        // A boss fight begins (its music): the brother away from the arena is brought in.
+        0x803F_A0EC => Some(84), // MR::startBossBGM(s32)
+        // Online each PC shows its own brother's cursor (a renderer-only clip around the other's).
+        0x8038_839C => Some(85), // StarPointerLayout::drawDecoration() const (from StarPointerLayout::draw)
+        // Star Bits answer the nearer brother (their distance gate, pointing and flight home use the player).
+        0x8023_CB3C..=0x8024_06FF => Some(86), // StarPiece and its nerves
+        // 3D sound: a source nearer the second player is heard as if he stood where the first is.
+        0x8002_8884 => Some(87), // AudDopplerAudienceState::convertAbsToRel(const TVec3f&, JAUDopplerAudibleRelPos*)
+        0x8015_FD74 => Some(88), // ClippingJudge::isJudgedToClipFrustum(const TVec3f&, f32) const (the far plane's)
         _ => None,
     }
 }
@@ -12986,7 +13016,7 @@ mod tests {
 
     #[test]
     fn transfer_returns_follow_every_checkpoint_and_interrupt_boundary() {
-        let body = "call_return_80004008:\n    galaxy::call_return_checkpoint(services, 0x80004004u, 0x80004008u, context, memory);\n    if (--checkpoint_budget__ == 0u) [[unlikely]] { checkpoint_budget__ = galaxy::kBranchCheckpointBudget; galaxy::branch_checkpoint_taken_budgeted(services, 0x80004010u, 0x80004000u, context, memory); }\n    context->msr = context->gpr[3];\n    std::atomic_thread_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x80004014u, 0x80004018u, context, memory);\n    if (const std::uint64_t counted__ = galaxy::call_return_checkpoint_due(services); counted__ != 0u) [[unlikely]] { galaxy::call_return_checkpoint_counted(services, 0x80004020u, 0x80004024u, context, memory, counted__); GALAXY_RETURN_IF_TRANSFER_PENDING(services); }\n".to_owned();
+        let body = "call_return_80004008:\n    galaxy::call_return_checkpoint(services, 0x80004004u, 0x80004008u, context, memory);\n    if (--checkpoint_budget__ == 0u) [[unlikely]] { checkpoint_budget__ = galaxy::kBranchCheckpointBudget; galaxy::branch_checkpoint_taken_budgeted(services, 0x80004010u, 0x80004000u, context, memory); }\n    context->msr = context->gpr[3];\n    std::atomic_signal_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x80004014u, 0x80004018u, context, memory);\n    if (const std::uint64_t counted__ = galaxy::call_return_checkpoint_due(services); counted__ != 0u) [[unlikely]] { galaxy::call_return_checkpoint_counted(services, 0x80004020u, 0x80004024u, context, memory, counted__); GALAXY_RETURN_IF_TRANSFER_PENDING(services); }\n".to_owned();
         let out = apply_transfer_returns(body);
         assert!(out.contains("call_return_80004008:\n    GALAXY_CALL_RETURN_CHECKPOINT(services, 0x80004004u, 0x80004008u, context, memory);\n"));
         assert!(out.contains("GALAXY_BRANCH_CHECKPOINT_TAKEN_BUDGETED(services, 0x80004010u, 0x80004000u, context, memory); }"));

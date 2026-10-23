@@ -17,6 +17,8 @@ void netplay_kpad_after(PpcContext* context, GuestMemoryV1* memory, const Native
 [[nodiscard]] std::uint32_t netplay_pending_channel() noexcept;
 // Game frames so far (the first player's per-frame controller reads).
 [[nodiscard]] std::uint32_t netplay_frame() noexcept;
+// Online: a NetCommand (netplay_session.h) a player's input carried in the frame just read, once; 0 for none.
+[[nodiscard]] std::uint32_t netplay_take_command() noexcept;
 // GALAXY_DETERMINISTIC_TRACE=<file>: true when tracing; netplay_trace writes "<frame> <text>" lines there (flushed,
 // since probe runs end with TerminateProcess), for diffing two replays' event order.
 [[nodiscard]] bool netplay_tracing() noexcept;
