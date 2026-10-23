@@ -79,6 +79,9 @@ struct RuntimeSettings {
     bool net_joinable = false;
     unsigned net_port = 7777u;
     std::array<char, 64> net_join_address{};
+    // Which device plays which brother on this PC (player_devices.h Router::format_seats), chosen in the Players
+    // panel: `xbox.0=second,keyboard.0=first`. Empty: every seat automatic.
+    std::array<char, 160> player_devices{};
 };
 
 // The language the game runs in this session: the setting when the game first asks (at boot), then

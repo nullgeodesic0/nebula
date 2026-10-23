@@ -200,6 +200,9 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
     } else if (std::strcmp(key, "net_join_address") == 0) {
         settings.net_join_address.fill('\0');
         (void)strncpy_s(settings.net_join_address.data(), settings.net_join_address.size(), value, _TRUNCATE);
+    } else if (std::strcmp(key, "player_devices") == 0) {
+        settings.player_devices.fill('\0');
+        (void)strncpy_s(settings.player_devices.data(), settings.player_devices.size(), value, _TRUNCATE);
     } else if (std::strcmp(key, "custom_animations") == 0) {
         if (_stricmp(value, "on") == 0 || std::strcmp(value, "1") == 0) settings.custom_animations = true;
         if (_stricmp(value, "off") == 0 || std::strcmp(value, "0") == 0) settings.custom_animations = false;
@@ -606,6 +609,7 @@ bool reload_runtime_audio_settings_if_changed() noexcept {
         settings.net_joinable = parsed.net_joinable;
         settings.net_port = parsed.net_port;
         settings.net_join_address = parsed.net_join_address;
+        settings.player_devices = parsed.player_devices;
         set_runtime_settings(settings);
         input::set_controls_config(controls);
         record_input_mode_sync(file_mode, settings.input_mode);
@@ -658,6 +662,7 @@ bool save_runtime_settings_to_file() {
                  << "net_joinable=" << (settings.net_joinable ? "on" : "off") << '\n'
                  << "net_port=" << settings.net_port << '\n'
                  << "net_join_address=" << settings.net_join_address.data() << '\n'
+                 << "player_devices=" << settings.player_devices.data() << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;

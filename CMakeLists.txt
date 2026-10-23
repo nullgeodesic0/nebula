@@ -337,7 +337,8 @@ target_link_libraries(
 
 add_library(galaxy_runtime_settings STATIC
     runtime/src/runtime_settings.cpp
-    runtime/src/input_bindings.cpp)
+    runtime/src/input_bindings.cpp
+    runtime/src/player_devices.cpp)
 target_link_libraries(
     galaxy_runtime_settings
     PUBLIC galaxy_runtime_abi galaxy_atomic_file)
@@ -1079,6 +1080,9 @@ add_executable(galaxy_split_effects_tests
     runtime/src/gx/split_effects_tests.cpp)
 target_include_directories(galaxy_split_effects_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/runtime/include)
 
+add_executable(galaxy_player_devices_tests runtime/src/player_devices_tests.cpp)
+target_link_libraries(galaxy_player_devices_tests PRIVATE galaxy_runtime_settings)
+
 add_executable(galaxy_xfb_present_selection_tests
     runtime/src/gx/xfb_present_selection_tests.cpp)
 target_link_libraries(galaxy_xfb_present_selection_tests PRIVATE galaxy_gx)
@@ -1202,6 +1206,7 @@ if(MSVC)
         galaxy_sampler_key_tests
         galaxy_xfb_present_selection_tests
         galaxy_split_effects_tests
+        galaxy_player_devices_tests
         galaxy_efb_conversion_tests
         galaxy_line_point_raster_tests
         galaxy_sorted_dirty_ranges_tests
@@ -1299,6 +1304,7 @@ galaxy_add_native_test(compact_memory_snapshot galaxy_memory_snapshot_tests)
 galaxy_add_native_test(sampler_key_packing galaxy_sampler_key_tests)
 galaxy_add_native_test(xfb_present_selection galaxy_xfb_present_selection_tests)
 galaxy_add_native_test(split_screen_effects galaxy_split_effects_tests)
+galaxy_add_native_test(player_devices galaxy_player_devices_tests)
 galaxy_add_native_test(efb_content_key_identity galaxy_efb_conversion_tests --content-key-hash)
 galaxy_add_native_test(efb_conversion_pipeline galaxy_efb_conversion_tests)
 galaxy_add_native_test(efb_oversized_content_retirement galaxy_efb_conversion_tests --oversized-content-cache)

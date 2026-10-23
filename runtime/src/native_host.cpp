@@ -10,6 +10,7 @@
 #include "galaxy/controller_hid.h"
 #include "galaxy/coop.h"
 #include "galaxy/coop_guest.h"
+#include "galaxy/player_devices.h"
 #include "galaxy/input_bindings.h"
 #include "galaxy/native_input.h"
 #include "galaxy/native_settings_pad.h"
@@ -8842,57 +8843,92 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     const galaxy::input::tilt::Vec3* tilt_up = nullptr;
     // Scheme of the controller whose button prompts the game shows (button_prompts.h).
     std::optional<galaxy::input::ControlScheme> prompt_scheme;
-    // Mario and Luigi co-op: the second connected controller is the second player's (the only one, when
-    // a single controller is connected: the keyboard and mouse are then the first player's). It leaves the
-    // first player's input and goes to coop_guest.cpp as Wii Remote channel 1.
-    constexpr std::size_t kNoPartnerPad = static_cast<std::size_t>(-1);
-    std::size_t partner_pad = kNoPartnerPad;
-    // Hot join (docs/MULTIPLAYER.md "Drop in, drop out"): while the second player sits out every controller drives
-    // the first, and one that is not the first player's (not the one driving) is the candidate whose + drops the
-    // second player in (its + goes to him, not to the first player's pause). Once he is in, the controller that
-    // joined is his (`s_partner_pad`; the default rule below when the game started with him in).
-    std::size_t join_pad = kNoPartnerPad;
-    static std::uint32_t s_partner_pad = 0u;
-    static bool s_partner_pad_known = false;
-    const std::uint32_t driving_before = s_driving_pad;
-    galaxy::coop::PartnerInput partner_input{};
-    // Online, each PC is one player: every controller here is theirs.
-    if (galaxy::coop_available() && use_pads && !galaxy::net_session_requested()) {
-        const bool present = galaxy::coop_second_present() || !galaxy::coop_hot_join();
-        if (present) {
-            if (s_partner_pad_known) {
-                for (std::size_t index = 0; index < live_pads.size(); ++index) {
-                    if (live_pads[index].sample.connected && pad_key(live_pads[index]) == s_partner_pad) partner_pad = index;
-                }
-            } else {
-                // The second connected controller, or the only one (the keyboard and mouse are then the first's).
-                std::size_t connected = 0u;
-                for (std::size_t index = 0; index < live_pads.size(); ++index) {
-                    if (!live_pads[index].sample.connected) continue;
-                    if (connected < 2u) partner_pad = index;
-                    ++connected;
-                }
-                if (partner_pad != kNoPartnerPad) {
-                    s_partner_pad = pad_key(live_pads[partner_pad]);
-                    s_partner_pad_known = true;
-                }
-            }
-        } else {
-            for (std::size_t index = 0; index < live_pads.size() && join_pad == kNoPartnerPad; ++index) {
-                if (live_pads[index].sample.connected && pad_key(live_pads[index]) != driving_before) join_pad = index;
-            }
-        }
+    // Which device plays which brother (player_devices.h): the router picks the driving device, the second
+    // player's controller (his join press while he is out, the disconnect grace) and the seats a menu chose.
+    static galaxy::players::Router s_router;
+    static bool s_router_loaded = false;
+    if (!s_router_loaded) {
+        s_router.parse_seats(galaxy::get_runtime_settings().player_devices.data());
+        s_router_loaded = true;
     }
+    if (auto requests = galaxy::players::take_seat_requests(); !requests.empty()) {
+        for (const auto& [key, seat] : requests) s_router.set_seat(key, seat);
+        galaxy::RuntimeSettings settings = galaxy::get_runtime_settings();
+        const std::string seats = s_router.format_seats();
+        settings.player_devices.fill('\0');
+        (void)strncpy_s(settings.player_devices.data(), settings.player_devices.size(), seats.c_str(), _TRUNCATE);
+        galaxy::set_runtime_settings(settings);
+        (void)galaxy::save_runtime_settings_to_file();
+    }
+    // Every device's input this poll, before the router decides whose it is.
+    std::array<galaxy::input::LogicalInput, XUSER_MAX_COUNT + kMaxSwitchPads> pad_logics{};
+    std::array<galaxy::players::DeviceFrame, XUSER_MAX_COUNT + kMaxSwitchPads + 1u> device_frames{};
+    std::size_t device_frame_count = 0u;
+    const std::uint32_t plus_bit = galaxy::input::wii_target_bit(galaxy::input::WiiTarget::Plus);
+    if (use_pads) {
+        for (std::size_t index = 0; index < live_pads.size(); ++index) {
+            const LivePad& pad = live_pads[index];
+            if (!pad.sample.connected) {
+                s_pad_previous_pressed[index] = 0u;
+                continue;
+            }
+            const galaxy::input::SchemeTuning& tuning = controls.config.tune(pad.sample.scheme);
+            const bool gyro_pointing = tuning.gyro_pointer && pad.imu_live;
+            const std::uint32_t previous = s_pad_previous_pressed[index];
+            pad_logics[index] = galaxy::input::evaluate_pad_bindings(
+                controls.config.table(pad.sample.scheme), pad.sample, trigger_threshold, previous, gyro_pointing);
+            s_pad_previous_pressed[index] = pad_logics[index].pressed;
+            const bool moved = pad_has_input(pad.sample) || pad.shake_remote || pad.shake_nunchuk ||
+                               std::fabs(pad.gyro_x) + std::fabs(pad.gyro_y) > 0.003f;
+            device_frames[device_frame_count++] = {
+                pad_key(pad), moved, (pad_logics[index].pressed & plus_bit) != 0u && (previous & plus_bit) == 0u};
+        }
+    } else {
+        s_pad_previous_pressed = {};
+    }
+    galaxy::input::LogicalInput keyboard_logic{};
+    if (use_keyboard) {
+        keyboard_logic = galaxy::input::evaluate_keyboard_bindings(keyboard_table, keyboard_levels);
+        if (controls.config.tune(galaxy::input::ControlScheme::Keyboard).invert_pointer_y) {
+            keyboard_logic.pointer_y = -keyboard_logic.pointer_y;
+        }
+        static std::uint32_t s_keyboard_previous = 0u;
+        const bool keys_moved =
+            keyboard_logic.pressed != 0u || keyboard_logic.stick_x != 0.0f || keyboard_logic.stick_y != 0.0f;
+        device_frames[device_frame_count++] = {galaxy::players::kKeyboard, keys_moved,
+                                               (keyboard_logic.pressed & plus_bit) != 0u && (s_keyboard_previous & plus_bit) == 0u};
+        s_keyboard_previous = keyboard_logic.pressed;
+    }
+    // Online, each PC is one player: every device here is theirs.
+    const bool coop_routing = galaxy::coop_available() && use_pads && !galaxy::net_session_requested();
+    const bool second_present = galaxy::coop_second_present() || !galaxy::coop_hot_join();
+    const double now_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const galaxy::players::Route route = s_router.step(
+        std::span(device_frames.data(), device_frame_count), second_present, now_seconds, coop_routing);
+    galaxy::players::post_events(s_router.take_events());
+    {
+        galaxy::players::Status status;
+        for (std::size_t index = 0; index < device_frame_count && index < status.devices.size(); ++index) {
+            const galaxy::players::DeviceKey key = device_frames[index].key;
+            status.devices[status.device_count++] = {key, s_router.seat(key), key == route.driving, key == route.second};
+        }
+        status.second_present = coop_routing && second_present;
+        status.waiting = route.waiting;
+        status.grace_left = route.grace_left;
+        galaxy::players::publish_status(status);
+    }
+    s_driving_pad = route.driving == galaxy::players::kKeyboard ? kDrivingKeyboard
+                    : route.driving == galaxy::players::kNoDevice ? kDrivingNone
+                                                                  : route.driving;
+    galaxy::coop::PartnerInput partner_input{};
+    // His controller is gone: he stays in, still, until the grace ends.
+    if (route.waiting) partner_input.connected = true;
     if (use_pads) {
         const LivePad* driving = nullptr;
         const LivePad* first_connected = nullptr;
-        for (std::size_t pad_index = 0; pad_index < live_pads.size(); ++pad_index) {
-            const LivePad& pad = live_pads[pad_index];
-            if (!pad.sample.connected || pad_index == partner_pad) continue;
+        for (const LivePad& pad : live_pads) {
+            if (!pad.sample.connected || !route.feeds_first(pad_key(pad))) continue;
             if (first_connected == nullptr) first_connected = &pad;
-            const bool moved = pad_has_input(pad.sample) || pad.shake_remote || pad.shake_nunchuk ||
-                               std::fabs(pad.gyro_x) + std::fabs(pad.gyro_y) > 0.003f;
-            if (moved) s_driving_pad = pad_key(pad);
             if (pad_key(pad) == s_driving_pad) driving = &pad;
         }
         if (driving == nullptr && s_driving_pad != kDrivingKeyboard) driving = first_connected;
@@ -8903,30 +8939,19 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
         }
         for (std::size_t index = 0; index < live_pads.size(); ++index) {
             const LivePad& pad = live_pads[index];
-            if (!pad.sample.connected) {
-                s_pad_previous_pressed[index] = 0u;
-                continue;
-            }
+            if (!pad.sample.connected) continue;
             const galaxy::input::SchemeTuning& tuning = controls.config.tune(pad.sample.scheme);
             const bool gyro_pointing = tuning.gyro_pointer && pad.imu_live;
-            galaxy::input::LogicalInput pad_logic = galaxy::input::evaluate_pad_bindings(
-                controls.config.table(pad.sample.scheme), pad.sample, trigger_threshold,
-                s_pad_previous_pressed[index], gyro_pointing);
-            s_pad_previous_pressed[index] = pad_logic.pressed;
-            if (index == partner_pad) {
+            galaxy::input::LogicalInput pad_logic = pad_logics[index];
+            const galaxy::players::DeviceKey key = pad_key(pad);
+            if (key == route.second) {
                 partner_input = galaxy::coop::partner_input_from(pad_logic, pad.shake_remote || pad.shake_nunchuk);
                 update_partner_pointer(partner_input, pad, pad_logic, tuning, gyro_pointing);
                 continue;
             }
-            if (index == join_pad) {
-                // Its + asks for the second player (coop_guest.cpp update_presence) and becomes his controller.
-                partner_input = galaxy::coop::partner_input_from(pad_logic, false);
-                if (pad_logic.held(galaxy::input::WiiTarget::Plus)) {
-                    s_partner_pad = pad_key(pad);
-                    s_partner_pad_known = true;
-                }
-                pad_logic.pressed &= ~galaxy::input::wii_target_bit(galaxy::input::WiiTarget::Plus);
-            }
+            if (!route.feeds_first(key)) continue;
+            // A free controller's + asks for the second player (coop_guest.cpp update_presence), never the pause.
+            if (route.is_join_candidate(key)) pad_logic.pressed &= ~plus_bit;
             const float speed = pad.sample.scheme == galaxy::input::ControlScheme::Xbox
                 ? xinput_pointer_speed_or(tuning.pointer_speed) : tuning.pointer_speed;
             if (tuning.invert_pointer_y) pad_logic.pointer_y = -pad_logic.pointer_y;
@@ -8949,20 +8974,19 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
                 gyro_y += tuning.invert_pointer_y ? -pad.gyro_y : pad.gyro_y;
             }
         }
-    } else {
-        s_pad_previous_pressed = {};
+    }
+    // The keyboard seated as the second player's (or seated nobody's).
+    if (use_keyboard && coop_routing) {
+        if (route.second == galaxy::players::kKeyboard) {
+            partner_input = galaxy::coop::partner_input_from(keyboard_logic, false);
+            keyboard_logic = {};
+        } else if (!route.feeds_first(galaxy::players::kKeyboard)) {
+            keyboard_logic = {};
+        } else if (route.is_join_candidate(galaxy::players::kKeyboard)) {
+            keyboard_logic.pressed &= ~plus_bit;
+        }
     }
     if (galaxy::coop_available()) galaxy::coop_publish_partner_input(partner_input);
-    galaxy::input::LogicalInput keyboard_logic{};
-    if (use_keyboard) {
-        keyboard_logic = galaxy::input::evaluate_keyboard_bindings(keyboard_table, keyboard_levels);
-        if (controls.config.tune(galaxy::input::ControlScheme::Keyboard).invert_pointer_y) {
-            keyboard_logic.pointer_y = -keyboard_logic.pointer_y;
-        }
-        if (keyboard_logic.pressed != 0u || keyboard_logic.stick_x != 0.0f || keyboard_logic.stick_y != 0.0f) {
-            s_driving_pad = kDrivingKeyboard;
-        }
-    }
     {
         // F1 > Game > Button prompts: the controller in use, or always one family.
         using galaxy::ButtonPrompts;
