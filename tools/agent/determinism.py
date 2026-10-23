@@ -296,9 +296,12 @@ def cmd_netpair(args):
     host = copies[0]
     try:
         host.wait_for(lambda s: s.get('frame', 0) > 0, timeout=120.0, what='the host to start')
-        for _ in range(args.presses):
-            host.command('press 1 A 4', timeout=120.0)
-            host.command('wait 40', timeout=120.0)
+        if args.scenario == 'observatory':
+            play_observatory(host)
+        else:
+            for _ in range(args.presses):
+                host.command('press 1 A 4', timeout=120.0)
+                host.command('wait 40', timeout=120.0)
     except nebula_agent.GameError as e:
         print('host input stopped: %s' % e)
     deadline = time.time() + args.timeout
@@ -395,6 +398,8 @@ def main(argv=None):
     net.add_argument('--port', type=int, default=27777)
     net.add_argument('--presses', type=int, default=25)
     net.add_argument('--dump', type=int, default=0, help='dump MEM1 at this frame in both and diff them')
+    net.add_argument('--scenario', choices=('opening', 'observatory'), default='opening',
+                     help="the host's play: A presses through the opening, or into file 1 and around the Observatory")
     net.add_argument('--symbols', default=None)
     args = parser.parse_args(argv)
     if args.command == 'netpair':
