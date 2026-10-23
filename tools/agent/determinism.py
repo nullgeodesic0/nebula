@@ -43,6 +43,22 @@ def read_hashes(path):
     return out
 
 
+def open_process(pid):
+    """A handle that keeps a copy's exit code readable after it ends (Windows)."""
+    import ctypes
+    return ctypes.windll.kernel32.OpenProcess(0x1000 | 0x00100000, False, pid) or None  # QUERY_LIMITED | SYNCHRONIZE
+
+
+def exit_code(handle):
+    import ctypes
+    if not handle:
+        return None
+    code = ctypes.c_ulong()
+    if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value == 259:  # STILL_ACTIVE
+        return None
+    return code.value
+
+
 def run_copies(args, tag, count, env, last_frame, timeout, per_copy=None):
     """Launches `count` deterministic copies at once with `env` (plus a per-copy {i} filled in, and per_copy[i] if
     given), waits for all of them to quit at `last_frame` (or crash, or time out) and returns their instances."""
@@ -60,7 +76,8 @@ def run_copies(args, tag, count, env, last_frame, timeout, per_copy=None):
         extra.update({k: v.replace('{i}', str(i)) for k, v in env.items()})
         if per_copy is not None:
             extra.update(per_copy[i])
-        inst.launch(fresh_saves=True, extra_env=extra)
+        pid = inst.launch(fresh_saves=True, extra_env=extra)
+        inst.process_handle = open_process(pid)
         instances.append(inst)
     deadline = time.time() + timeout
     while time.time() < deadline and any(inst.running() for inst in instances):
@@ -72,6 +89,9 @@ def run_copies(args, tag, count, env, last_frame, timeout, per_copy=None):
         crash = inst.crash()
         if crash:
             print('  %s crashed: %s' % (inst.name, crash[0]))
+        code = exit_code(getattr(inst, 'process_handle', None))
+        if code not in (None, 0):
+            print('  %s exited with 0x%08X' % (inst.name, code))
     return instances
 
 
@@ -271,6 +291,64 @@ def cmd_snapshot(args):
     return 0
 
 
+def cmd_join(args):
+    """Hot join across processes (docs/HOT_JOIN.md): copy A replays and writes a snapshot file when --save starts,
+    then goes on; copy B boots, loads the file when its own frame count reaches --load-at and goes on from there.
+    From --save on both hash MEM1 every frame and must agree."""
+    out = os.path.abspath(args.out)
+    os.makedirs(out, exist_ok=True)
+    started = time.time()
+    path = os.path.join(out, 'snapshot.join')
+    if os.path.exists(path):
+        os.remove(path)
+    common = dict(parse_env(args.env), GALAXY_INPUT_REPLAY=os.path.abspath(args.replay), GALAXY_STATE_HASH_EVERY='1',
+                  GALAXY_STATE_HASH_FROM=str(args.save), GALAXY_STATE_HASH_CHUNKS='1')
+    if args.dump:
+        common['GALAXY_STATE_DUMP'] = '%d,%s' % (args.dump, os.path.join(out, 'mem-{i}.bin'))
+    print('A: replay, write the snapshot when frame %d starts, go on to frame %d' % (args.save, args.frames))
+    a = dict(common, GALAXY_STATE_HASH=os.path.join(out, 'join-a.hash'),
+             GALAXY_SNAPSHOT_WRITE='%d,%s' % (args.save, path))
+    if args.trace:
+        a['GALAXY_DETERMINISTIC_TRACE'] = os.path.join(out, 'trace-a.txt')
+    if args.dump:
+        a['GALAXY_STATE_DUMP'] = '%d,%s' % (args.dump, os.path.join(out, 'mem-a.bin'))
+    inst = run_copies(args, 'join-a', 1, a, args.frames, args.timeout)[0]
+    for line in inst.log_tail(400, '[hot-join]'):
+        print('  ' + line)
+    if not os.path.exists(path):
+        print('A wrote no snapshot')
+        return 2
+    print('B: boot, load it when its own frame %d starts, go on to frame %d' % (args.load_at, args.frames))
+    b = dict(common, GALAXY_STATE_HASH=os.path.join(out, 'join-b.hash'),
+             GALAXY_SNAPSHOT_LOAD='%d,%s' % (args.load_at, path))
+    if args.trace:
+        b['GALAXY_DETERMINISTIC_TRACE'] = os.path.join(out, 'trace-b.txt')
+    if args.dump:
+        b['GALAXY_STATE_DUMP'] = '%d,%s' % (args.dump, os.path.join(out, 'mem-b.bin'))
+    inst = run_copies(args, 'join-b', 1, b, args.frames, args.timeout)[0]
+    for line in inst.log_tail(400, '[hot-join]') + inst.log_tail(400, '[netplay] joined'):
+        print('  ' + line)
+    first = read_hashes(os.path.join(out, 'join-a.hash'))
+    second = read_hashes(os.path.join(out, 'join-b.hash'))
+    frames = sorted(f for f in set(first) & set(second) if f > args.save)
+    if not frames:
+        print('no frames to compare (B reached %s)' % (max(second) if second else 'none'))
+        return 2
+    if args.dump:
+        dumps = [os.path.join(out, 'mem-%s.bin' % c) for c in 'ab']
+        if all(os.path.exists(d) for d in dumps):
+            print('MEM1 at frame %d, A vs B:' % args.dump)
+            diff_dumps(dumps[0], dumps[1], load_symbols(args.symbols), 30)
+    for frame in frames:
+        if first[frame][0] != second[frame][0]:
+            megabytes = [k for k in range(len(first[frame][1])) if first[frame][1][k] != second[frame][1][k]]
+            print('differ from frame %d (MB %s); B reached frame %d (%.0f s)' % (frame, megabytes, max(second),
+                                                                              time.time() - started))
+            return 1
+    print('identical at every frame %d..%d (%.0f s)' % (frames[0], frames[-1], time.time() - started))
+    return 0
+
+
 def cmd_netpair(args):
     """A host and a joiner on this machine over localhost (GALAXY_NET_HOST / GALAXY_NET_JOIN): the host's agent
     presses A through the opening; both copies hash MEM1 and must agree at every sample."""
@@ -392,6 +470,15 @@ def main(argv=None):
     snap.add_argument('--dump', type=int, default=0, help='also dump MEM1 at this frame in both and diff them')
     snap.add_argument('--symbols', default=None, help='a decomp symbol map, to name the differing words')
     snap.add_argument('--env', action='append', help='NAME=VALUE for both copies')
+    join = sub.add_parser('join', help='a snapshot file written by one copy and resumed by another (hot join)')
+    join.add_argument('--replay', required=True)
+    join.add_argument('--save', type=int, required=True, help='frame A writes the snapshot at')
+    join.add_argument('--load-at', type=int, default=300, help="B's own frame to load it at")
+    join.add_argument('--frames', type=int, default=0, help='last frame (default: 300 after --save)')
+    join.add_argument('--dump', type=int, default=0, help='also dump MEM1 at this frame in both and diff them')
+    join.add_argument('--symbols', default=None)
+    join.add_argument('--trace', action='store_true', help='per-frame device digests in both (GALAXY_DETERMINISTIC_TRACE)')
+    join.add_argument('--env', action='append', help='NAME=VALUE for both copies')
     net = sub.add_parser('netpair', help='a host and a joiner over localhost must stay identical')
     net.add_argument('--frames', type=int, default=3000)
     net.add_argument('--every', type=int, default=30)
@@ -408,6 +495,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == 'netpair':
         return cmd_netpair(args)
+    if args.command == 'join':
+        args.frames = args.frames or args.save + 300
+        return cmd_join(args)
     if args.command == 'snapshot':
         args.frames = args.frames or args.restore + 120
         return cmd_snapshot(args)

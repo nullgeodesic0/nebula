@@ -5,6 +5,8 @@
 #include "galaxy/gx_d3d12.h"
 #include "galaxy/net_lobby.h"
 #include "galaxy/netplay.h"
+#include "galaxy/hot_join.h"
+#include "galaxy/runtime_settings.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -22,6 +24,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <mutex>
 #include <stdexcept>
 #include <cstdio>
 #include <cstdlib>
@@ -42,9 +45,13 @@ namespace {
 //           then per frame: u32 count, u32 peek count, kNetMaxPeeks x u32 peeks, kNetStatusSize status bytes
 //   Hash: u32 frame, u64 MEM1 hash
 constexpr std::uint32_t kMagic = 0x504E424Eu;  // "NBNP"
-constexpr std::uint8_t kVersion = 2u;
-// Bye: the sender has left the session (its online menu).
-enum class Packet : std::uint8_t { Hello = 1, HelloAck = 2, Inputs = 3, Hash = 4, BundleRequest = 5, BundleChunk = 6, Bye = 7 };
+constexpr std::uint8_t kVersion = 3u;
+// Bye: the sender has left the session (its online menu). StreamRequest / StreamChunk / Ready: a live join
+// (docs/HOT_JOIN.md).
+enum class Packet : std::uint8_t {
+    Hello = 1, HelloAck = 2, Inputs = 3, Hash = 4, BundleRequest = 5, BundleChunk = 6, Bye = 7,
+    StreamRequest = 8, StreamChunk = 9, Ready = 10,
+};
 constexpr std::uint32_t kChunkBytes = 1024u;
 constexpr const wchar_t* kNandMetaStream = L":galaxy.isfs.meta";  // native_host.cpp's per-file NAND metadata
 constexpr std::uint32_t kChunkBurst = 32u;
@@ -57,6 +64,15 @@ constexpr const char* kHostSettingKeys[] = {
 constexpr std::uint32_t kInputsPerPacket = 8u;  // every packet repeats the last frames: a lost one costs nothing
 constexpr std::uint32_t kRing = 1024u;          // frames of inputs kept
 constexpr std::uint32_t kHashEvery = 120u;
+// Live join: the stream's chunks, how many the joiner may ask for at once, the joiner's own frame that loads the
+// snapshot (its title is up), and how far ahead of the host the join frame is put once the joiner has caught up.
+constexpr std::uint32_t kStreamChunk = 1200u;
+constexpr std::uint32_t kStreamWindowMax = 512u;
+constexpr std::uint32_t kStreamWindowMin = 16u;
+constexpr std::uint32_t kLoadFrame = 30u;
+constexpr std::uint32_t kJoinMargin = 60u;
+constexpr std::uint32_t kStreamMagic = 0x4A4C424Eu;  // "NBLJ"
+constexpr std::uint32_t kNone = 0xFFFFFFFFu;
 
 #pragma pack(push, 1)
 struct Header {
@@ -92,6 +108,28 @@ struct WireBundleChunk {
     std::uint32_t total_size;
     std::uint16_t length;
     std::uint8_t data[kChunkBytes];
+};
+// Live join. The stream: u32 magic, u32 snapshot frame F, u32 compressed size, the compressed snapshot image
+// (hot_join::make_image), then a WireRecord per frame from F on: the host's input as that frame used it.
+struct WireStreamRequest {
+    Header header;
+    std::uint32_t first_chunk;
+    std::uint32_t window;
+};
+struct WireStreamChunk {
+    Header header;
+    std::uint32_t index;
+    std::uint16_t length;
+    std::uint8_t data[kStreamChunk];
+};
+struct WireReady {
+    Header header;
+    std::uint32_t frame;
+};
+struct WireRecord {
+    std::uint32_t frame;
+    std::uint32_t join_frame;  // kNone until the host has named it
+    WireInput input;
 };
 #pragma pack(pop)
 static_assert(sizeof(WireHello) == sizeof(Header) + 12u && sizeof(WireHash) == sizeof(Header) + 12u);
@@ -131,6 +169,36 @@ struct Session {
     std::vector<bool> bundle_have;
     std::uint32_t bundle_size = 0u;
     bool bundle_size_known = false;
+    // Live join (docs/HOT_JOIN.md).
+    bool live = false;
+    enum class Live : std::uint8_t { Solo, Starting, Streaming, Joined, Booting, CatchUp, Edge };
+    Live phase = Live::Solo;
+    std::atomic<bool> accept_pending{false};  // the lobby accepted (its thread); the game thread opens the session
+    unsigned live_port = 0u;
+    bool snapshot_wanted = false;
+    std::uint32_t snapshot_frame = kNone;  // F
+    std::uint32_t join_frame = kNone;      // J
+    std::uint32_t current_frame = 0u;
+    // Host: the stream as built so far (the head once the snapshot is compressed) and its compressor.
+    std::mutex stream_mutex;
+    std::vector<std::uint8_t> stream_head;
+    std::vector<std::uint8_t> records;
+    bool stream_ready = false;
+    std::thread compressor;
+    std::int64_t last_request = 0;
+    // Joiner: the stream received so far, by chunk, and what is made of it.
+    std::vector<std::uint8_t> stream_in;
+    std::vector<std::uint16_t> chunk_length;
+    std::uint32_t first_missing = 0u;
+    std::uint32_t window = 32u;
+    std::uint32_t asked_first = 0u, asked_window = 0u;
+    std::int64_t last_ask = 0;
+    std::size_t parsed = 0u;  // stream bytes taken into the image or the history
+    std::uint32_t blob_size = kNone;
+    std::vector<std::uint8_t> image;
+    bool image_ready = false;
+    std::vector<NetInput> history;  // the host's inputs from F on (history[t - F])
+    std::int64_t last_ready = 0;
 };
 
 Session& session() {
@@ -189,6 +257,8 @@ unsigned me(const Session& s) { return s.host ? 0u : 1u; }
 
 void send_inputs(Session& s) {
     if (!s.connected) return;
+    // Live: inputs before the join frame travel in the stream (with their final peek answers).
+    if (s.live && s.join_frame == kNone) return;
     std::vector<std::uint8_t> packet(sizeof(Header) + 12u + kInputsPerPacket * sizeof(WireInput));
     const std::uint32_t last = s.newest_local_frame;
     const std::uint32_t first = last + 1u >= kInputsPerPacket ? last + 1u - kInputsPerPacket : 0u;
@@ -362,6 +432,7 @@ std::vector<std::uint8_t> build_bundle() {
 
 void send_bundle_chunks(Session& s, std::uint32_t first) {
     if (!s.bundle_built) {
+        if (s.live) return;  // built at the snapshot (net_live_snapshot_taken): the save as of that frame
         s.bundle = build_bundle();
         s.bundle_built = true;
     }
@@ -377,6 +448,175 @@ void send_bundle_chunks(Session& s, std::uint32_t first) {
         if (chunk.length != 0u) std::memcpy(chunk.data, s.bundle.data() + at, chunk.length);
         send_raw(s, &chunk, static_cast<int>(offsetof(WireBundleChunk, data) + chunk.length));
     }
+}
+
+// ---- Live join's stream (docs/HOT_JOIN.md) ----
+
+std::int64_t now_qpc();
+
+WireInput to_wire(const NetInput& input) {
+    WireInput wire{};
+    wire.count = input.count;
+    wire.peek_count = input.peek_count;
+    std::memcpy(wire.peeks, input.peeks.data(), sizeof(wire.peeks));
+    std::memcpy(wire.status, input.status.data(), kNetStatusSize);
+    wire.command = input.command;
+    return wire;
+}
+
+NetInput from_wire(const WireInput& wire) {
+    NetInput input;
+    input.count = wire.count;
+    input.peek_count = std::min(wire.peek_count, kNetMaxPeeks);
+    std::memcpy(input.peeks.data(), wire.peeks, sizeof(wire.peeks));
+    std::memcpy(input.status.data(), wire.status, kNetStatusSize);
+    input.command = wire.command;
+    return input;
+}
+
+// Host: a frame's input, final, goes on the stream.
+void append_record(Session& s, std::uint32_t frame, const NetInput& input) {
+    WireRecord record{};
+    record.frame = frame;
+    record.join_frame = s.join_frame;
+    record.input = to_wire(input);
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(&record);
+    std::lock_guard lock(s.stream_mutex);
+    s.records.insert(s.records.end(), bytes, bytes + sizeof(record));
+}
+
+// Host: a joiner's request. It names the first chunk it lacks and how many it can take from there: the chunk it
+// lacks goes again (it may have been the stream's end, since grown), then those not sent yet up to its window.
+// A request that has not moved for three in a row means chunks were lost: everything from there goes again.
+void send_stream_chunks(Session& s, std::uint32_t first, std::uint32_t window) {
+    static std::uint32_t s_sent_to = 0u, s_last_first = kNone, s_same = 0u;
+    s_same = first == s_last_first ? s_same + 1u : 0u;
+    s_last_first = first;
+    if (s_same >= 3u) {
+        s_sent_to = first;
+        s_same = 0u;
+    }
+    std::lock_guard lock(s.stream_mutex);
+    if (!s.stream_ready) return;
+    const std::size_t head = s.stream_head.size();
+    const std::size_t total = head + s.records.size();
+    const std::uint32_t limit = first + std::min(window, kStreamWindowMax);
+    WireStreamChunk chunk{};
+    chunk.header = {kMagic, static_cast<std::uint8_t>(Packet::StreamChunk), kVersion, 0u};
+    const auto send = [&](std::uint32_t index) {
+        const std::size_t at = static_cast<std::size_t>(index) * kStreamChunk;
+        if (at >= total) return false;
+        const std::size_t length = std::min<std::size_t>(kStreamChunk, total - at);
+        const std::size_t from_head = at < head ? std::min(length, head - at) : 0u;
+        if (from_head != 0u) std::memcpy(chunk.data, s.stream_head.data() + at, from_head);
+        if (length > from_head) {
+            std::memcpy(chunk.data + from_head, s.records.data() + (at + from_head - head), length - from_head);
+        }
+        chunk.index = index;
+        chunk.length = static_cast<std::uint16_t>(length);
+        send_raw(s, &chunk, static_cast<int>(offsetof(WireStreamChunk, data) + length));
+        return true;
+    };
+    (void)send(first);
+    for (std::uint32_t index = std::max(first + 1u, s_sent_to); index < limit; ++index) {
+        if (!send(index)) break;
+        s_sent_to = index + 1u;
+    }
+}
+
+std::size_t contiguous(const Session& s) {
+    std::size_t bytes = static_cast<std::size_t>(s.first_missing) * kStreamChunk;
+    if (s.first_missing < s.chunk_length.size()) bytes += s.chunk_length[s.first_missing];
+    return bytes;
+}
+
+// Joiner: what has come contiguously becomes the snapshot's image, then the host's inputs frame by frame.
+void parse_stream(Session& s) {
+    const std::size_t have = contiguous(s);
+    if (s.blob_size == kNone) {
+        if (have < 12u) return;
+        std::uint32_t head[3]{};
+        std::memcpy(head, s.stream_in.data(), sizeof(head));
+        if (head[0] != kStreamMagic) {
+            std::fprintf(stderr, "[net] the host's stream is not a snapshot\n");
+            s.peer_left = true;
+            return;
+        }
+        s.snapshot_frame = head[1];
+        s.blob_size = head[2];
+        s.parsed = 12u;
+    }
+    if (s.parsed == 12u) {
+        if (have < 12u + s.blob_size) return;
+        const std::int64_t started = now_qpc();
+        if (!hot_join::decompress(s.stream_in.data() + 12u, s.blob_size, s.image)) {
+            std::fprintf(stderr, "[net] the host's snapshot does not decompress\n");
+            s.peer_left = true;
+            return;
+        }
+        s.image_ready = true;
+        s.parsed = 12u + s.blob_size;
+        std::fprintf(stderr, "[net] the snapshot of frame %u is here: %u bytes, %zu unpacked in %.0f ms\n",
+                     s.snapshot_frame, s.blob_size, s.image.size(),
+                     1000.0 * static_cast<double>(now_qpc() - started) / static_cast<double>(s.frequency.QuadPart));
+    }
+    while (have >= s.parsed + sizeof(WireRecord)) {
+        WireRecord record{};
+        std::memcpy(&record, s.stream_in.data() + s.parsed, sizeof(record));
+        s.parsed += sizeof(record);
+        if (record.frame != s.snapshot_frame + s.history.size()) {
+            std::fprintf(stderr, "[net] the host's inputs skip from frame %zu to %u\n",
+                         s.snapshot_frame + s.history.size(), record.frame);
+            s.peer_left = true;
+            return;
+        }
+        s.history.push_back(from_wire(record.input));
+        if (record.join_frame != kNone && s.join_frame == kNone) {
+            s.join_frame = record.join_frame;
+            std::fprintf(stderr, "[net] the host takes us in at frame %u\n", s.join_frame);
+        }
+    }
+}
+
+void take_stream_chunk(Session& s, const std::uint8_t* data, int size) {
+    if (size < static_cast<int>(offsetof(WireStreamChunk, data))) return;
+    WireStreamChunk chunk{};
+    std::memcpy(&chunk, data, std::min<std::size_t>(sizeof(chunk), static_cast<std::size_t>(size)));
+    if (chunk.length > kStreamChunk || size < static_cast<int>(offsetof(WireStreamChunk, data) + chunk.length)) return;
+    if (chunk.index >= s.chunk_length.size()) s.chunk_length.resize(chunk.index + 1u, 0u);
+    if (chunk.length <= s.chunk_length[chunk.index]) return;
+    const std::size_t at = static_cast<std::size_t>(chunk.index) * kStreamChunk;
+    if (s.stream_in.size() < at + chunk.length) s.stream_in.resize(at + chunk.length);
+    std::memcpy(s.stream_in.data() + at, chunk.data, chunk.length);
+    s.chunk_length[chunk.index] = chunk.length;
+    while (s.first_missing < s.chunk_length.size() && s.chunk_length[s.first_missing] == kStreamChunk) ++s.first_missing;
+}
+
+// Joiner: asks for the stream from the first chunk it lacks, every 10 ms. The window doubles while it is used up
+// between asks and halves when nothing moved.
+void ask_stream(Session& s) {
+    if (!s.live || s.host || !s.connected) return;
+    const std::int64_t now = now_qpc();
+    if (now - s.last_ask < s.frequency.QuadPart / 100) return;
+    if (s.asked_window != 0u) {
+        if (s.first_missing >= s.asked_first + s.asked_window / 2u) {
+            s.window = std::min(s.window * 2u, kStreamWindowMax);
+        } else if (s.first_missing == s.asked_first) {
+            s.window = std::max(s.window / 2u, kStreamWindowMin);
+        }
+    }
+    s.asked_first = s.first_missing;
+    s.asked_window = s.window;
+    s.last_ask = now;
+    const WireStreamRequest request{{kMagic, static_cast<std::uint8_t>(Packet::StreamRequest), kVersion, 0u},
+                                    s.first_missing, s.window};
+    send_raw(s, &request, sizeof(request));
+}
+
+void set_buffers(SOCKET socket) {
+    const int bytes = 8 * 1024 * 1024;
+    (void)setsockopt(socket, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&bytes), sizeof(bytes));
+    (void)setsockopt(socket, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&bytes), sizeof(bytes));
 }
 
 void handle_packet(Session& s, const std::uint8_t* data, int size, const sockaddr_in& from) {
@@ -443,6 +683,29 @@ void handle_packet(Session& s, const std::uint8_t* data, int size, const sockadd
                 std::memcpy(s.bundle.data() + at, chunk.data, chunk.length);
                 s.bundle_have[chunk.index] = true;
             }
+        }
+        return;
+    }
+    if (type == Packet::StreamRequest && s.host && s.live) {
+        if (size < static_cast<int>(sizeof(WireStreamRequest))) return;
+        WireStreamRequest request{};
+        std::memcpy(&request, data, sizeof(request));
+        s.last_request = now_qpc();
+        send_stream_chunks(s, request.first_chunk, request.window);
+        return;
+    }
+    if (type == Packet::StreamChunk && !s.host && s.live) {
+        take_stream_chunk(s, data, size);
+        return;
+    }
+    if (type == Packet::Ready && s.host && s.live) {
+        if (size < static_cast<int>(sizeof(WireReady))) return;
+        if (s.join_frame == kNone && s.phase == Session::Live::Streaming) {
+            WireReady ready{};
+            std::memcpy(&ready, data, sizeof(ready));
+            s.join_frame = s.current_frame + kJoinMargin;
+            std::fprintf(stderr, "[net] the joiner has caught up (its frame %u, ours %u): it drops in at frame %u\n",
+                         ready.frame, s.current_frame, s.join_frame);
         }
         return;
     }
@@ -544,9 +807,22 @@ void initialize(Session& s) {
     }
     const std::string host_port = env("GALAXY_NET_HOST");
     const std::string join = env("GALAXY_NET_JOIN");
-    if (host_port.empty() && join.empty()) return;
+    // Live join (docs/HOT_JOIN.md): a game booted Joinable is a session host on its own until someone joins (its
+    // lobby listens meanwhile); GALAXY_NET_HOTJOIN=1 makes a joiner take the host's running game.
+    // The settings are not loaded yet this early (a joiner changes their path first): the file says.
+    const auto joinable_setting = [] {
+        for (const std::string& line : read_lines(settings_file())) {
+            if (line == "net_joinable=on") return true;
+        }
+        return false;
+    };
+    const bool joinable = host_port.empty() && join.empty() &&
+                          (env("GALAXY_NET_JOINABLE") == "1" || (env("GALAXY_NET_JOINABLE") != "0" && joinable_setting()));
+    if (host_port.empty() && join.empty() && !joinable) return;
     s.requested = true;
-    s.host = !host_port.empty();
+    s.host = !host_port.empty() || joinable;
+    s.live = joinable || (!join.empty() && env("GALAXY_NET_HOTJOIN") == "1");
+    s.phase = s.host ? Session::Live::Solo : Session::Live::Booting;
     coop_set_partner_input_source(&synchronised_partner_input);
     // The other PC waits on this one's every frame: no power throttling (EcoQoS slowing a background process,
     // or its timer resolution being ignored) even when this window is behind another or minimised.
@@ -568,11 +844,17 @@ void initialize(Session& s) {
         std::fprintf(stderr, "[net] Winsock did not start\n");
         return;
     }
+    if (joinable) {
+        // The socket opens when a joiner is accepted (net_live_accept), on the lobby's port.
+        std::fprintf(stderr, "[net] joinable: deterministic from boot, input delay %u frames once joined\n", s.delay);
+        return;
+    }
     s.socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s.socket == INVALID_SOCKET) {
         std::fprintf(stderr, "[net] cannot open a UDP socket\n");
         return;
     }
+    if (s.live) set_buffers(s.socket);
     u_long nonblocking = 1u;
     ioctlsocket(s.socket, FIONBIO, &nonblocking);
     sockaddr_in local{};
@@ -771,15 +1053,160 @@ void net_leave() {
     net_restart_alone();
 }
 
+namespace {
+
+// Live host, after its read of the frame before the join frame: that frame's input goes on the stream, and the
+// inputs of J .. J + delay - 1, which no read reaches (the host's reads go `delay` frames ahead from J on), are
+// J - 1's held, J's carrying Join. Here, not at J's start: the game's EFB peeks of a frame come before it starts
+// (in the previous frame's drawing, the frame counter already past both reads), and they read J's input.
+void begin_lockstep(Session& s, std::uint32_t previous) {
+    if (previous >= s.snapshot_frame) append_record(s, previous, slot(s, 0u, previous).input);
+    const NetInput held = slot(s, 0u, previous).input;
+    const std::uint32_t join = previous + 1u;
+    for (std::uint32_t t = join; t < join + s.delay; ++t) {
+        Slot& to = slot(s, 0u, t);
+        to.frame = t;
+        to.input = held;
+        to.input.command = t == join ? static_cast<std::uint32_t>(NetCommand::Join) : 0u;
+        // The answers a frame from J on uses: the host's of `delay + 1` frames earlier, as in lockstep.
+        const std::uint32_t source = t - s.delay - 1u;
+        to.input.peek_count = std::min(s.local_peek_counts[source % kRing], kNetMaxPeeks);
+        to.input.peeks = s.local_peeks[source % kRing];
+        append_record(s, t, to.input);
+    }
+    s.newest_local_frame = join + s.delay - 1u;
+}
+
+// Live host, at a frame's start: an accept from the lobby opens the session; the previous frame's input (final
+// now: its EFB peek answers are in) goes on the stream until begin_lockstep takes over.
+void live_host_frame(Session& s, std::uint32_t frame) {
+    if (s.accept_pending.exchange(false)) {
+        s.socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        u_long nonblocking = 1u;
+        ioctlsocket(s.socket, FIONBIO, &nonblocking);
+        set_buffers(s.socket);
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_addr.s_addr = htonl(INADDR_ANY);
+        local.sin_port = htons(static_cast<u_short>(s.live_port));
+        if (s.socket == INVALID_SOCKET || bind(s.socket, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
+            std::fprintf(stderr, "[net] cannot open the session on UDP port %u\n", s.live_port);
+            if (s.socket != INVALID_SOCKET) closesocket(s.socket);
+            s.socket = INVALID_SOCKET;
+            s.phase = Session::Live::Solo;
+            return;
+        }
+        s.phase = Session::Live::Starting;
+        s.snapshot_wanted = true;
+        s.last_request = now_qpc();
+        std::fprintf(stderr, "[net] a joiner was accepted: the session is on UDP port %u\n", s.live_port);
+    }
+    if (s.snapshot_frame == kNone || frame == 0u) return;
+    const std::uint32_t previous = frame - 1u;
+    if (previous >= s.snapshot_frame && (s.join_frame == kNone || previous + 1u < s.join_frame)) {
+        append_record(s, previous, slot(s, 0u, previous).input);
+    }
+    if (frame == s.join_frame) {
+        s.phase = Session::Live::Joined;
+        std::fprintf(stderr, "[net] frame %u: the joiner drops in\n", frame);
+    }
+    // Tests (tools/agent/live_join.py): GALAXY_NET_TEST_EXIT_AFTER_JOIN=<frames> sends the online menu's Exit
+    // Galaxy that many frames after the join.
+    static const auto s_exit_after =
+        static_cast<std::uint32_t>(std::strtoul(env("GALAXY_NET_TEST_EXIT_AFTER_JOIN").c_str(), nullptr, 10));
+    if (s_exit_after != 0u && s.join_frame != kNone && frame == s.join_frame + s_exit_after) {
+        std::fprintf(stderr, "[net] test: exit galaxy at frame %u\n", frame);
+        s.pending_command = static_cast<std::uint32_t>(NetCommand::ExitGalaxy);
+    }
+    // GALAXY_NET_TEST_STAR_AFTER_JOIN=<frames>: a Power Star appears (its cutscene on both PCs) that many frames on.
+    static const auto s_star_after =
+        static_cast<std::uint32_t>(std::strtoul(env("GALAXY_NET_TEST_STAR_AFTER_JOIN").c_str(), nullptr, 10));
+    if (s_star_after != 0u && s.join_frame != kNone && frame == s.join_frame + s_star_after) {
+        std::fprintf(stderr, "[net] test: a Power Star appears at frame %u\n", frame);
+        s.pending_command = static_cast<std::uint32_t>(NetCommand::TestStarAppear);
+    }
+    // A joiner that stopped asking before it joined is gone: back to playing alone (the lobby listens again).
+    if (s.phase == Session::Live::Streaming && now_qpc() - s.last_request > s.frequency.QuadPart * 15) {
+        std::fprintf(stderr, "[net] the joiner went away before joining: playing on alone\n");
+        closesocket(s.socket);
+        s.socket = INVALID_SOCKET;
+        s.connected = false;
+        s.peer_known = false;
+        s.phase = Session::Live::Solo;
+        s.snapshot_frame = kNone;
+        s.join_frame = kNone;
+        if (s.compressor.joinable()) s.compressor.join();
+        std::lock_guard lock(s.stream_mutex);
+        s.stream_head.clear();
+        s.records.clear();
+        s.stream_ready = false;
+        s.bundle.clear();
+        s.bundle_built = false;
+    }
+}
+
+// Live joiner, at a frame's start: the stream keeps coming; caught up with the host (its newest input a frame or
+// two ahead), rendering and pacing come back and the host is told, until it names the join frame.
+void live_joiner_frame(Session& s, std::uint32_t frame) {
+    ask_stream(s);
+    parse_stream(s);
+    const NetplaySnapshotHooks& hooks = netplay_snapshot_hooks();
+    const std::uint32_t newest = s.snapshot_frame + static_cast<std::uint32_t>(s.history.size());
+    if (s.phase == Session::Live::CatchUp && frame + 2u >= newest) {
+        s.phase = Session::Live::Edge;
+        if (hooks.catch_up != nullptr) hooks.catch_up(hooks.user, false);
+        std::fprintf(stderr, "[net] frame %u: caught up with the host\n", frame);
+    }
+    if (s.phase == Session::Live::Edge && s.join_frame == kNone && now_qpc() - s.last_ready > s.frequency.QuadPart / 10) {
+        const WireReady ready{{kMagic, static_cast<std::uint8_t>(Packet::Ready), kVersion, 0u}, frame};
+        send_raw(s, &ready, sizeof(ready));
+        s.last_ready = now_qpc();
+    }
+    if (s.join_frame != kNone && frame >= s.join_frame && s.phase != Session::Live::Joined) {
+        s.phase = Session::Live::Joined;
+        std::fprintf(stderr, "[net] frame %u: in the game\n", frame);
+    }
+}
+
+// Joiner: waits until the stream has the host's input for `frame`.
+const NetInput& history_input(Session& s, std::uint32_t frame) {
+    const std::int64_t started = now_qpc();
+    std::int64_t last_log = started;
+    while (frame - s.snapshot_frame >= s.history.size()) {
+        receive(s);
+        ask_stream(s);
+        parse_stream(s);
+        if (frame - s.snapshot_frame < s.history.size()) break;
+        const std::int64_t now = now_qpc();
+        if (now - last_log > s.frequency.QuadPart * 5) {
+            std::fprintf(stderr, "[net] frame %u: waiting for the host's input\n", frame);
+            last_log = now;
+        }
+        if (now - started > s.frequency.QuadPart * 15 && !s.peer_left) {
+            std::fprintf(stderr, "[net] nothing from the host for 15 s: the session is over\n");
+            s.peer_left = true;
+        }
+        galaxy::gx::pump_messages();
+        Sleep(1);
+    }
+    return s.history[frame - s.snapshot_frame];
+}
+
+}  // namespace
+
 void net_frame_begin(std::uint32_t frame, const GuestMemoryV1* memory) {
     Session& s = session();
     if (!s.requested) return;
+    s.current_frame = frame;
+    if (s.live && s.host) live_host_frame(s, frame);
     receive(s);
     if (!s.connected && !s.host) send_hello(s, Packet::Hello);
+    if (s.live && !s.host) live_joiner_frame(s, frame);
     s.local_peek_counts[frame % kRing] = 0u;
     // No pacing here: the guest's virtual time is kept to real time (native_runtime.cpp
     // deterministic_advance_to), as a game frame may span several VI frames.
-    if (frame % kHashEvery == 0u && s.connected) {
+    const bool booting = s.live && !s.host && s.phase == Session::Live::Booting;
+    if (frame % kHashEvery == 0u && s.connected && !booting) {
         const std::uint64_t hash = mem1_hash(memory);
         s.my_hashes.emplace_back(frame, hash);
         if (s.my_hashes.size() > 64u) s.my_hashes.erase(s.my_hashes.begin());
@@ -795,6 +1222,22 @@ void net_frame_begin(std::uint32_t frame, const GuestMemoryV1* memory) {
 void net_local_input(std::uint32_t frame, std::uint32_t count, const std::uint8_t* status) {
     Session& s = session();
     if (!s.requested) return;
+    const bool before_join = s.live && (s.join_frame == kNone || frame < s.join_frame);
+    if (before_join && !s.host) return;  // the joiner plays from the join frame on
+    if (before_join) {
+        // The host on its own: its controller is this frame's input (a peek earlier in the frame made the slot).
+        Slot& to = slot(s, 0u, frame);
+        if (to.frame != frame) {
+            to.frame = frame;
+            to.input = NetInput{};
+        }
+        to.input.count = count;
+        if (status != nullptr) std::memcpy(to.input.status.data(), status, kNetStatusSize);
+        to.input.command = 0u;
+        s.newest_local_frame = frame;
+        if (s.join_frame != kNone && frame + 1u == s.join_frame) begin_lockstep(s, frame);
+        return;
+    }
     const std::uint32_t target = frame + s.delay;
     Slot& to = slot(s, me(s), target);
     to.frame = target;
@@ -815,7 +1258,20 @@ void net_local_input(std::uint32_t frame, std::uint32_t count, const std::uint8_
 const NetInput& net_input(std::uint32_t frame, unsigned player) {
     Session& s = session();
     static const NetInput kNeutral{};
-    if (frame < s.delay) return kNeutral;  // before any input could arrive: the same on both PCs
+    if (s.live) {
+        // Live: the second player is neutral until he is in (J + delay, when the joiner's first input applies);
+        // a joiner still booting its own title plays nobody's input.
+        if (!s.host && s.phase == Session::Live::Booting) return kNeutral;
+        const bool before_lockstep = s.join_frame == kNone || frame < s.join_frame + s.delay;
+        if (player == 1u && before_lockstep) return kNeutral;
+        if (player == 0u && s.host) {
+            const Slot& own = slot(s, 0u, frame);
+            if (own.frame == frame) return own.input;
+        }
+        if (player == 0u && !s.host && before_lockstep) return history_input(s, frame);
+    } else if (frame < s.delay) {
+        return kNeutral;  // before any input could arrive: the same on both PCs
+    }
     Slot& from = slot(s, player, frame);
     if (from.frame == frame) return from.input;
     // The peer's input for this frame has not arrived: wait for it (lockstep), resending ours.
@@ -856,10 +1312,110 @@ std::uint32_t net_peek(std::uint32_t frame, std::uint32_t sequence, std::uint32_
         s.local_peeks[frame % kRing][sequence] = local;
         s.local_peek_counts[frame % kRing] = sequence + 1u;
     }
+    if (s.live && s.host && (s.join_frame == kNone || frame < s.join_frame)) {
+        // The host on its own answers with its own value at once; the frame's input carries it to a joiner.
+        Slot& to = slot(s, 0u, frame);
+        if (to.frame != frame) {
+            to.frame = frame;
+            to.input = NetInput{};
+        }
+        if (sequence < kNetMaxPeeks) {
+            to.input.peeks[sequence] = local;
+            to.input.peek_count = std::max(to.input.peek_count, sequence + 1u);
+        }
+        return to.input.peeks[std::min(sequence, to.input.peek_count - 1u)];
+    }
     // Both PCs answer with the host's value carried by the host's input for this frame.
     const NetInput& host_input = net_input(frame, 0u);
     if (host_input.peek_count == 0u) return 0x00FFFFFFu;
     return host_input.peeks[std::min(sequence, host_input.peek_count - 1u)];
+}
+
+bool net_live() noexcept {
+    return net_session_requested() && session().live;
+}
+
+bool net_live_can_accept() noexcept {
+    Session& s = session();
+    return net_session_requested() && s.live && s.host && s.phase == Session::Live::Solo && !s.accept_pending;
+}
+
+void net_live_accept(unsigned port) {
+    Session& s = session();
+    s.live_port = port;
+    s.accept_pending = true;
+}
+
+bool net_live_snapshot_due() noexcept {
+    Session& s = session();
+    return s.live && s.host && s.snapshot_wanted;
+}
+
+void net_live_snapshot_taken(std::uint32_t frame, std::vector<std::uint8_t>&& image) {
+    Session& s = session();
+    s.snapshot_wanted = false;
+    if (image.empty()) {
+        std::fprintf(stderr, "[net] the snapshot could not be taken: playing on alone\n");
+        closesocket(s.socket);
+        s.socket = INVALID_SOCKET;
+        s.phase = Session::Live::Solo;
+        return;
+    }
+    s.snapshot_frame = frame;
+    s.phase = Session::Live::Streaming;
+    s.last_request = now_qpc();
+    // The save as of this frame: the joiner's game reads and writes these files from here on.
+    s.bundle = build_bundle();
+    s.bundle_built = true;
+    if (s.compressor.joinable()) s.compressor.join();
+    s.compressor = std::thread([&s, frame, image = std::move(image)] {
+        const std::int64_t started = now_qpc();
+        const std::vector<std::uint8_t> blob = hot_join::compress(image.data(), image.size());
+        std::vector<std::uint8_t> head(12u);
+        const std::uint32_t fields[3] = {kStreamMagic, frame, static_cast<std::uint32_t>(blob.size())};
+        std::memcpy(head.data(), fields, sizeof(fields));
+        head.insert(head.end(), blob.begin(), blob.end());
+        std::lock_guard lock(s.stream_mutex);
+        s.stream_head = std::move(head);
+        s.stream_ready = !blob.empty();
+        std::fprintf(stderr, "[net] snapshot of frame %u: %zu bytes, %zu compressed in %.0f ms\n", frame, image.size(),
+                     blob.size(),
+                     1000.0 * static_cast<double>(now_qpc() - started) / static_cast<double>(s.frequency.QuadPart));
+    });
+}
+
+const std::vector<std::uint8_t>* net_live_load_due(std::uint32_t frame) {
+    Session& s = session();
+    if (!s.live || s.host || s.phase != Session::Live::Booting || frame < kLoadFrame) return nullptr;
+    const std::int64_t started = now_qpc();
+    std::int64_t last_log = started;
+    while (!s.image_ready && !s.peer_left) {
+        receive(s);
+        ask_stream(s);
+        parse_stream(s);
+        const std::int64_t now = now_qpc();
+        if (now - last_log > s.frequency.QuadPart * 2) {
+            std::fprintf(stderr, "[net] receiving the host's game: %zu bytes\n", contiguous(s));
+            last_log = now;
+        }
+        galaxy::gx::pump_messages();
+        Sleep(1);
+    }
+    if (!s.image_ready) return nullptr;
+    std::fprintf(stderr, "[net] the host's game arrived in %.1f s\n",
+                 static_cast<double>(now_qpc() - started) / static_cast<double>(s.frequency.QuadPart));
+    return &s.image;
+}
+
+void net_live_resumed(std::uint32_t frame) {
+    Session& s = session();
+    s.phase = Session::Live::CatchUp;
+    s.current_frame = frame;
+    s.image = std::vector<std::uint8_t>{};
+    s.image_ready = false;
+    std::fprintf(stderr, "[net] running the host's game from its frame %u; catching up\n", frame);
+    const NetplaySnapshotHooks& hooks = netplay_snapshot_hooks();
+    if (hooks.catch_up != nullptr) hooks.catch_up(hooks.user, true);
 }
 
 }  // namespace galaxy

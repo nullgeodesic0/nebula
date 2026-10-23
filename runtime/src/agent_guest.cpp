@@ -833,6 +833,23 @@ void rejoin_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServic
             request_stage(guest, "AstroGalaxy", 1);
             std::fprintf(stderr, "[net] exiting %s for the Observatory\n", scene.stage.c_str());
         }
+        if (command == static_cast<std::uint32_t>(NetCommand::Join)) coop_request_drop_in();
+        if (command == static_cast<std::uint32_t>(NetCommand::TestStarAppear) && scene.in_game) {
+            // The first PowerStar (its vtable) among the live actors: PowerStar::requestAppear, its appear cutscene.
+            constexpr std::uint32_t kPowerStarVtable = 0x80587430u;
+            constexpr std::uint32_t kPowerStarRequestAppear = 0x8020EE98u;
+            SavedContext saved(guest.context());
+            const std::uint32_t group = guest.call(fn::kGetAllLiveActorGroup);
+            const std::uint32_t count = plausible(group) ? std::min(guest.u32(group + 0x10u), 4096u) : 0u;
+            const std::uint32_t objects = plausible(group) ? guest.u32(group + 0x14u) : 0u;
+            for (std::uint32_t i = 0u; i < count && plausible(objects); ++i) {
+                const std::uint32_t actor = guest.u32(objects + 4u * i);
+                if (!plausible(actor) || guest.u32(actor) != kPowerStarVtable) continue;
+                guest.call(kPowerStarRequestAppear, actor);
+                std::fprintf(stderr, "[net] test: Power Star %08X appears\n", actor);
+                break;
+            }
+        }
     }
     if (!r.active && !net_location_wanted()) return;
     const Guest guest(context, memory, services, guest_pc);

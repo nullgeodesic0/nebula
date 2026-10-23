@@ -2,7 +2,9 @@
 
 #include "galaxy/native_api.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace galaxy {
 
@@ -39,7 +41,21 @@ struct NetplaySnapshotHooks {
     void (*restore)(void* user) = nullptr;
     // Re-simulation on/off: frames are simulated but not rendered (GALAXY_SNAPSHOT_RENDER_RESIM=1 renders them).
     void (*resimulating)(void* user, bool on) = nullptr;
+    // Hot join (docs/HOT_JOIN.md). write: saves into a file and returns false, or true in another process that
+    // loaded it and resumed here. load: resumes a written file (does not return unless it cannot be used).
+    // GALAXY_SNAPSHOT_WRITE="<frame>,<file>" writes when that frame starts; GALAXY_SNAPSHOT_LOAD="<frame>,<file>"
+    // loads when this process's own frame count reaches it, after which its frames are the writer's.
+    bool (*write)(void* user, const char* path, std::uint32_t frame) = nullptr;
+    void (*load)(void* user, const char* path) = nullptr;
+    // Live join (netplay_session.cpp): capture puts the snapshot's image in `image` and returns false, or true in
+    // the joiner, which adopted it with load_image (that call does not return unless the image cannot be used).
+    bool (*capture)(void* user, std::uint32_t frame, std::vector<std::uint8_t>* image) = nullptr;
+    void (*load_image)(void* user, const std::uint8_t* data, std::size_t size) = nullptr;
+    // The joiner catching up: unpaced and unrendered while on.
+    void (*catch_up)(void* user, bool on) = nullptr;
 };
+// The snapshot hooks, for netplay_session.cpp.
+[[nodiscard]] const NetplaySnapshotHooks& netplay_snapshot_hooks() noexcept;
 void netplay_set_snapshot_hooks(const NetplaySnapshotHooks& hooks) noexcept;
 // With GALAXY_DETERMINISTIC_TRACE: a line per frame of host-side state digests (written by `trace(user)` with
 // netplay_trace), to find which part of a rollback snapshot is missing.

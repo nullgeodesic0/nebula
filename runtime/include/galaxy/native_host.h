@@ -1060,6 +1060,12 @@ public:
     [[nodiscard]] static std::shared_ptr<DeviceSnapshot> make_device_snapshot();
     void save_devices(DeviceSnapshot& out);
     void restore_devices(const DeviceSnapshot& in);
+    // Hot join: a snapshot that leaves the process gets its own copy of what it shares with the live devices (open
+    // NAND files' backings), allocated where the caller allocates (the snapshot arena).
+    static void own_device_snapshot(DeviceSnapshot& snapshot);
+    // Hot join, in the process that loads such a snapshot: its open NAND files are bound to this process's host files
+    // at the same guest paths (their NTFS identity guards every write-back).
+    void adopt_device_snapshot(DeviceSnapshot& snapshot);
     // Short digests of device and DSP state ("name=hash ..."), for the deterministic trace.
     [[nodiscard]] std::string rollback_digest();
 

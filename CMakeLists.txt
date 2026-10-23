@@ -765,6 +765,7 @@ add_executable(NebulaRuntime
     runtime/src/net_lobby.cpp
     runtime/src/agent_guest.cpp
     runtime/src/voice_replacement.cpp
+    runtime/src/hot_join.cpp
 )
 # Exported releases pass their source identity; working checkouts report Git
 # identity/dirty state at build time. This is runtime provenance, not a label

@@ -57,6 +57,8 @@ void rejoin_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServic
 // Local hot join (docs/MULTIPLAYER.md "Drop in, drop out"): whether the second player is in the game, set by
 // coop_guest.cpp, read by the input thread to give him a controller of his own (native_host.cpp).
 void coop_set_second_present(bool present) noexcept;
+// Online live join: the second player drops in beside the first at the next chance (both PCs, the same frame).
+void coop_request_drop_in() noexcept;
 [[nodiscard]] bool coop_second_present() noexcept;
 
 // The second player's controller, published by the input thread and read once a game frame.
