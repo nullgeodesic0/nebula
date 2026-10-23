@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cstring>
 
+#include <emmintrin.h>
+
 namespace galaxy::host {
 namespace {
 
@@ -60,6 +62,34 @@ void put32(std::byte* p, std::uint32_t offset, std::uint32_t value) noexcept {
 // accumulator; returns the rounded value's middle word.
 [[nodiscard]] std::int64_t rounded_mid(std::int64_t product) noexcept {
     return ((product & 0x10000) != 0 ? product + 0x8000 : product + 0x7FFF) >> 16;
+}
+
+// rounded_mid(2 * a * b) for 16-bit a and b, eight lanes at a time in 32 bits: with p = a * b (exact),
+// rounding 2p half to even at bit 16 is (p + 0x3FFF + bit 15 of p) >> 15. Two halves of four lanes.
+struct RoundedPairs {
+    __m128i low;
+    __m128i high;
+};
+
+[[nodiscard]] RoundedPairs rounded_mid_doubled8(__m128i a, __m128i b) noexcept {
+    const __m128i product_low = _mm_mullo_epi16(a, b);
+    const __m128i product_high = _mm_mulhi_epi16(a, b);
+    const __m128i one = _mm_set1_epi32(1);
+    const __m128i bias = _mm_set1_epi32(0x3FFF);
+    const auto round = [&](__m128i p) {
+        const __m128i odd = _mm_and_si128(_mm_srli_epi32(p, 15), one);
+        return _mm_srai_epi32(_mm_add_epi32(_mm_add_epi32(p, bias), odd), 15);
+    };
+    return {round(_mm_unpacklo_epi16(product_low, product_high)),
+            round(_mm_unpackhi_epi16(product_low, product_high))};
+}
+
+// Sign-extended 32-bit halves of eight 16-bit lanes.
+[[nodiscard]] __m128i widen_low16(__m128i v) noexcept {
+    return _mm_srai_epi32(_mm_unpacklo_epi16(v, v), 16);
+}
+[[nodiscard]] __m128i widen_high16(__m128i v) noexcept {
+    return _mm_srai_epi32(_mm_unpackhi_epi16(v, v), 16);
 }
 
 // Q15 multiply with the product doubled (DSP "M2" mode), truncated.
@@ -231,17 +261,21 @@ void JAudioHostMixer::mix_subframe(const JAudioGuestMemory& memory) {
     clear(kBusLeft, kSamples);
     clear(kBusRight, kSamples);
     {
+        // The folded values are at most 0x6784 in magnitude, so the 16-bit pack never saturates.
         std::array<std::int16_t, kSamples> fold{};
-        for (std::uint32_t i = 0; i < kSamples; ++i) {
-            fold[i] = static_cast<std::int16_t>(
-                rounded_mid(static_cast<std::int64_t>(d[kBusSurroundLeft + i]) * 0x6784 * 2));
-        }
+        const auto fold_bus = [&](std::uint32_t bus) {
+            static_assert(kSamples % 8u == 0u);
+            const __m128i gain = _mm_set1_epi16(0x6784);
+            for (std::uint32_t i = 0; i < kSamples; i += 8u) {
+                const RoundedPairs r = rounded_mid_doubled8(
+                    _mm_loadu_si128(reinterpret_cast<const __m128i*>(d + bus + i)), gain);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(fold.data() + i), _mm_packs_epi32(r.low, r.high));
+            }
+        };
+        fold_bus(kBusSurroundLeft);
         add_scaled(kBusLeft, fold.data(), kSamples, 0x7FFF);
         add_scaled(kBusRight, fold.data(), kSamples, static_cast<std::int16_t>(0xB820));
-        for (std::uint32_t i = 0; i < kSamples; ++i) {
-            fold[i] = static_cast<std::int16_t>(
-                rounded_mid(static_cast<std::int64_t>(d[kBusSurroundRight + i]) * 0x6784 * 2));
-        }
+        fold_bus(kBusSurroundRight);
         add_scaled(kBusLeft, fold.data(), kSamples, 0x47E0);
         add_scaled(kBusRight, fold.data(), kSamples, static_cast<std::int16_t>(0x8001));
     }
@@ -1044,19 +1078,24 @@ std::int16_t JAudioHostMixer::ramp_mix(std::uint32_t destination,
     if (volume == 0 && step == 0) {
         return start;
     }
-    std::int16_t* dst = dram_.data() + destination;
-    const auto mix = [&](std::uint32_t k) {
-        const std::int64_t gain = mid_of(volume);
-        dst[k] = sat16(static_cast<std::int64_t>(dst[k]) + ((gain * source[k]) >> 16));
-    };
-    mix(0u);
+    // Each sample's gain first (sample 0 and the pair after it share one, as does every later pair; the
+    // tail from 65 keeps the last), then dst + (gain * source >> 16) saturated: mulhi and a saturating add.
+    alignas(16) std::array<std::int16_t, kSamples> gains;
+    gains[0] = mid_of(volume);
     for (std::uint32_t i = 0; i < 32u; ++i) {
-        mix(2u * i + 1u);
-        mix(2u * i + 2u);
+        const std::int16_t gain = mid_of(volume);
+        gains[2u * i + 1u] = gain;
+        gains[2u * i + 2u] = gain;
         volume += step;
     }
-    for (std::uint32_t k = 65u; k < kSamples; ++k) {
-        mix(k);
+    std::fill(gains.begin() + 65, gains.end(), mid_of(volume));
+    std::int16_t* dst = dram_.data() + destination;
+    for (std::uint32_t k = 0; k < kSamples; k += 8u) {
+        const __m128i scaled = _mm_mulhi_epi16(
+            _mm_load_si128(reinterpret_cast<const __m128i*>(gains.data() + k)),
+            _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + k)));
+        auto* out = reinterpret_cast<__m128i*>(dst + k);
+        _mm_storeu_si128(out, _mm_adds_epi16(_mm_loadu_si128(out), scaled));
     }
     return mid_of(volume);
 }
@@ -1065,7 +1104,17 @@ std::int16_t JAudioHostMixer::ramp_mix(std::uint32_t destination,
 void JAudioHostMixer::add_scaled(std::uint32_t destination, const std::int16_t* source,
                                  std::uint32_t count, std::int16_t gain) {
     std::int16_t* dst = dram_.data() + destination;
-    for (std::uint32_t i = 0; i < count; ++i) {
+    std::uint32_t i = 0;
+    const __m128i gains = _mm_set1_epi16(gain);
+    for (; i + 8u <= count; i += 8u) {
+        const RoundedPairs r = rounded_mid_doubled8(
+            _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + i)), gains);
+        auto* out = reinterpret_cast<__m128i*>(dst + i);
+        const __m128i current = _mm_loadu_si128(out);
+        _mm_storeu_si128(out, _mm_packs_epi32(_mm_add_epi32(widen_low16(current), r.low),
+                                              _mm_add_epi32(widen_high16(current), r.high)));
+    }
+    for (; i < count; ++i) {
         dst[i] = sat16(static_cast<std::int64_t>(dst[i]) +
                        rounded_mid(static_cast<std::int64_t>(source[i]) * gain * 2));
     }
