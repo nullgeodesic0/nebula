@@ -57,7 +57,8 @@ use std::{fs, path::Path};
 // 35 (a parallel branch): mtmsr orders the MSR write with a compiler barrier, not an interlocked fence; psq_st's
 //     quantized and gather-pipe lanes out of line.
 // 36: both of the above together; regenerate every module.
-pub const GENERATION_VERSION: u32 = 36;
+// 37: co-op hook around MarioActor::addRushSensor (vehicles ridden by the first player only).
+pub const GENERATION_VERSION: u32 = 37;
 
 /// Shard size and per-shard source budget of the qualified module build.
 pub const MODULE_SHARD_SIZE: usize = 64;

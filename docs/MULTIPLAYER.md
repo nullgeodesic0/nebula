@@ -146,6 +146,14 @@ use the bottom centre). They are the game's own layouts
 (HitPointMeter, PlayerLeft), made with the stage's HUD and shown, hidden and killed with the first player's; a
 life lost alone shows on the counter.
 
+Vehicles (the Star Ball, the manta ray): the first player mounts them, and the second rides along. A vehicle
+level is built for one rider (one Star Ball or ray, its goal, timer and race), so the second player's body is
+refused the mount (`MarioActor::addRushSensor` skipped for a Tamakoro or SurfRay sensor, hook 83), and while
+the first player rides (his rush partner is the vehicle) the second goes with him unseen and untouchable at
+his side, one screen; he gets off beside him when the ride ends. Each brother riding his own vehicle is left
+open: the refusal is the one place to change. Checked with the agent on Rolling Green's Star Ball (the manta
+ray, handed over by the penguin in Loopdeeloop, is not yet checked in game).
+
 Launch stars: the player on a launch star (either one) flies, and the other flies beside them under the
 star's camera; both land together. A launch star ridden by the second player runs with them as the game's
 player, so the flight's animations and its end are theirs.
