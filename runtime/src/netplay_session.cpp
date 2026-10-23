@@ -3,6 +3,7 @@
 #include "galaxy/coop.h"
 #include "galaxy/coop_guest.h"
 #include "galaxy/gx_d3d12.h"
+#include "galaxy/net_lobby.h"
 #include "galaxy/netplay.h"
 
 #ifndef NOMINMAX
@@ -521,6 +522,14 @@ bool synchronised_partner_input(coop::PartnerInput& partner) {
 
 void initialize(Session& s) {
     s.initialized = true;
+    // Restarted from the lobby (net_lobby.cpp): the old process must be gone (its lease and port) first.
+    if (const std::string pid = env("GALAXY_NET_WAIT_PID"); !pid.empty()) {
+        if (const HANDLE old = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(std::strtoul(pid.c_str(), nullptr, 10)))) {
+            (void)WaitForSingleObject(old, 15000);
+            CloseHandle(old);
+        }
+        SetEnvironmentVariableW(L"GALAXY_NET_WAIT_PID", nullptr);
+    }
     const std::string host_port = env("GALAXY_NET_HOST");
     const std::string join = env("GALAXY_NET_JOIN");
     if (host_port.empty() && join.empty()) return;
@@ -712,7 +721,11 @@ std::int64_t now_qpc() {
 
 bool net_session_requested() noexcept {
     Session& s = session();
-    if (!s.initialized) initialize(s);
+    if (!s.initialized) {
+        initialize(s);
+        // The lobby (F1 > Online) runs in every game, in a session only to show it.
+        net_lobby_start();
+    }
     return s.requested;
 }
 

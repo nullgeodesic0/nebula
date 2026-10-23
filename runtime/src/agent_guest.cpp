@@ -1,7 +1,9 @@
 #include "galaxy/agent.h"
 #include "galaxy/coop_guest.h"
 #include "galaxy/gx/gx_backend.h"
+#include "galaxy/net_lobby.h"
 #include "galaxy/netplay.h"
+#include "galaxy/netplay_session.h"
 
 #include "guest_access.h"
 
@@ -661,7 +663,174 @@ void update_file(Agent& a, const Guest& guest) {
     finish(true, nullptr);
 }
 
+// --- Online co-op's rejoin (net_lobby.h) ---
+// Before a session: the host's location, when its lobby asks (as it accepts a joiner). In a session that starts
+// from one (GALAXY_NET_REJOIN): both PCs pass the logo, load that file, go to that galaxy and mission and put the
+// first player on the spot, the co-op second player beside them. Everything here runs alike on both PCs, from
+// game state, so the session stays in step.
+
+// The save file being played: its name ("mario3", "luigi1") lives in the game heap only while a file is loaded
+// (MEM1 from 0x80700000; the name tables in .data and MEM2 hold every name).
+bool loaded_file(const GuestMemoryV1* memory, unsigned& file, bool& mario) {
+    if (memory == nullptr) return false;
+    for (std::uint32_t r = 0; r < memory->region_count; ++r) {
+        const GuestMemoryRegionV1& region = memory->regions[r];
+        if (region.host_base == nullptr || region.size != 0x01800000u) continue;
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(region.host_base);
+        for (std::size_t at = 0x700000u; at + 7u <= region.size; ++at) {
+            if (bytes[at] != 'm' && bytes[at] != 'l') continue;
+            const bool is_mario = std::memcmp(bytes + at, "mario", 5u) == 0;
+            if (!is_mario && std::memcmp(bytes + at, "luigi", 5u) != 0) continue;
+            if (bytes[at + 5u] < '1' || bytes[at + 5u] > '6' || bytes[at + 6u] != 0u) continue;
+            file = static_cast<unsigned>(bytes[at + 5u] - '0');
+            mario = is_mario;
+            return true;
+        }
+    }
+    return false;
+}
+
+NetRejoin current_location(const Guest& guest, const GuestMemoryV1* memory) {
+    NetRejoin where;
+    const Scene scene = read_scene(guest);
+    if (!scene.in_game || scene.stage == "FileSelect" || !loaded_file(memory, where.file, where.mario)) {
+        return NetRejoin{};
+    }
+    where.stage = scene.stage;
+    where.mission = scene.scenario;
+    SavedContext saved(guest.context());
+    const Player first = read_player(guest, first_player(guest));
+    if (first.actor != 0u && std::isfinite(first.position.x) && std::isfinite(first.position.y) &&
+        std::isfinite(first.position.z)) {
+        where.x = first.position.x;
+        where.y = first.position.y;
+        where.z = first.position.z;
+        where.placed = true;
+    }
+    return where;
+}
+
+struct Rejoin {
+    bool active = false;
+    NetRejoin to;
+    int phase = 0;
+    std::uint64_t frame = 0u;
+    std::uint64_t settle = 0u;
+    bool press_a = false;
+};
+
+Rejoin& rejoin_state() {
+    static Rejoin r = [] {
+        Rejoin made;
+        char* value = nullptr;
+        std::size_t length = 0u;
+        if (_dupenv_s(&value, &length, "GALAXY_NET_REJOIN") == 0 && value != nullptr && net_session_requested()) {
+            made.active = parse_rejoin(value, made.to) && made.to.file != 0u;
+            std::fprintf(stderr, "[rejoin] %s%s\n", value, made.active ? "" : " (nothing to load: the title)");
+        }
+        std::free(value);
+        return made;
+    }();
+    return r;
+}
+
+// A game camera, demo or scene change under way: nothing to place the player into yet.
+bool settled(const Guest& guest, const Scene& scene) {
+    if (!scene.in_game) return false;
+    SavedContext saved(guest.context());
+    return (guest.call(fn::kIsDemoActive) & 0xFFu) == 0u && (guest.call(fn::kIsEventCameraActive) & 0xFFu) == 0u &&
+           (guest.call(fn::kIsOpeningCamera) & 0xFFu) == 0u;
+}
+
+void step_rejoin(Rejoin& r, const Guest& guest) {
+    ++r.frame;
+    r.press_a = false;
+    const auto done = [&](const char* how) {
+        std::fprintf(stderr, "[rejoin] %s at frame %llu\n", how, static_cast<unsigned long long>(r.frame));
+        r.active = false;
+    };
+    if (r.frame > 60u * 240u) return done("gave up");
+    const Scene scene = read_scene(guest);
+    SavedContext saved(guest.context());
+    switch (r.phase) {
+    case 0: {
+        // Past the logo with A, on both PCs (netplay_rejoin_press_a), to the file select, its files read.
+        r.press_a = scene.scene == "Logo" && (r.frame % 40u) < 4u;
+        const bool ready = scene.in_game && scene.stage == "FileSelect" &&
+                           (guest.call(fn::kIsSaveSequenceActive) & 0xFFu) == 0u;
+        r.settle = ready ? r.settle + 1u : 0u;
+        if (r.settle >= 60u) {
+            guest.call(fn::kStartPreLoadSaveData);
+            r.phase = 1;
+            r.settle = 0u;
+        }
+        return;
+    }
+    case 1:
+        if (++r.settle < 2u || (guest.call(fn::kIsSaveSequenceActive) & 0xFFu) != 0u) return;
+        if ((guest.call(fn::kIsSaveSequenceSuccess) & 0xFFu) == 0u) return done("could not read the save files");
+        guest.call(fn::kStartGameDataLoad, r.to.file, r.to.mario ? 1u : 0u);
+        std::fprintf(stderr, "[rejoin] loading %s file %u\n", r.to.mario ? "Mario" : "Luigi", r.to.file);
+        r.phase = 2;
+        r.settle = 0u;
+        return;
+    case 2:
+        if (++r.settle < 2u || (guest.call(fn::kIsSaveSequenceActive) & 0xFFu) != 0u) return;
+        if ((guest.call(fn::kIsSaveSequenceSuccess) & 0xFFu) == 0u) return done("could not load the file");
+        guest.call(fn::kChangeStageAfterLoading);
+        r.phase = 3;
+        r.settle = 0u;
+        return;
+    case 3:
+    case 4: {
+        // Where the save starts, then the host's galaxy and mission if that is somewhere else.
+        const bool there = r.phase == 4 ? scene.stage == r.to.stage : scene.stage != "FileSelect";
+        r.settle = there && settled(guest, scene) ? r.settle + 1u : 0u;
+        if (r.settle < 90u) return;
+        if (r.phase == 3 && !r.to.stage.empty() && scene.stage != r.to.stage) {
+            Guest::Frame frame(guest);
+            const std::uint32_t text = frame.scratch();
+            for (std::size_t i = 0; i <= r.to.stage.size(); ++i) {
+                guest.set_u8(text + static_cast<std::uint32_t>(i),
+                             i < r.to.stage.size() ? static_cast<std::uint8_t>(r.to.stage[i]) : 0u);
+            }
+            guest.call(fn::kRequestChangeStage, text, static_cast<std::uint32_t>(std::max(r.to.mission, 1)));
+            std::fprintf(stderr, "[rejoin] to %s mission %d\n", r.to.stage.c_str(), r.to.mission);
+            r.phase = 4;
+            r.settle = 0u;
+            return;
+        }
+        if (r.to.placed) {
+            const coop::Vec3 spot{r.to.x, r.to.y, r.to.z};
+            Guest::Frame frame(guest);
+            guest.call(fn::kSetPlayerPos, frame.vec(0, spot));
+            if (coop_second_player(first_player(guest)) != 0u) {
+                coop_request_second_player_teleport({spot.x + 120.0f, spot.y, spot.z});
+            }
+        }
+        return done("both players are in place");
+    }
+    default:
+        return;
+    }
+}
+
 }  // namespace
+
+void rejoin_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc) {
+    Rejoin& r = rejoin_state();
+    if (!r.active && !net_location_wanted()) return;
+    const Guest guest(context, memory, services, guest_pc);
+    if (r.active) {
+        step_rejoin(r, guest);
+    } else if (!net_session_requested()) {
+        net_publish_location(current_location(guest, memory));
+    }
+}
+
+bool netplay_rejoin_press_a() noexcept {
+    return rejoin_state().press_a;
+}
 
 void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc) {
     Agent& a = agent_state();
