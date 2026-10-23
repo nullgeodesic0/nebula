@@ -136,9 +136,10 @@ Event cameras (warps, launch stars, cutscenes) remain the game camera's, handed 
 Only the brother in an event gets its camera; the other keeps his own the whole time. One brother's own event (a
 launch star he rides, a warp, a pipe) splits the screen even when they stand together (`solo_event`). A camera
 event the second player sets off plays in their half with the game's own camera (easing in from the second
-player's), and the first player's half follows him with a camera of his own: a third CameraDirector, made with
-the second's and run the same way with him as its target (`director3`); after it, his half keeps that camera
-until the game camera is back with him (within 2500 units and settled), then eases into it. A launch star the
+player's), and the first player's half keeps the game camera's last view of him, carried along with him; after
+it, his half keeps that view until the game camera is back with him (within 2500 units and settled), then eases
+into it. (A third CameraDirector run for the first player, the game's own player, made replays diverge at audio
+interrupt timing, though the second player's director does not; it was taken out.) A launch star the
 first player rides plays in his half with the game camera at once, even when it starts out near the second
 player (`first_event`), and the second player's half keeps his own camera.
 Each half's EFB copies (the bloom, blur and final scene captures) are its own, so neither half's effects

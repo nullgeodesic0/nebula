@@ -646,10 +646,6 @@ struct State {
     std::uint32_t director2 = 0u;
     bool director2_view_valid = false;
     coop::CameraMatrices director2_view;
-    // The first player's own director, his half's camera while the game camera plays the second player's event.
-    std::uint32_t director3 = 0u;
-    bool director3_view_valid = false;
-    coop::CameraMatrices director3_view;
     // The camera's lens, for the second player's clipping.
     float fovy = 45.0f;
     float aspect = 16.0f / 9.0f;
@@ -681,11 +677,12 @@ struct State {
     } pointers;
 };
 
-// The first player's half while the game camera is away on the second player's event: his own director's view (his
-// camera following him, as the game's would), else the game camera's last view of him carried along with him.
+// The first player's half while the game camera is away on the second player's event: the game camera's last view
+// of him, carried along with him. (Not a director of his own: a second CameraDirector run for the game's own player
+// made replays and online play diverge, at audio interrupt timing; the second player's director does not.)
 constexpr float kOwnCameraBackDistance = 2500.0f;  // the game camera this near the first player is back with him
 coop::CameraMatrices first_own_view(const State& s, coop::Vec3 first_position) {
-    return s.director3_view_valid ? s.director3_view : s.hold.view(first_position);
+    return s.hold.view(first_position);
 }
 
 bool split_screen_enabled() {
@@ -1271,15 +1268,12 @@ std::uint32_t make_director(const Guest& guest, std::uint32_t player) {
     return second;
 }
 
-// Two of them a stage: the second player's (his half's camera), and the first player's own, for his half while the
-// game camera plays the second player's event (a launch star's flight, a warp): each brother not in an event keeps
-// a camera of his own, following him.
+// The second player's (his half's camera), once a stage.
 void make_second_director(const Guest& guest, State& s) {
-    s.director2 = s.director3 = 0u;
-    s.director2_view_valid = s.director3_view_valid = false;
-    if (!second_camera_by_director() || !plausible(s.second) || !plausible(s.first)) return;
+    s.director2 = 0u;
+    s.director2_view_valid = false;
+    if (!second_camera_by_director() || !plausible(s.second)) return;
     s.director2 = make_director(guest, s.second);
-    s.director3 = make_director(guest, s.first);
 }
 
 // One own director's frame, as `second` or the first player (the game's player meanwhile), with
@@ -1303,14 +1297,11 @@ bool run_director(const Guest& guest, State& s, std::uint32_t own, bool second, 
     return finite(view.view) && finite(view.inverse);
 }
 
-// After the game's camera has moved (its movement category): the brothers' own directors.
+// After the game's camera has moved (its movement category): the second player's director.
 void run_second_director(const Guest& guest, State& s) {
-    s.director2_view_valid = s.director3_view_valid = false;
+    s.director2_view_valid = false;
     if (!plausible(s.second) || s.down[1].down || s.level_start) return;
     if (plausible(s.director2)) s.director2_view_valid = run_director(guest, s, s.director2, true, s.director2_view);
-    if (plausible(s.director3) && !s.down[0].down) {
-        s.director3_view_valid = run_director(guest, s, s.director3, false, s.director3_view);
-    }
 }
 
 // Puts a player (0 the first, 1 the second) at a position, made the game's player for MR::setPlayerPos.
@@ -2991,9 +2982,9 @@ void begin_split_draw(const Guest& guest, State& s) {
     if (s.hold.active() && !events_swapped(s)) {
         // The first player's half, held through the second player's flight and until the game camera is back.
         const coop::CameraMatrices held = first_own_view(s, first_position);
-        // With his own camera live, his half has no reason to give up on the game camera's slow way back: it keeps
-        // waiting while that is still far from him.
-        if (s.hold.returning() && s.director3_view_valid && !s.first_event &&
+        // His half has no reason to give up on the game camera's slow way back: it keeps waiting while that is
+        // still far from him.
+        if (s.hold.returning() && !s.first_event &&
             coop::length(coop::pose_of(s.camera1.inverse).eye - first_position) > kOwnCameraBackDistance) {
             s.hold.rearm();
         }
