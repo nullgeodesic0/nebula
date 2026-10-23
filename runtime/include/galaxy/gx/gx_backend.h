@@ -843,6 +843,19 @@ private:
     // (Render-thread state, like everything below it down to the stats.)
     std::vector<std::byte> pending_fifo_;
     GxState event_state_;
+    // GALAXY_GX_RESUME_VERIFY=1: a full-state parse beside the event parser (events not raised), compared with
+    // the renderer's state where it resumes after re-simulation, to show how far the adopted state is from it.
+    struct ResumeVerifyParse {
+        FifoParser parser;
+        GxState state;
+        std::vector<std::byte> pending;
+        GxState saved_state;
+        std::vector<std::byte> saved_pending;
+    };
+    std::unique_ptr<ResumeVerifyParse> resume_verify_;
+    unsigned resume_verify_submissions_ = 0u;  // submissions after a resume still to compare
+    void resume_verify_scan(const std::byte* fifo_data, std::size_t fifo_size, GuestMemoryV1* memory);
+    void resume_verify_compare(unsigned submissions_since_resume) const;
     std::vector<std::byte> event_pending_fifo_;
     bool render_suppressed_ = false;
     bool resume_from_event_state_ = false;  // suppression ended: the renderer adopts event_state_ next frame
