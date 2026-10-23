@@ -8048,7 +8048,7 @@ fn coop_call_id(target: u32) -> Option<u32> {
         0x8037_8828 => Some(32), // PlayerLeft::forceAppear()
         0x8037_8888 => Some(33), // PlayerLeft::disappear()
         0x803C_C3CC => Some(34), // MR::getPlayerLeft()
-        0x803F_2680 => Some(35), // MR::incPlayerLife(u32): coins heal both players
+        0x803F_2680 => Some(35), // MR::incPlayerLife(u32): a coin heals the brother who took it
         // Launch stars ridden by the second player: their steps run with the second player as the game's player.
         0x8024_7114 => Some(36), // SuperSpinDriver::exeCapture()
         0x8024_722C => Some(37), // SuperSpinDriver::exeShootStart()
@@ -8075,6 +8075,8 @@ fn coop_call_id(target: u32) -> Option<u32> {
         // Star bunnies' code runs with the brother nearer the bunny as the game's player.
         0x8029_38E0..=0x8029_9823 => Some(53), // TrickRabbit and its kin
         0x8028_4A58..=0x8028_6A53 => Some(53), // RunawayRabbit, RunawayRabbitCollect
+        // Koopa shells too: the brother at one keeps it in place and takes it.
+        0x801E_A2F8..=0x801E_CA2B => Some(53), // JetTurtle, GoldenTurtle and their nerves
         // Multiplayer talks: the brother nearest an NPC talks to it (its talk calls and the talk director run
         // with him as the game's player), either brother's A pages and either chooses, and the other waits.
         0x803F_E18C..=0x803F_E61F => Some(54), // MR::tryTalk*(TalkMessageCtrl*, ...)
