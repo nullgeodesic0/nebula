@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NebulaRuntime VERSION 1.0.1 LANGUAGES C CXX)
+project(NebulaRuntime VERSION 1.0.1 LANGUAGES C CXX ASM_MASM)
 
 if(NOT WIN32)
     message(FATAL_ERROR "The first runtime milestone targets Windows x64 only.")
@@ -867,6 +867,10 @@ if(MSVC)
     # address space only; pages commit on demand.
     target_compile_options(NebulaRuntime PRIVATE /GS- /GR- /Oi /favor:INTEL64)
     target_link_options(NebulaRuntime PRIVATE /STACK:268435456,1048576)
+    # The cooperative scheduler's context switch (coop_context_x64.asm), in a library of its own so that the
+    # C++ options above never reach the assembler.
+    add_library(galaxy_coop_context STATIC runtime/src/coop_context_x64.asm)
+    target_link_libraries(NebulaRuntime PRIVATE galaxy_coop_context)
 endif()
 option(NEBULA_HOST_IPO "Optimize public host/runtime Release targets across source files" ON)
 set(nebula_host_ipo_effective OFF)

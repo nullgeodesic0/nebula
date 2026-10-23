@@ -1053,6 +1053,16 @@ public:
     // PI_INTSR as a pure observation (no device service), for the deterministic trace.
     [[nodiscard]] std::uint32_t peek_processor_interrupt_cause() const { return processor_interrupt_cause(); }
 
+    // Rollback: every emulated device's state (IOS and IPC, Bluetooth and the virtual Wiimote, the GX FIFO, PI/PE,
+    // ARAM and AI DMA, DSP mail), not guest RAM, the native DSP coprocessor or host-side caches and diagnostics.
+    // Defined in native_host.cpp; make_device_snapshot allocates one.
+    struct DeviceSnapshot;
+    [[nodiscard]] static std::shared_ptr<DeviceSnapshot> make_device_snapshot();
+    void save_devices(DeviceSnapshot& out);
+    void restore_devices(const DeviceSnapshot& in);
+    // Short digests of device and DSP state ("name=hash ..."), for the deterministic trace.
+    [[nodiscard]] std::string rollback_digest();
+
     // Filled by the WGPIPE write intercept.
     // The observable GX stream: every complete staged burst lands first.
     const std::vector<std::byte>& gx_fifo_data() const {

@@ -2,7 +2,14 @@
 
 #include "galaxy/native_api.h"
 
+#include <memory>
+
 namespace galaxy {
+
+// Rollback: both players' moveset state.
+struct OdysseyRollbackState;
+[[nodiscard]] std::shared_ptr<OdysseyRollbackState> odyssey_rollback_save();
+void odyssey_rollback_restore(const OdysseyRollbackState& state);
 
 // Runtime side of SiteHookKind::MarioActionMain (r3 the Mario, before Mario::actionMain runs):
 // reads Mario and the player's buttons, and applies the Odyssey moveset (odyssey_moveset.h) when the

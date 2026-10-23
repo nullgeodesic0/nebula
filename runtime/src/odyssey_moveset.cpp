@@ -340,18 +340,47 @@ void trace_pointer(const Guest& guest, std::uint32_t self) {
                  (states & mario::kGrounded) != 0u, (states & mario::kJumping) != 0u);
 }
 
+struct OdysseyStatics {
+    moveset::Moveset movesets[2];
+    GuestNames names;
+    bool actives[2] = {false, false};
+    bool in_tick = false;
+    std::uint32_t frame = 0u;
+    std::uint8_t last_run_anims[2] = {0u, 0u};
+};
+
+OdysseyStatics& odyssey_statics() {
+    static OdysseyStatics statics;
+    return statics;
+}
+
 }  // namespace
+
+struct OdysseyRollbackState {
+    OdysseyStatics statics;
+};
+
+std::shared_ptr<OdysseyRollbackState> odyssey_rollback_save() {
+    auto state = std::make_shared<OdysseyRollbackState>();
+    state->statics = odyssey_statics();
+    return state;
+}
+
+void odyssey_rollback_restore(const OdysseyRollbackState& state) {
+    odyssey_statics() = state.statics;
+}
 
 void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
                           std::uint32_t guest_pc) {
     // One moveset state per player: the first, and the co-op second (coop_guest.cpp), whose turn runs this hook
-    // with their own Mario and controller.
-    static moveset::Moveset s_movesets[2];
-    static GuestNames s_names;
-    static bool s_actives[2] = {false, false};
-    static bool s_in_tick = false;
-    static std::uint32_t s_frame = 0u;
-    static std::uint8_t s_last_run_anims[2] = {0u, 0u};
+    // with their own Mario and controller. Kept in odyssey_statics() so a rollback snapshot can copy it.
+    OdysseyStatics& statics = odyssey_statics();
+    moveset::Moveset (&s_movesets)[2] = statics.movesets;
+    GuestNames& s_names = statics.names;
+    bool (&s_actives)[2] = statics.actives;
+    bool& s_in_tick = statics.in_tick;
+    std::uint32_t& s_frame = statics.frame;
+    std::uint8_t (&s_last_run_anims)[2] = statics.last_run_anims;
     if (s_in_tick || services == nullptr || services->call_guest == nullptr) return;
 
     const std::uint32_t self = context->gpr[3];

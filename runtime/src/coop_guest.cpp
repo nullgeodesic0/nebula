@@ -2649,4 +2649,21 @@ coop::DownState coop_down_state(unsigned player) noexcept {
     return player < 2u ? state().down[player] : coop::DownState{};
 }
 
+struct CoopRollbackState {
+    State state;
+    FileSelectMenu menu;
+};
+
+std::shared_ptr<CoopRollbackState> coop_rollback_save() {
+    auto saved = std::make_shared<CoopRollbackState>();
+    saved->state = state();
+    saved->menu = s_menu;
+    return saved;
+}
+
+void coop_rollback_restore(const CoopRollbackState& saved) {
+    state() = saved.state;
+    s_menu = saved.menu;
+}
+
 }  // namespace galaxy

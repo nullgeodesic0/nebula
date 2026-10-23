@@ -8,6 +8,7 @@
 #include "galaxy/external_dispatch.h"
 #include "galaxy/site_hooks.h"
 #include "galaxy/coop_guest.h"
+#include "galaxy/odyssey_moveset_guest.h"
 #include "galaxy/coop_scheduler.h"
 #include "galaxy/native_call_admission.h"
 #include "galaxy/experimental_ultrawide_aspect.h"
@@ -5172,15 +5173,13 @@ bool deterministic_mode() {
             (void)_putenv_s("GALAXY_EFB_PEEK_EXACT", "1");
             if (deterministic_unpaced()) {
                 // Nothing paces the run: frames are not shown (the render thread then never waits on the
-                // display), the renderer works from snapshots instead of draining before each frame, and audio is
-                // off (its output would block once real time fell behind).
+                // display) and audio is off (its output would block once real time fell behind). The renderer
+                // keeps reading live guest memory, as in paced play: compact per-frame memory snapshots keep
+                // dependency caches that a rollback's memory restore leaves stale.
                 std::cerr << "[deterministic] unpaced: as fast as the machine runs, no presents, no audio\n";
                 (void)_putenv_s("GALAXY_SKIP_PRESENT", "1");
                 (void)_putenv_s("GALAXY_SMOOTH_REALTIME_PRESENT", "0");
                 (void)_putenv_s("GALAXY_VSYNC_INTERVAL", "0");
-                (void)_putenv_s("GALAXY_RENDER_LIVE_MEMORY_WAIT", "0");
-                (void)_putenv_s("GALAXY_RENDER_MEMORY_SNAPSHOT", "1");
-                (void)_putenv_s("GALAXY_RENDER_QUEUE_DEPTH", "8");
                 (void)_putenv_s("GALAXY_AUDIO_DISABLE", "1");
             }
         }
@@ -30178,6 +30177,164 @@ void coop_branch_checkpoint(
     }
 }
 
+// --- Rollback snapshots (netplay_set_snapshot_hooks) ---
+//
+// A snapshot is taken at the frame boundary (netplay's KPADRead hook) on whichever fiber runs the game loop:
+// every fiber's stack and the scheduler (coop::Scheduler::save), guest RAM, the shared register file and the
+// running chain's checkpoint depth. A restore puts them all back and resumes the fiber inside its save.
+// RuntimeState's emulation fields: the guest-visible clock and every deadline, interrupt and boundary in flight.
+// Diagnostics and host pacing are left out.
+#define GALAXY_ROLLBACK_RUNTIME_FIELDS(X)       \
+    X(checkpoint_count)                         \
+    X(full_checkpoint_invocations)              \
+    X(virtual_idle_ticks)                       \
+    X(next_inline_checkpoint_slow)              \
+    X(inline_checkpoint_gate_requested)         \
+    X(coop_reschedule_pending)                  \
+    X(vi_first_deadline_ticks)                  \
+    X(vi_deadline_wait_active)                  \
+    X(vi_edge_delivery_active)                  \
+    X(vi_retrace_count)                         \
+    X(last_vi_delivery_ticks)                   \
+    X(pending_vi_boundary)                      \
+    X(pe_scanned_fifo_bytes)                    \
+    X(draw_done_submit_owed)                    \
+    X(gx_sync_capture_active)                   \
+    X(ai_dma_deadline_generation)               \
+    X(ai_dma_armed_deadline_ticks)              \
+    X(ai_dma_deadline_armed)                    \
+    X(ai_dma_deadline_recovery_taken_generation) \
+    X(next_ai_dma_probe_checkpoint)             \
+    X(decrementer_deadline)                     \
+    X(next_host_pump_checkpoint)                \
+    X(next_yaz0_fast_checkpoint_poll)           \
+    X(synthetic_kpad_motion)                    \
+    X(synthetic_pointer_last_read)              \
+    X(synthetic_pointer_last_output)            \
+    X(synthetic_pointer_last_read_serial)       \
+    X(bluetooth_device_state)                   \
+    X(jaudio_mixer)                             \
+    X(movie_volume_original)                    \
+    X(movie_volume_gain)                        \
+    X(movie_volume_original_valid)              \
+    X(audio_settings_poll_frames)
+
+struct RollbackRuntimeFields {
+#define GALAXY_ROLLBACK_DECLARE(name) decltype(RuntimeState::name) name{};
+    GALAXY_ROLLBACK_RUNTIME_FIELDS(GALAXY_ROLLBACK_DECLARE)
+#undef GALAXY_ROLLBACK_DECLARE
+    galaxy::timing::RuntimeTimeline::State timeline{};
+    galaxy::timing::PendingEventLatch::State events{};
+    galaxy::timing::DeadlineSchedule schedule{};
+    std::optional<galaxy::timing::ExactPeriodicDeadlineConsumer> vi_consumer{};
+    galaxy::checkpoint::GateController::ChainDepths gate_depths{};
+};
+
+void rollback_save_runtime(const RuntimeState& state, RollbackRuntimeFields& out) {
+    // A frame boundary has no interrupt dispatch and no draw-done submission in flight; those trackers are not
+    // copyable, so the snapshot requires them idle instead.
+    if (state.external_dispatch.active() || !state.pending_draw_done_submissions.empty()) {
+        throw RuntimeFailure("rollback snapshot with an external dispatch or a draw-done submission in flight");
+    }
+    out.gate_depths = {state.checkpoint_gate.full_scope_depth(), state.checkpoint_gate.inline_scope_depth()};
+#define GALAXY_ROLLBACK_SAVE(name) out.name = state.name;
+    GALAXY_ROLLBACK_RUNTIME_FIELDS(GALAXY_ROLLBACK_SAVE)
+#undef GALAXY_ROLLBACK_SAVE
+    out.timeline = state.timeline->save_state();
+    out.events = state.deadline_events.save_state();
+    out.schedule = state.deadline_broker->save_schedule();
+    out.vi_consumer.reset();
+    if (state.vi_deadline_consumer != nullptr) out.vi_consumer.emplace(*state.vi_deadline_consumer);
+}
+
+void rollback_restore_runtime(RuntimeState& state, const RollbackRuntimeFields& in) {
+#define GALAXY_ROLLBACK_RESTORE(name) state.name = in.name;
+    GALAXY_ROLLBACK_RUNTIME_FIELDS(GALAXY_ROLLBACK_RESTORE)
+#undef GALAXY_ROLLBACK_RESTORE
+    state.timeline->restore_state(in.timeline);
+    state.deadline_events.restore_state(in.events);
+    state.deadline_broker->restore_schedule(in.schedule);
+    if (in.vi_consumer.has_value() && state.vi_deadline_consumer != nullptr) {
+        *state.vi_deadline_consumer = *in.vi_consumer;
+    }
+    galaxy::checkpoint::GateController::ChainDepths current{};
+    state.checkpoint_gate.exchange_chain(current, in.gate_depths);
+}
+
+struct RollbackSnapshot {
+    RuntimeState* state = nullptr;
+    galaxy::PpcContext* context = nullptr;
+    galaxy::GuestMemoryV1* memory = nullptr;
+    galaxy::coop::Scheduler::Snapshot scheduler;
+    RollbackRuntimeFields runtime;
+    std::shared_ptr<galaxy::host::GuestAddressSpace::DeviceSnapshot> devices;
+    std::shared_ptr<galaxy::gx::GxRollbackState> gx;
+    std::shared_ptr<galaxy::CoopRollbackState> coop;
+    std::shared_ptr<galaxy::OdysseyRollbackState> odyssey;
+    galaxy::voice::PlaybackState voice{};
+    std::vector<std::vector<std::byte>> ram;  // per guest memory region, in region order
+    galaxy::PpcContext registers{};
+    std::uint64_t callback_depth = 0u;
+    std::uint32_t checkpoint_pc = 0u;
+};
+
+RollbackSnapshot& rollback_snapshot() {
+    static RollbackSnapshot snapshot;
+    return snapshot;
+}
+
+void rollback_copy_ram(RollbackSnapshot& s, bool to_snapshot) {
+    s.ram.resize(s.memory->region_count);
+    for (std::uint32_t r = 0; r < s.memory->region_count; ++r) {
+        const galaxy::GuestMemoryRegionV1& region = s.memory->regions[r];
+        if (region.host_base == nullptr) continue;
+        if (to_snapshot) {
+            s.ram[r].assign(region.host_base, region.host_base + region.size);
+        } else {
+            std::memcpy(region.host_base, s.ram[r].data(), region.size);
+        }
+    }
+}
+
+bool rollback_save(void* user) {
+    auto& s = *static_cast<RollbackSnapshot*>(user);
+    rollback_copy_ram(s, true);
+    s.registers = *s.context;
+    s.callback_depth = g_branch_checkpoint_callback_depth;
+    s.checkpoint_pc = g_active_branch_checkpoint_pc;
+    rollback_save_runtime(*s.state, s.runtime);
+    if (s.devices == nullptr) s.devices = galaxy::host::GuestAddressSpace::make_device_snapshot();
+    s.state->address_space->save_devices(*s.devices);
+    if (s.gx == nullptr) s.gx = galaxy::gx::make_rollback_state();
+    galaxy::gx::save_rollback_state(*s.gx);
+    s.coop = galaxy::coop_rollback_save();
+    s.odyssey = galaxy::odyssey_rollback_save();
+    s.voice = galaxy::voice::save_playback();
+    if (!s.state->coop->save(s.scheduler)) return false;
+    // Resumed by rollback_restore: the stacks are back; now the rest.
+    galaxy::gx::restore_rollback_state(*s.gx);
+    galaxy::coop_rollback_restore(*s.coop);
+    galaxy::odyssey_rollback_restore(*s.odyssey);
+    galaxy::voice::restore_playback(s.voice);
+    rollback_copy_ram(s, false);
+    rollback_restore_runtime(*s.state, s.runtime);
+    s.state->address_space->restore_devices(*s.devices);
+    // Every cache keyed on guest memory (textures, display lists, decoded vertices) sees the restore as a write.
+    for (std::uint32_t r = 0; r < s.memory->region_count; ++r) {
+        const galaxy::GuestMemoryRegionV1& region = s.memory->regions[r];
+        if (region.host_base != nullptr) galaxy::gx::notify_guest_memory_write(region.guest_base, region.size);
+    }
+    *s.context = s.registers;
+    g_branch_checkpoint_callback_depth = s.callback_depth;
+    g_active_branch_checkpoint_pc = s.checkpoint_pc;
+    return true;
+}
+
+void rollback_restore(void* user) {
+    auto& s = *static_cast<RollbackSnapshot*>(user);
+    s.state->coop->restore(s.scheduler);
+}
+
 void start_cooperative_scheduler(
     RuntimeState& state,
     galaxy::PpcContext* context,
@@ -30199,8 +30356,19 @@ void start_cooperative_scheduler(
     host.exchange_chain = &coop_exchange_chain;
     state.coop_memory = memory;
     state.coop = std::make_unique<galaxy::coop::Scheduler>(host, coop_ram(), context);
-    state.coop->attach_boot_fiber();
     state.services->branch_checkpoint = &coop_branch_checkpoint;
+    RollbackSnapshot& rollback = rollback_snapshot();
+    rollback.state = &state;
+    rollback.context = context;
+    rollback.memory = memory;
+    galaxy::netplay_set_snapshot_hooks({&rollback, &rollback_save, &rollback_restore});
+    galaxy::netplay_set_digest_hook(
+        [](void* user) {
+            auto& s = *static_cast<RollbackSnapshot*>(user);
+            galaxy::netplay_trace("digest cp=%llu%s", static_cast<unsigned long long>(s.state->checkpoint_count),
+                                  s.state->address_space->rollback_digest().c_str());
+        },
+        &rollback);
 }
 
 // Runs the guest code `start` enters. It never ends normally: an RFI that
@@ -30405,7 +30573,24 @@ void run_guest_entry(
                          " using the exception-transfer scheduler\n";
         }
     }
-    run_guest_flat(state, [&] { entry(context, memory); }, context, memory);
+    if (state.coop == nullptr) {
+        run_guest_flat(state, [&] { entry(context, memory); }, context, memory);
+        return;
+    }
+    // The guest's boot thread runs on the scheduler's boot fiber, off this stack; how it ends (a quit, a
+    // benchmark's end, a failure) is rethrown here, where wmain's handlers expect it.
+    struct Boot {
+        RuntimeState* state;
+        galaxy::ModuleEntryFn entry;
+        galaxy::PpcContext* context;
+        galaxy::GuestMemoryV1* memory;
+    } boot{&state, entry, context, memory};
+    state.coop->run_boot(
+        [](void* argument) {
+            auto& b = *static_cast<Boot*>(argument);
+            run_guest_flat(*b.state, [&] { b.entry(b.context, b.memory); }, b.context, b.memory);
+        },
+        &boot);
 }
 
 // wmain

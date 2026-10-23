@@ -287,6 +287,19 @@ public:
         std::size_t fifo_size,
         GuestMemoryV1* memory,
         const NativeServicesV1* services);
+    // Rollback: the FIFO parse state that carries across frames (an incomplete command's tail and the GX register
+    // state of the simulation thread's PE-event and dependency parsers and of the renderer), taken and put back
+    // with the render queue drained.
+    struct RollbackState {
+        GxState event_state;
+        std::vector<std::byte> event_pending;
+        GxState dependency_state;
+        std::vector<std::byte> dependency_pending;
+        GxState render_state;
+        std::vector<std::byte> render_pending;
+    };
+    void save_rollback_state(RollbackState& out);
+    void restore_rollback_state(const RollbackState& in);
     void install_guest_dirty_tracker(GuestMemoryV1* memory) noexcept;
     void notify_guest_memory_write(
         std::uint32_t address,

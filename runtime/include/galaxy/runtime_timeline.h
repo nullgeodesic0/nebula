@@ -119,6 +119,23 @@ public:
     [[nodiscard]] bool saturated() const noexcept {
         return saturated_.load(std::memory_order_acquire);
     }
+    // Rollback (simulation thread only): the monotonic guards, which must go back with the guest's clock.
+    struct State {
+        std::uint64_t discarded_host_ticks{};
+        std::uint64_t last_counter{};
+        std::uint64_t last_ticks{};
+        std::uint64_t committed_guest_ticks{};
+    };
+    [[nodiscard]] State save_state() const noexcept {
+        return {discarded_host_ticks_.load(), last_counter_.load(), last_ticks_.load(),
+                committed_guest_ticks_.load()};
+    }
+    void restore_state(const State& state) noexcept {
+        discarded_host_ticks_.store(state.discarded_host_ticks);
+        last_counter_.store(state.last_counter);
+        last_ticks_.store(state.last_ticks);
+        committed_guest_ticks_.store(state.committed_guest_ticks);
+    }
 
 private:
     [[nodiscard]] std::optional<std::uint64_t>
@@ -422,6 +439,35 @@ public:
         std::uint64_t expected_generation) noexcept;
     void clear_replaceable(EventKind kind) noexcept;
 
+    // Rollback (simulation thread only, with no publisher running): everything pending.
+    struct State {
+        std::array<std::uint64_t, kEventKindCount> counts{};
+        std::array<std::uint64_t, kEventKindCount> replaceable_generations{};
+        std::array<PeriodicBatch, kEventKindCount> periodic_batches{};
+        std::array<std::uint64_t, kEventKindCount> periodic_period_ticks{};
+        std::uint32_t mask{};
+    };
+    [[nodiscard]] State save_state() const noexcept {
+        State state;
+        for (std::size_t i = 0; i < kEventKindCount; ++i) {
+            state.counts[i] = counts_[i].load();
+            state.replaceable_generations[i] = replaceable_generations_[i].load();
+        }
+        state.periodic_batches = periodic_batches_;
+        state.periodic_period_ticks = periodic_period_ticks_;
+        state.mask = mask_.load();
+        return state;
+    }
+    void restore_state(const State& state) noexcept {
+        for (std::size_t i = 0; i < kEventKindCount; ++i) {
+            counts_[i].store(state.counts[i]);
+            replaceable_generations_[i].store(state.replaceable_generations[i]);
+        }
+        periodic_batches_ = state.periodic_batches;
+        periodic_period_ticks_ = state.periodic_period_ticks;
+        mask_.store(state.mask);
+    }
+
 private:
     static std::size_t index(EventKind kind) noexcept;
     void lock_slot(std::size_t slot) noexcept;
@@ -636,6 +682,15 @@ public:
     [[nodiscard]] bool synchronous() const noexcept { return synchronous_; }
     // Synchronous mode: publishes every deadline due at `now_ticks`; returns the next one, if any.
     std::optional<std::uint64_t> poll(std::uint64_t now_ticks);
+    // Rollback (synchronous mode): the whole schedule.
+    [[nodiscard]] DeadlineSchedule save_schedule() const {
+        std::lock_guard lock(mutex_);
+        return schedule_;
+    }
+    void restore_schedule(const DeadlineSchedule& schedule) {
+        std::lock_guard lock(mutex_);
+        schedule_ = schedule;
+    }
     [[nodiscard]] bool failed() const noexcept {
         return failed_.load(std::memory_order_acquire);
     }

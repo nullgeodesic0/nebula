@@ -4,8 +4,14 @@
 #include "galaxy/native_api.h"
 
 #include <cstdint>
+#include <memory>
 
 namespace galaxy {
+
+// Rollback: the co-op state (players, talks, pipes, lives, the save-select menu) and the second player's input.
+struct CoopRollbackState;
+[[nodiscard]] std::shared_ptr<CoopRollbackState> coop_rollback_save();
+void coop_rollback_restore(const CoopRollbackState& state);
 
 // Mario and Luigi co-op (docs/MULTIPLAYER.md). The runtime side of SiteHookKind::CoopBeforeCall and
 // CoopAfterCall: `id` names the game call (coop_call_id in translate.rs). Simulation thread, or the

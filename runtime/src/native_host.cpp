@@ -18017,6 +18017,209 @@ void GuestAddressSpace::dsp_native_service_mram_transaction() {
     }
 }
 
+// Rollback: the device members a snapshot copies. Callbacks and their users, workers, sinks, caches, trace and
+// benchmark records stay as they are. NAND files share their backing, so a rollback across a save write keeps
+// the write (rollback windows are a few frames; a save is not undone).
+#define GALAXY_DEVICE_SNAPSHOT_FIELDS(X)                                                                         \
+    X(locked_cache_) X(broadway_registers_) X(hollywood_registers_)                                             \
+    X(next_ios_handle_) X(ios_event_hook_handle_) X(ios_event_hook_pending_request_) X(ios_paths_)              \
+    X(nand_files_) X(provisional_nand_files_)                                                                    \
+    X(bluetooth_interrupt_read_) X(bluetooth_bulk_read_) X(bluetooth_events_) X(bluetooth_acl_events_)           \
+    X(bt_virtual_input_report_) X(bt_virtual_input_cadence_) X(bt_virtual_input_mode_generation_)               \
+    X(bt_wiimote_scan_enabled_) X(bt_wiimote_connection_requested_) X(bt_wiimote_connection_request_delivered_)  \
+    X(bt_last_connection_attempt_ticks_) X(bt_connection_request_deadline_ticks_)                                \
+    X(bt_next_connection_attempt_ticks_) X(bt_capture_security_block_) X(bt_capture_disconnect_)                 \
+    X(bt_last_disconnect_reason_) X(bt_wiimote_connected_) X(bt_wiimote_sniff_mode_)                             \
+    X(bt_wiimote_sniff_interval_) X(bt_wiimote_link_key_stored_) X(bt_wiimote_link_key_requested_)               \
+    X(bt_wiimote_pin_requested_) X(bt_wiimote_authenticated_) X(bt_wiimote_authenticated_at_ticks_)              \
+    X(bt_wiimote_encrypted_) X(bt_l2cap_control_connect_pending_) X(bt_l2cap_post_auth_wait_logged_)             \
+    X(bt_l2cap_retry_psm_) X(bt_l2cap_retry_deadline_ticks_) X(bt_l2cap_control_retry_count_)                    \
+    X(bt_l2cap_interrupt_retry_count_) X(bt_l2cap_connection_psm_) X(bt_l2cap_connection_signal_id_)             \
+    X(bt_l2cap_connection_response_deadline_ticks_) X(bt_l2cap_connection_response_pending_)                     \
+    X(bt_l2cap_connection_ertx_maximum_deadline_ticks_) X(bt_l2cap_configuration_psm_)                           \
+    X(bt_l2cap_config_signal_id_) X(bt_l2cap_config_response_deadline_ticks_)                                    \
+    X(bt_l2cap_config_response_pending_) X(bt_l2cap_configuration_deadline_ticks_) X(bt_wiimote_handle_)         \
+    X(bt_l2cap_control_local_cid_) X(bt_l2cap_control_remote_cid_) X(bt_l2cap_interrupt_local_cid_)              \
+    X(bt_l2cap_interrupt_remote_cid_) X(bt_l2cap_next_local_cid_) X(bt_l2cap_next_signal_id_)                    \
+    X(bt_l2cap_control_config_request_seen_) X(bt_l2cap_control_config_response_seen_)                           \
+    X(bt_l2cap_interrupt_config_request_seen_) X(bt_l2cap_interrupt_config_response_seen_)                       \
+    X(bt_wiimote_report_mode_) X(bt_wiimote_reporting_enabled_) X(bt_wiimote_init_complete_)                     \
+    X(bt_wiimote_init_delay_logged_) X(bt_wiimote_led_mask_) X(bt_wiimote_rumble_)                               \
+    X(bt_wiimote_speaker_enabled_) X(bt_wiimote_speaker_muted_) X(bt_wiimote_ir_enabled_)                        \
+    X(bt_wiimote_ir_report13_enabled_) X(bt_wiimote_ir_report1a_enabled_)                                        \
+    X(bt_wiimote_ir_sensitivity_block1_seen_) X(bt_wiimote_ir_sensitivity_block2_seen_)                          \
+    X(bt_wiimote_ir_latch_seen_) X(bt_wiimote_ir_mode_) X(latest_native_hid_snapshot_)                           \
+    X(latest_native_hid_snapshot_valid_) X(synthetic_kpad_buttons_) X(latest_native_pointer_x_)                  \
+    X(latest_native_pointer_y_) X(latest_native_pointer_active_) X(synthetic_kpad_pointer_sample_)               \
+    X(synthetic_kpad_mouse_press_) X(synthetic_kpad_mouse_press_mask_) X(synthetic_kpad_last_mouse_buttons_)     \
+    X(synthetic_kpad_last_non_mouse_buttons_) X(synthetic_kpad_pending_non_mouse_press_)                         \
+    X(synthetic_kpad_known_outside_) X(bt_wiimote_extension_init_seen_) X(bt_wiimote_extension_initialized_)     \
+    X(bt_wiimote_interrupt_open_)                                                                                \
+    X(deferred_ios_replies_) X(ipc_pending_replies_) X(latched_reply_requests_) X(latched_reply_)                \
+    X(latched_reply_acked_) X(latched_reply_read_by_handler_) X(latched_reply_release_deferred_)                 \
+    X(ipc_interrupt_handler_pass_depth_) X(disc_read_ticket_sequence_) X(disc_read_tickets_)                     \
+    X(gx_fifo_) X(cp_base_lo_) X(cp_end_lo_) X(cp_wr_lo_) X(cp_fifo_base_) X(cp_fifo_end_) X(cp_rd_ptr_)         \
+    X(cpu_fifo_base_) X(cpu_fifo_top_) X(cpu_fifo_wr_ptr_) X(cpu_fifo_wrap_) X(wgpipe_gather_)                   \
+    X(wgpipe_gather_count_) X(wgpipe_recent_bytes_) X(wgpipe_recent_count_) X(wgpipe_pe_hint_recent_bytes_)      \
+    X(wgpipe_pe_hint_recent_count_) X(gx_pe_scan_hint_pending_) X(fifo_stream_next_)                             \
+    X(pi_interrupt_cause_latch_)                                                                                 \
+    X(aram_dma_active_) X(aram_dma_aram_to_mram_) X(aram_dma_mram_address_) X(aram_dma_aram_address_)            \
+    X(aram_dma_total_blocks_) X(aram_dma_completed_blocks_) X(aram_dma_start_ticks_) X(aram_dma_next_block_ticks_) \
+    X(ai_dma_playing_) X(ai_dma_shadow_address_) X(ai_dma_shadow_blocks_) X(ai_dma_active_address_)              \
+    X(ai_dma_active_blocks_) X(ai_dma_active_sample_rate_) X(ai_dma_active_start_ticks_)                         \
+    X(ai_dma_next_completion_ticks_) X(ai_dma_next_interrupt_ticks_) X(ai_dma_interrupt_pending_since_ticks_)    \
+    X(ai_dma_last_duration_ticks_) X(ai_dma_shadow_fresh_) X(ai_dma_hold_since_ticks_)                           \
+    X(ai_dma_hold_recheck_ticks_) X(ai_dma_latch_stale_) X(ai_dma_feed_stalled_) X(ai_dma_output_concealed_)     \
+    X(ai_dma_notified_deadline_ticks_)                                                                           \
+    X(dsp_task_booted_) X(dsp_expect_value_mail_) X(dsp_mail_to_high_) X(dsp_last_command_)                      \
+    X(dsp_boot_iram_src_) X(dsp_boot_iram_len_) X(dsp_boot_iram_dest_) X(dsp_boot_dram_len_)                     \
+    X(dsp_native_task_vectors_valid_) X(dsp_native_task_descriptor_) X(dsp_native_task_start_vector_)            \
+    X(dsp_native_task_resume_vector_) X(dsp_native_to_mail_count_) X(dsp_native_to_mail_after_mram_count_)       \
+    X(dsp_cmd_words_remaining_) X(dsp_cmd_first_word_) X(dsp_cmd_word_count_) X(dsp_cmd_words_)                  \
+    X(dsp_cmd_have_first_) X(pending_dsp_sync_frame_) X(pending_dsp_sync_release_deferred_)                      \
+    X(dsp_channel_table_addr_) X(dsp_resampler_filter_addr_) X(dsp_adpcm_filter_addr_) X(dsp_sync_frame_count_)  \
+    X(dsp_render_channels_) X(dsp_from_mail_queue_)                                                              \
+    X(dsp_native_to_mail_high_staged_) X(dsp_native_from_mail_staged_) X(dsp_native_dirq_pending_)               \
+    X(dsp_native_from_mail_irq_latched_) X(dsp_native_suppressing_task_done_dirq_)                               \
+    X(dsp_native_suppressed_task_done_count_) X(dsp_native_sync_pacing_active_)                                  \
+    X(dsp_native_next_sync_completion_ticks_) X(dsp_native_from_mail_queue_)                                     \
+    X(dsp_native_command_declared_count_) X(dsp_native_command_is_dset_) X(dsp_native_dset_seen_)
+
+struct GuestAddressSpace::DeviceSnapshot {
+#define GALAXY_DEVICE_SNAPSHOT_DECLARE(name) decltype(GuestAddressSpace::name) name{};
+    GALAXY_DEVICE_SNAPSHOT_FIELDS(GALAXY_DEVICE_SNAPSHOT_DECLARE)
+#undef GALAXY_DEVICE_SNAPSHOT_DECLARE
+    bool pe_finish_pending{};
+    bool pe_token_pending{};
+    std::uint16_t pe_token_value{};
+    std::deque<std::uint16_t> pe_token_backlog;
+    bool dsp_native_int_pending{};
+    std::shared_ptr<galaxy::NativeDspCoprocessor::RollbackState> dsp;  // when the native DSP runs
+    std::shared_ptr<galaxy::DspAramMirrorBoundary::RollbackState> aram_mirror;  // once its ARAM is seeded
+    std::vector<std::uint64_t> aram_cpu_dirty_words;
+};
+
+std::shared_ptr<GuestAddressSpace::DeviceSnapshot> GuestAddressSpace::make_device_snapshot() {
+    return std::make_shared<DeviceSnapshot>();
+}
+
+void GuestAddressSpace::save_devices(DeviceSnapshot& out) {
+#define GALAXY_DEVICE_SNAPSHOT_SAVE(name) out.name = name;
+    GALAXY_DEVICE_SNAPSHOT_FIELDS(GALAXY_DEVICE_SNAPSHOT_SAVE)
+#undef GALAXY_DEVICE_SNAPSHOT_SAVE
+    out.pe_finish_pending = pe_finish_pending_.load();
+    out.pe_token_pending = pe_token_pending_.load();
+    out.pe_token_value = pe_token_value_.load();
+    {
+        std::lock_guard lock(pe_token_mutex_);
+        out.pe_token_backlog = pe_token_backlog_;
+    }
+    out.dsp_native_int_pending = dsp_native_int_pending_.load();
+    if (dsp_native_running_ && dsp_native_ != nullptr) {
+        // Deterministic mode settles the DSP after every wake, so at a frame boundary it is parked.
+        dsp_native_settle_for_determinism();
+        if (out.dsp == nullptr) out.dsp = std::make_shared<galaxy::NativeDspCoprocessor::RollbackState>();
+        dsp_native_->save_rollback_state(*out.dsp);
+        out.aram_cpu_dirty_words.clear();
+        if (dsp_native_aram_active_.load(std::memory_order_acquire) && dsp_native_aram_cpu_dirty_words_ != nullptr) {
+            if (out.aram_mirror == nullptr) {
+                out.aram_mirror = std::make_shared<galaxy::DspAramMirrorBoundary::RollbackState>();
+            }
+            if (!dsp_native_aram_boundary_.save_rollback_state(*out.aram_mirror)) {
+                throw std::runtime_error("rollback snapshot with a DSP ARAM packet in flight");
+            }
+            out.aram_cpu_dirty_words.assign(dsp_native_aram_cpu_dirty_words_.get(),
+                                            dsp_native_aram_cpu_dirty_words_.get() + kDspNativeAramDirtyWordCount);
+        } else {
+            out.aram_mirror.reset();
+        }
+    }
+}
+
+void GuestAddressSpace::restore_devices(const DeviceSnapshot& in) {
+#define GALAXY_DEVICE_SNAPSHOT_RESTORE(name) name = in.name;
+    GALAXY_DEVICE_SNAPSHOT_FIELDS(GALAXY_DEVICE_SNAPSHOT_RESTORE)
+#undef GALAXY_DEVICE_SNAPSHOT_RESTORE
+    pe_finish_pending_.store(in.pe_finish_pending);
+    pe_token_pending_.store(in.pe_token_pending);
+    pe_token_value_.store(in.pe_token_value);
+    {
+        std::lock_guard lock(pe_token_mutex_);
+        pe_token_backlog_ = in.pe_token_backlog;
+    }
+    dsp_native_int_pending_.store(in.dsp_native_int_pending);
+    if (in.dsp != nullptr && dsp_native_running_ && dsp_native_ != nullptr) {
+        dsp_native_settle_for_determinism();
+        if (in.dsp->context.pc != dsp_native_->peek_parked_pc()) {
+            std::cerr << "[rollback] the native DSP is parked at pc 0x" << std::hex << dsp_native_->peek_parked_pc()
+                      << ", the snapshot at 0x" << in.dsp->context.pc << std::dec << '\n';
+        }
+        dsp_native_->restore_rollback_state(*in.dsp);
+        // The DSP's ARAM mirror and both sides' dirty records, as they were: guest ARAM went back with MEM2.
+        if (in.aram_mirror != nullptr && dsp_native_aram_cpu_dirty_words_ != nullptr) {
+            if (!dsp_native_aram_boundary_.restore_rollback_state(*in.aram_mirror)) {
+                throw std::runtime_error("rollback restore with a DSP ARAM packet in flight");
+            }
+            std::copy(in.aram_cpu_dirty_words.begin(), in.aram_cpu_dirty_words.end(),
+                      dsp_native_aram_cpu_dirty_words_.get());
+        }
+    }
+}
+
+namespace {
+std::uint32_t rollback_fnv(const void* data, std::size_t size, std::uint32_t h = 2166136261u) noexcept {
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    for (std::size_t i = 0; i < size; ++i) {
+        h ^= bytes[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+}  // namespace
+
+std::string GuestAddressSpace::rollback_digest() {
+    char text[512];
+    int length = 0;
+    const auto add = [&](const char* name, std::uint32_t hash) {
+        length += std::snprintf(text + length, sizeof(text) - static_cast<std::size_t>(length), " %s=%08x", name, hash);
+    };
+    add("broadway", rollback_fnv(broadway_registers_.data(), broadway_registers_.size()));
+    add("hollywood", rollback_fnv(hollywood_registers_.data(), hollywood_registers_.size()));
+    add("gxfifo", rollback_fnv(gx_fifo_.data(), gx_fifo_.size()));
+    const std::uint64_t ai[] = {ai_dma_active_address_, ai_dma_active_blocks_, ai_dma_active_start_ticks_,
+                                ai_dma_next_completion_ticks_, ai_dma_next_interrupt_ticks_, ai_dma_shadow_address_,
+                                ai_dma_shadow_blocks_, static_cast<std::uint64_t>(ai_dma_playing_)};
+    add("ai", rollback_fnv(ai, sizeof(ai)));
+    if (dsp_native_running_ && dsp_native_ != nullptr) {
+        galaxy::NativeDspCoprocessor::RollbackState dsp;
+        dsp_native_->save_rollback_state(dsp);
+        const auto& c = dsp.context;
+        std::uint32_t regs = rollback_fnv(c.ar.data(), sizeof(c.ar));
+        regs = rollback_fnv(c.ix.data(), sizeof(c.ix), regs);
+        regs = rollback_fnv(c.wr.data(), sizeof(c.wr), regs);
+        regs = rollback_fnv(c.ax.data(), sizeof(c.ax), regs);
+        regs = rollback_fnv(c.ac.data(), sizeof(c.ac), regs);
+        regs = rollback_fnv(c.st.data(), sizeof(c.st), regs);
+        regs = rollback_fnv(&c.sr, sizeof(c.sr), regs);
+        regs = rollback_fnv(&c.pc, sizeof(c.pc), regs);
+        add("dsp-regs", regs);
+        add("dsp-dram", rollback_fnv(c.dram.data(), sizeof(c.dram)));
+        add("dsp-iram", rollback_fnv(c.iram.data(), sizeof(c.iram)));
+        add("dsp-ifx", rollback_fnv(c.ifx.data(), sizeof(c.ifx)));
+        add("dsp-bus", rollback_fnv(&c.audio_bus_state, sizeof(c.audio_bus_state)));
+        if (dsp_native_aram_active_.load(std::memory_order_acquire)) {
+            galaxy::DspAramMirrorBoundary::RollbackState mirror;
+            if (dsp_native_aram_boundary_.save_rollback_state(mirror)) {
+                add("aram-mirror", rollback_fnv(mirror.mirror.data(), mirror.mirror.size()));
+                add("aram-out", rollback_fnv(mirror.dirty_page_flags.data(), mirror.dirty_page_flags.size()));
+            }
+            add("aram-in", rollback_fnv(dsp_native_aram_cpu_dirty_words_.get(),
+                                        kDspNativeAramDirtyWordCount * sizeof(std::uint64_t)));
+        }
+    }
+    return std::string(text, static_cast<std::size_t>(length));
+}
+
 // The native DSP runs on its own thread at host speed, so how far it gets before the CPU next looks depends on
 // host scheduling. In deterministic mode, every CPU action that wakes it (a mail, a consumed mail, PIINT) waits
 // here until it parks again: in a mailbox poll or halted with nothing pending. Its DMA to main memory is served

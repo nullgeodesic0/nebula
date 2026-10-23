@@ -5512,6 +5512,26 @@ void GxBackend::scan_pe_events_on_sim_thread(
     }
 }
 
+void GxBackend::save_rollback_state(RollbackState& out) {
+    wait_for_render_idle();
+    out.event_state = event_state_;
+    out.event_pending = event_pending_fifo_;
+    out.dependency_state = dependency_state_;
+    out.dependency_pending = dependency_pending_fifo_;
+    out.render_state = state_;
+    out.render_pending = pending_fifo_;
+}
+
+void GxBackend::restore_rollback_state(const RollbackState& in) {
+    wait_for_render_idle();
+    event_state_ = in.event_state;
+    event_pending_fifo_ = in.event_pending;
+    dependency_state_ = in.dependency_state;
+    dependency_pending_fifo_ = in.dependency_pending;
+    state_ = in.render_state;
+    pending_fifo_ = in.render_pending;
+}
+
 // Producer (sim thread): snapshot the frame and hand it to the render thread. Blocks only when
 // the consumer is a full frame behind.
 FramePeCompletionToken GxBackend::render_frame(

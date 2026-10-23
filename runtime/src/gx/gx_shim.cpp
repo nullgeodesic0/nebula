@@ -115,6 +115,22 @@ void scan_pe_events(
         fifo_data, fifo_size, memory, services);
 }
 
+struct GxRollbackState {
+    GxBackend::RollbackState state;
+};
+
+std::shared_ptr<GxRollbackState> make_rollback_state() {
+    return std::make_shared<GxRollbackState>();
+}
+
+void save_rollback_state(GxRollbackState& out) {
+    backend().save_rollback_state(out.state);
+}
+
+void restore_rollback_state(const GxRollbackState& in) {
+    backend().restore_rollback_state(in.state);
+}
+
 void install_guest_dirty_tracker(GuestMemoryV1* memory) noexcept {
     backend().install_guest_dirty_tracker(memory);
 }

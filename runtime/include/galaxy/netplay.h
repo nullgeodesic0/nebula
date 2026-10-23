@@ -20,6 +20,20 @@ void netplay_kpad_after(PpcContext* context, GuestMemoryV1* memory, const Native
 // GALAXY_DETERMINISTIC_TRACE=<file>: true when tracing; netplay_trace writes "<frame> <text>" lines there (flushed,
 // since probe runs end with TerminateProcess), for diffing two replays' event order.
 [[nodiscard]] bool netplay_tracing() noexcept;
+
+// Rollback snapshots, provided by the runtime. save(user) captures the whole machine and returns false, or true
+// when a later restore(user) brought the machine back to it (execution continues from the save). restore(user)
+// does not return. GALAXY_SNAPSHOT_TEST="<save frame>,<restore frame>" saves when that frame starts and rolls back
+// to it once when the second starts; the frames in between run twice, and their hashes are written again.
+struct NetplaySnapshotHooks {
+    void* user = nullptr;
+    bool (*save)(void* user) = nullptr;
+    void (*restore)(void* user) = nullptr;
+};
+void netplay_set_snapshot_hooks(const NetplaySnapshotHooks& hooks) noexcept;
+// With GALAXY_DETERMINISTIC_TRACE: a line per frame of host-side state digests (written by `trace(user)` with
+// netplay_trace), to find which part of a rollback snapshot is missing.
+void netplay_set_digest_hook(void (*trace)(void* user), void* user) noexcept;
 void netplay_trace(const char* format, ...) noexcept;
 
 }  // namespace galaxy

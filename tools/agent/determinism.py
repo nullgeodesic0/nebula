@@ -43,9 +43,9 @@ def read_hashes(path):
     return out
 
 
-def run_copies(args, tag, count, env, last_frame, timeout):
-    """Launches `count` deterministic copies at once with `env` (plus a per-copy {i} filled in), waits for all of them
-    to quit at `last_frame` (or crash, or time out) and returns their instances."""
+def run_copies(args, tag, count, env, last_frame, timeout, per_copy=None):
+    """Launches `count` deterministic copies at once with `env` (plus a per-copy {i} filled in, and per_copy[i] if
+    given), waits for all of them to quit at `last_frame` (or crash, or time out) and returns their instances."""
     instances = []
     for i in range(count):
         # Named after the output folder as well: two probes at once must not share an instance (or its lease).
@@ -58,6 +58,8 @@ def run_copies(args, tag, count, env, last_frame, timeout):
         if getattr(args, 'trace', False):
             extra['GALAXY_DETERMINISTIC_TRACE'] = os.path.join(args.out, '%s-%d.trace' % (tag, i))
         extra.update({k: v.replace('{i}', str(i)) for k, v in env.items()})
+        if per_copy is not None:
+            extra.update(per_copy[i])
         inst.launch(fresh_saves=True, extra_env=extra)
         instances.append(inst)
     deadline = time.time() + timeout
@@ -228,6 +230,47 @@ def play_observatory(inst):
     print('played to frame %s' % (inst.status() or {}).get('frame'))
 
 
+def cmd_snapshot(args):
+    """A straight replay and one that saves at --save and rolls back to it at --restore, side by side: after the
+    rollback the replayed frames must hash as the straight run's do."""
+    out = args.out
+    os.makedirs(out, exist_ok=True)
+    started = time.time()
+    env = dict(parse_env(args.env), GALAXY_INPUT_REPLAY=os.path.abspath(args.replay),
+               GALAXY_STATE_HASH=os.path.join(out, 'snap-{i}.hash'), GALAXY_STATE_HASH_EVERY=str(args.every),
+               GALAXY_STATE_HASH_FROM=str(args.save), GALAXY_STATE_HASH_CHUNKS='1')
+    if args.dump:
+        # The rolled-back copy reaches this frame twice; the second dump (after the rollback) is the one kept.
+        env['GALAXY_STATE_DUMP'] = '%d,%s' % (args.dump, os.path.join(out, 'mem-{i}.bin'))
+    test = {'GALAXY_SNAPSHOT_TEST': '%d,%d' % (args.save, args.restore)}
+    print('straight replay and save at %d / roll back at %d, to frame %d' % (args.save, args.restore, args.frames))
+    instances = run_copies(args, 'snap', 2, env, args.frames, args.timeout, per_copy=[{}, test])
+    log = instances[1].log_tail(400, '[netplay]')
+    for line in log:
+        if 'snapshot' in line or 'saved' in line or 'roll' in line or 'restor' in line:
+            print('  ' + line)
+    straight = read_hashes(os.path.join(out, 'snap-0.hash'))
+    rolled = read_hashes(os.path.join(out, 'snap-1.hash'))   # later lines win: the frames after the rollback
+    frames = sorted(set(straight) & set(rolled))
+    if not frames:
+        print('no frames to compare')
+        return 2
+    reached = max(rolled)
+    if args.dump:
+        dumps = [os.path.join(out, 'mem-%d.bin' % i) for i in range(2)]
+        if all(os.path.exists(d) for d in dumps):
+            print('MEM1 at frame %d, straight vs rolled back:' % args.dump)
+            diff_dumps(dumps[0], dumps[1], load_symbols(args.symbols), 30)
+    for frame in frames:
+        if straight[frame][0] != rolled[frame][0]:
+            megabytes = [k for k in range(len(straight[frame][1])) if straight[frame][1][k] != rolled[frame][1][k]]
+            print('differ from frame %d (MB %s); the rolled-back copy reached frame %d (%.0f s)'
+                  % (frame, megabytes, reached, time.time() - started))
+            return 1
+    print('identical at every frame %d..%d after the rollback (%.0f s)' % (frames[0], frames[-1], time.time() - started))
+    return 0
+
+
 def cmd_record(args):
     os.makedirs(args.out, exist_ok=True)
     path = os.path.join(args.out, 'input.rec')
@@ -281,7 +324,19 @@ def main(argv=None):
                      help='trace interrupts, IPC replies and clock jumps (GALAXY_DETERMINISTIC_TRACE) and show '
                           'where two diverging copies\' traces part')
     bis.add_argument('--env', action='append', help='NAME=VALUE for every copy ({i} becomes the copy number)')
+    snap = sub.add_parser('snapshot', help='check that a rollback replays exactly (GALAXY_SNAPSHOT_TEST)')
+    snap.add_argument('--replay', required=True)
+    snap.add_argument('--save', type=int, required=True, help='frame to save at')
+    snap.add_argument('--restore', type=int, required=True, help='frame to roll back at')
+    snap.add_argument('--frames', type=int, default=0, help='last frame (default: 120 after --restore)')
+    snap.add_argument('--every', type=int, default=1)
+    snap.add_argument('--dump', type=int, default=0, help='also dump MEM1 at this frame in both and diff them')
+    snap.add_argument('--symbols', default=None, help='a decomp symbol map, to name the differing words')
+    snap.add_argument('--env', action='append', help='NAME=VALUE for both copies')
     args = parser.parse_args(argv)
+    if args.command == 'snapshot':
+        args.frames = args.frames or args.restore + 120
+        return cmd_snapshot(args)
     return cmd_bisect(args) if args.command == 'bisect' else cmd_record(args)
 
 

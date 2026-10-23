@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <span>
 
@@ -170,6 +171,12 @@ void scan_pe_events(
     std::size_t fifo_size,
     GuestMemoryV1* memory,
     const NativeServicesV1* services);
+
+// Rollback: the GX parse state that carries across frames (GxBackend::RollbackState), as an opaque handle.
+struct GxRollbackState;
+[[nodiscard]] std::shared_ptr<GxRollbackState> make_rollback_state();
+void save_rollback_state(GxRollbackState& out);
+void restore_rollback_state(const GxRollbackState& in);
 
 void install_guest_dirty_tracker(GuestMemoryV1* memory) noexcept;
 

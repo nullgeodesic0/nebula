@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <random>
 
 namespace galaxy::voice {
 
@@ -35,5 +36,18 @@ bool playing() noexcept;
 // Once per subframe after the channels: a clip that nothing rendered this subframe goes to the front buses
 // here, centred, at `gain_q16` (65536 = unity), so a line is never cut short.
 void mix_remainder(std::int16_t* left, std::int16_t* right, std::uint32_t count, std::uint32_t gain_q16) noexcept;
+
+// Rollback: what is playing, where, its level, and the clip picker's random state.
+struct PlaybackState {
+    std::uint32_t playing = UINT32_MAX;
+    std::size_t position = 0;
+    std::uint64_t last_start = UINT64_MAX;
+    bool rendered = false;
+    double game_energy = 0.0, clip_energy = 0.0, gain = 1.0, game_peak = 0.0;
+    std::uint64_t on_channel = 0, after_channel = 0, centred = 0;
+    std::minstd_rand random{};
+};
+[[nodiscard]] PlaybackState save_playback() noexcept;
+void restore_playback(const PlaybackState& state) noexcept;
 
 }  // namespace galaxy::voice

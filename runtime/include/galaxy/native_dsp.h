@@ -341,6 +341,19 @@ public:
 
     [[nodiscard]] Snapshot snapshot() const noexcept;
 
+    // Rollback, from the CPU thread while the worker is parked: the mirror bytes and the DSP's outbound dirty
+    // record (writes not yet flushed to guest ARAM). Generations keep counting forward. False when no packet may be
+    // in flight (an inbound packet is staged but not applied) or the boundary is not active.
+    struct RollbackState {
+        std::vector<std::uint8_t> mirror;
+        std::vector<std::uint8_t> dirty_page_flags;
+        std::vector<std::uint64_t> dirty_byte_words;
+        std::vector<std::uint32_t> dirty_page_indices;
+        std::uint32_t outbound_dirty_page_count{};
+    };
+    [[nodiscard]] bool save_rollback_state(RollbackState& out) const;
+    [[nodiscard]] bool restore_rollback_state(const RollbackState& in);
+
 private:
     enum class State : std::uint8_t {
         Dormant,
@@ -496,6 +509,18 @@ public:
     [[nodiscard]] std::uint64_t host_idle_wait_count() const noexcept {
         return host_wake_state_.idle_wait_count.load(std::memory_order_acquire);
     }
+    // Rollback: the DSP's architectural state (registers, stacks, IRAM, DRAM, IFX, mailboxes, audio bus state),
+    // taken and put back while the worker is parked in a mailbox poll, where the compiled ucode holds all of it in
+    // the context. The host pointers and hardware services in the context are left alone.
+    struct RollbackState {
+        DspContext context{};
+        std::uint64_t cpu_mail_generation{};
+        std::uint16_t external_interrupt_vector{};
+    };
+    void save_rollback_state(RollbackState& out) const;
+    void restore_rollback_state(const RollbackState& in);
+    // The DSP pc of the parked context (meaningful while parked_in_idle_wait()).
+    [[nodiscard]] std::uint16_t peek_parked_pc() const noexcept { return context_.pc; }
     // True while a free-running entry is parked in a classified mailbox poll and nothing has woken it since.
     [[nodiscard]] bool parked_in_idle_wait() const noexcept {
         const auto generation = host_wake_state_.generation.load(std::memory_order_acquire);

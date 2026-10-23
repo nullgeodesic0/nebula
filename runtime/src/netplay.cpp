@@ -56,6 +56,13 @@ struct Netplay {
     std::uint32_t buffer = 0u;
     std::uint32_t dump_frame = 0xFFFFFFFFu;
     std::string dump_path;
+    NetplaySnapshotHooks snapshot_hooks{};
+    void (*digest_trace)(void* user) = nullptr;
+    void* digest_user = nullptr;
+    std::uint32_t snapshot_save_frame = 0xFFFFFFFFu;     // GALAXY_SNAPSHOT_TEST
+    std::uint32_t snapshot_restore_frame = 0xFFFFFFFFu;
+    bool snapshot_saved = false;
+    bool snapshot_restored = false;
 };
 
 Netplay& netplay() {
@@ -102,6 +109,15 @@ void initialize(Netplay& n) {
         n.hash_chunks = !env("GALAXY_STATE_HASH_CHUNKS").empty();
         if (const std::string from = env("GALAXY_STATE_HASH_FROM"); !from.empty()) {
             n.hash_from = static_cast<std::uint32_t>(std::strtoul(from.c_str(), nullptr, 10));
+        }
+    }
+    if (const std::string test = env("GALAXY_SNAPSHOT_TEST"); !test.empty()) {
+        if (const std::size_t comma = test.find(','); comma != std::string::npos) {
+            n.snapshot_save_frame = static_cast<std::uint32_t>(std::strtoul(test.substr(0, comma).c_str(), nullptr, 10));
+            n.snapshot_restore_frame =
+                static_cast<std::uint32_t>(std::strtoul(test.substr(comma + 1u).c_str(), nullptr, 10));
+            std::fprintf(stderr, "[netplay] snapshot test: save at frame %u, roll back to it at frame %u\n",
+                         n.snapshot_save_frame, n.snapshot_restore_frame);
         }
     }
     if (const std::string exit_at = env("GALAXY_STATE_EXIT_FRAME"); !exit_at.empty()) {
@@ -172,6 +188,29 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
         // A frame starts: its state before this frame's input.
         if (n.hashes != nullptr && n.frame >= n.hash_from && n.frame % n.hash_every == 0u) write_hash(n, memory);
         if (n.dump_frame == n.frame && !n.dump_path.empty()) write_dump(n, memory);
+        if (n.digest_trace != nullptr && netplay_tracing()) n.digest_trace(n.digest_user);
+        if (n.snapshot_hooks.save != nullptr) {
+            if (!n.snapshot_saved && n.frame == n.snapshot_save_frame) {
+                n.snapshot_saved = true;
+                const std::uint32_t frame = n.frame;
+                const std::uint32_t channel = n.channel;
+                const std::uint32_t buffer = n.buffer;
+                if (n.snapshot_hooks.save(n.snapshot_hooks.user)) {
+                    // Rolled back: this is frame `frame` again, in this read.
+                    n.frame = frame;
+                    n.channel = channel;
+                    n.buffer = buffer;
+                    std::fprintf(stderr, "[netplay] rolled back to frame %u\n", frame);
+                } else {
+                    std::fprintf(stderr, "[netplay] saved at frame %u\n", frame);
+                }
+            } else if (n.snapshot_saved && !n.snapshot_restored && n.frame == n.snapshot_restore_frame) {
+                n.snapshot_restored = true;
+                std::fprintf(stderr, "[netplay] restoring at frame %u\n", n.frame);
+                std::fflush(stderr);
+                n.snapshot_hooks.restore(n.snapshot_hooks.user);
+            }
+        }
         if (n.frame >= n.exit_frame) {
             // A probe run is over: its files are flushed and nothing else of it matters.
             if (n.hashes != nullptr) std::fclose(n.hashes);
@@ -244,6 +283,15 @@ std::FILE* trace_file() noexcept {
     return file;
 }
 }  // namespace
+
+void netplay_set_snapshot_hooks(const NetplaySnapshotHooks& hooks) noexcept {
+    netplay().snapshot_hooks = hooks;
+}
+
+void netplay_set_digest_hook(void (*trace)(void* user), void* user) noexcept {
+    netplay().digest_trace = trace;
+    netplay().digest_user = user;
+}
 
 bool netplay_tracing() noexcept {
     return trace_file() != nullptr;

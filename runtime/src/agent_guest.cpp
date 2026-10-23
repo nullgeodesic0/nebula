@@ -1,6 +1,7 @@
 #include "galaxy/agent.h"
 #include "galaxy/coop_guest.h"
 #include "galaxy/gx/gx_backend.h"
+#include "galaxy/netplay.h"
 
 #include "guest_access.h"
 
@@ -691,7 +692,8 @@ void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeService
         return on;
     }();
     const std::uint64_t now = GetTickCount64();
-    if (deterministic ? a.frame % 30u == 0u : now - a.last_status_ms >= 500u) {
+    // By the netplay frame, which a rollback puts back, so a replayed frame makes the same calls again.
+    if (deterministic ? netplay_frame() % 30u == 0u : now - a.last_status_ms >= 500u) {
         a.last_status_ms = now;
         write_status(a, guest);
     }
