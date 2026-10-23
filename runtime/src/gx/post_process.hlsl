@@ -24,7 +24,16 @@ cbuffer PostConstants : register(b0) {
     float4 g_params;
     // xy: viewport origin in render-target pixels.
     int4 g_origin;
+    // Co-op split screen: the half a scene effect stays inside, a*x + b*y + c >= 0 in render pixels (w = 1 when on).
+    float4 g_split;
+    // Depth of field: xy the point the focus is taken at, in render pixels (z = 1 to use it).
+    float4 g_focus;
 };
+
+// Whether a render pixel position is in the half this pass covers (always, without a split).
+bool InSplitHalf(float2 q) {
+    return g_split.w < 0.5 || dot(g_split.xy, q) + g_split.z >= 0.0;
+}
 
 SamplerState LinearSampler : register(s0);
 SamplerState PointSampler : register(s1);
@@ -681,9 +690,10 @@ float4 PSMain(FullscreenOut i) : SV_Target {
 // g_con0.xy = (near, far); g_con1.x = step limit per scene (ratio > 1),
 // g_con1.y = ease rate 0-1, g_con1.z = 1 resets to the candidate (first scene
 // or a camera cut); g_params = scene viewport.
+// In split screen, each half's focus is taken at the middle of that half (g_focus).
 Texture2D prevFocusTex : register(t1);
 float4 PSMain(FullscreenOut i) : SV_Target {
-    const float2 c = g_params.xy + g_params.zw * 0.5;
+    const float2 c = g_focus.z > 0.5 ? g_focus.xy : g_params.xy + g_params.zw * 0.5;
     const float step = g_params.w * 0.03;
     const float far_z = asfloat(g_con0.y);
     float z[9];
@@ -733,6 +743,8 @@ float DofFocus() {
 float4 PSMain(FullscreenOut i) : SV_Target {
     const int2 p = int2(i.pos.xy);
     if (!SsaoInView(p)) return float4(0.0, 0.0, 0.0, 0.0);
+    // Split screen: only this half, and no sample from the other (the line stays sharp).
+    if (!InSplitHalf(float2(p) + 0.5)) return float4(0.0, 0.0, 0.0, 0.0);
     const float focus = DofFocus();
     const float coc = DofCoc(SsaoViewZ(p), focus);
     if (coc < 0.5) return float4(0.0, 0.0, 0.0, 0.0);
@@ -751,7 +763,7 @@ float4 PSMain(FullscreenOut i) : SV_Target {
         // A sharper (nearer) sample only counts where its own blur reaches this
         // pixel, so in-focus silhouettes do not smear into the backdrop.
         const float cq = DofCoc(SsaoViewZ(int2(q)), focus);
-        const float w = saturate(1.0 + cq - r);
+        const float w = InSplitHalf(q) ? saturate(1.0 + cq - r) : 0.0;
         sum += colorTex.SampleLevel(LinearSampler, clamp(q * g_rt_metrics.xy, lo, hi), 0).rgb * w;
         weight += w;
     }
@@ -791,6 +803,8 @@ float4 PSMain(FullscreenOut i) : SV_Target {
         float(p.y) >= vp.y + vp.w) {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
+    // Split screen: only this half, and no tap from the other.
+    if (!InSplitHalf(float2(p) + 0.5)) return float4(0.0, 0.0, 0.0, 0.0);
     float2 v = velocityTex.Load(int3(p, 0)).rg * asfloat(g_con0.x);
     float len = length(v);
     if (!(len >= 0.75)) return float4(0.0, 0.0, 0.0, 0.0);
@@ -812,7 +826,7 @@ float4 PSMain(FullscreenOut i) : SV_Target {
         const float depth_q = depthTex.Load(int3(qi, 0)).r;
         const float speed_q = length(velocityTex.Load(int3(qi, 0)).rg * asfloat(g_con0.x));
         const bool occluder = depth_q > depth_here + 0.002 && speed_q < 0.5 * len;
-        if (occluder) continue;
+        if (occluder || !InSplitHalf(q)) continue;
         sum += colorTex.SampleLevel(LinearSampler, q * g_rt_metrics.xy, 0).rgb;
         weight += 1.0;
     }

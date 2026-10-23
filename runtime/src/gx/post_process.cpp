@@ -68,12 +68,12 @@ constexpr DXGI_FORMAT kEdgesFormat = DXGI_FORMAT_R8G8_UNORM;
 constexpr DXGI_FORMAT kStencilFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 // Slots 0-3: SMAA/AA/scaling targets. 4: final_. 5-9: bloom down levels.
 // 10-13: bloom up levels.
-// 14-15: ambient occlusion. 16: depth of field.
-constexpr unsigned kRtvSlots = 20u;
+// 14-15: ambient occlusion. 16: depth of field. 17-20: the two views' depth of field focus pairs.
+constexpr unsigned kRtvSlots = 22u;
 constexpr unsigned kSsaoAoSlot = 14u;
 constexpr unsigned kSsaoBlurSlot = 15u;
 constexpr unsigned kSceneTempSlot = 16u;
-constexpr unsigned kDofFocusSlot = 17u;  // and 18
+constexpr unsigned kDofFocusSlot = 17u;  // to 20: two per view
 // One float per scene: the depth of field's smoothed focus distance.
 constexpr DXGI_FORMAT kFocusFormat = DXGI_FORMAT_R32_FLOAT;
 // The scene's motion vectors (kMotionVectorFormat in renderer_d3d12.h).
@@ -499,9 +499,11 @@ void PostProcessor::shutdown() noexcept {
     dof_focus_pipeline_.Reset();
     dof_blur_pipeline_.Reset();
     dof_apply_pipeline_.Reset();
-    dof_focus_[0] = {};
-    dof_focus_[1] = {};
-    dof_focus_valid_ = false;
+    for (unsigned view = 0; view < 2u; ++view) {
+        dof_focus_[view][0] = {};
+        dof_focus_[view][1] = {};
+        dof_focus_valid_[view] = false;
+    }
     motion_blur_pipeline_.Reset();
     ssr_pipeline_.Reset();
     scene_temp_ = {};
@@ -1158,38 +1160,46 @@ bool PostProcessor::record_dof(ID3D12GraphicsCommandList* list, DescriptorRing& 
     c.con1[0] = bits(in.max_radius);
     c.con1[1] = bits(in.focus_start);
     c.con1[2] = bits(in.focus_full);
+    for (unsigned i = 0; i < 4u; ++i) c.split[i] = in.split[i];
+    if (in.has_focus_point) {
+        c.focus[0] = in.focus_point[0];
+        c.focus[1] = in.focus_point[1];
+        c.focus[2] = 1.0f;
+    }
     const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
                             static_cast<float>(in.height), 0.0f, 1.0f};
 
-    // The focus distance eases over scenes through two 1x1 targets. They start at
+    // The focus distance eases over scenes through two 1x1 targets per view. They start at
     // zero ("no previous focus"); a change of camera planes (a camera cut, a new
     // level) restarts the easing from the new candidate.
-    if (!ensure_target(dof_focus_[0], 1u, 1u, kFocusFormat, kDofFocusSlot, frame_index,
+    const unsigned view = std::min(in.view, 1u);
+    Target(&focus_pair)[2] = dof_focus_[view];
+    if (!ensure_target(focus_pair[0], 1u, 1u, kFocusFormat, kDofFocusSlot + 2u * view, frame_index,
                        frames_in_flight) ||
-        !ensure_target(dof_focus_[1], 1u, 1u, kFocusFormat, kDofFocusSlot + 1u, frame_index,
+        !ensure_target(focus_pair[1], 1u, 1u, kFocusFormat, kDofFocusSlot + 2u * view + 1u, frame_index,
                        frames_in_flight)) {
         return false;
     }
     list->SetGraphicsRootSignature(root_signature_.Get());
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    if (!dof_focus_valid_) {
+    if (!dof_focus_valid_[view]) {
         const float zero[4]{};
-        for (Target& focus : dof_focus_) {
+        for (Target& focus : focus_pair) {
             transition(list, focus, D3D12_RESOURCE_STATE_RENDER_TARGET);
             list->ClearRenderTargetView(focus.rtv, zero, 0, nullptr);
             transition(list, focus, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
-        dof_focus_valid_ = true;
+        dof_focus_valid_[view] = true;
     }
     const auto changed = [](float now, float before) {
         return before <= 0.0f || std::fabs(now - before) > 0.2f * before;
     };
-    const bool cut = changed(in.camera_near, dof_last_near_) || changed(in.camera_far, dof_last_far_);
-    dof_last_near_ = in.camera_near;
-    dof_last_far_ = in.camera_far;
-    Target& previous = dof_focus_[dof_focus_index_];
-    Target& current = dof_focus_[dof_focus_index_ ^ 1u];
-    dof_focus_index_ ^= 1u;
+    const bool cut = changed(in.camera_near, dof_last_near_[view]) || changed(in.camera_far, dof_last_far_[view]);
+    dof_last_near_[view] = in.camera_near;
+    dof_last_far_[view] = in.camera_far;
+    Target& previous = focus_pair[dof_focus_index_[view]];
+    Target& current = focus_pair[dof_focus_index_[view] ^ 1u];
+    dof_focus_index_[view] ^= 1u;
     Constants f = c;
     f.con1[0] = bits(1.05f);      // at most 5% per scene toward the candidate
     f.con1[1] = bits(0.15f);      // and 15% of the remaining distance (log space)
@@ -1261,6 +1271,7 @@ bool PostProcessor::record_motion_blur(ID3D12GraphicsCommandList* list, Descript
     for (unsigned i = 0; i < 4u; ++i) c.params[i] = in.viewport[i];
     c.con0[0] = bits(in.shutter);
     c.con0[1] = bits(in.max_length);
+    for (unsigned i = 0; i < 4u; ++i) c.split[i] = in.split[i];
     const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
                             static_cast<float>(in.height), 0.0f, 1.0f};
     record_scene_blend(list, srv_ring, motion_blur_pipeline_.Get(), in.color, in.color_rtv,

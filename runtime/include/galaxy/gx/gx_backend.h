@@ -652,6 +652,14 @@ private:
     // Render thread: split screen's line from the last SplitClip marker (logical EFB pixels; zero: none),
     // and the one in the last uploaded vertex-shader constants (split_clip_vs_words).
     std::array<float, 3> split_clip_{};
+    // Co-op split screen and the scene effects (split_effects.h): this scene's halves as their SplitClip markers
+    // and camera planes showed them, the half being drawn (1, 2; 0 outside them), and the separator, drawn once the
+    // scene's effects are done so they never blur it.
+    SplitScene split_scene_{};
+    unsigned split_draw_pass_ = 0u;
+    SplitEffectTracker split_tracker_{};
+    bool split_line_pending_ = false;
+    std::array<float, 4> split_line_{};
     std::array<std::uint32_t, 2> uploaded_split_clip_{};
     // Temporal upscaling for the current scene: perspective projections carry
     // this sub-pixel jitter (render pixels).

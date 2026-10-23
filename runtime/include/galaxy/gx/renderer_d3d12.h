@@ -33,6 +33,7 @@
 #include "galaxy/gx/placed_texture_allocator.h"
 #include "galaxy/gx/gx_bitfields.h"
 #include "galaxy/gx/render_config.h"
+#include "galaxy/gx/split_effects.h"
 #include "galaxy/gx/window_owner.h"
 #include "galaxy/gx_d3d12.h"
 
@@ -535,6 +536,13 @@ public:
     // began, or null when it is unknown; the previous scene's is kept for
     // camera motion blur.
     void set_scene_view(const float* view) noexcept;
+    // Co-op split screen, for this scene's effects (split_effects.h): each half's side and camera planes, whether
+    // the effects run per half, and whether this scene's motion vectors are a camera jump (no motion blur).
+    void set_scene_split(const SplitScene& scene, bool per_half, bool skip_motion) noexcept {
+        scene_split_ = scene;
+        scene_split_per_half_ = per_half;
+        scene_split_skip_motion_ = skip_motion;
+    }
     // At scene end: ambient occlusion and contact shadows from the EFB depth,
     // multiplied onto the EFB colour, then reflections, depth of field and
     // camera motion blur. True when it
@@ -900,6 +908,9 @@ private:
     bool scene_light_valid_ = false;
     float scene_view_[12]{};
     float scene_prev_view_[12]{};
+    SplitScene scene_split_{};
+    bool scene_split_per_half_ = false;
+    bool scene_split_skip_motion_ = false;
     bool scene_view_valid_ = false;
     bool scene_prev_view_valid_ = false;
     Microsoft::WRL::ComPtr<ID3D12Resource> motion_target_;

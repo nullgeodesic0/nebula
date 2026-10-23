@@ -7473,8 +7473,10 @@ bool RendererD3D12::record_scene_effects() {
     const bool reflections = post_process_.ssr_ready() && cfg.reflections != 0u;
     // Motion blur reads the scene's motion vectors (written by the draws of a
     // scene that began with them: scene_motion_valid_).
+    // A scene whose camera history just restarted (the split opened or closed, the cameras changed hands) has
+    // motion vectors from a camera jump: no motion blur for it.
     const bool motion = post_process_.motion_blur_ready() && cfg.motion_blur != 0u &&
-                        scene_motion_valid_ && motion_target_;
+                        scene_motion_valid_ && motion_target_ && !scene_split_skip_motion_;
     if (!occlusion && !reflections && !dof && !motion) {
         return false;
     }
@@ -7535,8 +7537,32 @@ bool RendererD3D12::record_scene_effects() {
         // Full strength blurs the backdrop by 2% of the viewport height.
         d.max_radius = in.viewport[3] * 0.02f *
                        static_cast<float>(std::min(cfg.depth_of_field, 100u)) / 100.0f;
-        recorded |= post_process_.record_dof(
-            command_list_.Get(), srv_ring_, d, frame_index_, kFramesInFlight);
+        if (scene_split_per_half_) {
+            // Co-op split screen: each half with its own camera planes, focus point and focus history, inside its
+            // side of the line.
+            for (unsigned h = 0; h < 2u; ++h) {
+                PostProcessor::DofInputs half = d;
+                const std::array<float, 3> plane = split_plane_render(scene_split_.plane[h], scale);
+                half.split[0] = plane[0];
+                half.split[1] = plane[1];
+                half.split[2] = plane[2];
+                half.split[3] = 1.0f;
+                const std::array<float, 2> focus = split_focus_point(plane, in.viewport);
+                half.focus_point[0] = focus[0];
+                half.focus_point[1] = focus[1];
+                half.has_focus_point = true;
+                half.view = h;
+                if (scene_split_.near_plane[h] > 0.0f && scene_split_.far_plane[h] > scene_split_.near_plane[h]) {
+                    half.camera_near = scene_split_.near_plane[h];
+                    half.camera_far = scene_split_.far_plane[h];
+                }
+                recorded |= post_process_.record_dof(
+                    command_list_.Get(), srv_ring_, half, frame_index_, kFramesInFlight);
+            }
+        } else {
+            recorded |= post_process_.record_dof(
+                command_list_.Get(), srv_ring_, d, frame_index_, kFramesInFlight);
+        }
     }
     if (motion) {
         PostProcessor::MotionBlurInputs m{};
@@ -7558,8 +7584,22 @@ bool RendererD3D12::record_scene_effects() {
         velocity_bar.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         velocity_bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         command_list_->ResourceBarrier(1, &velocity_bar);
-        recorded |= post_process_.record_motion_blur(
-            command_list_.Get(), srv_ring_, m, frame_index_, kFramesInFlight);
+        if (scene_split_per_half_) {
+            // Each half inside its own side of the line: no tap from the other half's picture.
+            for (unsigned h = 0; h < 2u; ++h) {
+                PostProcessor::MotionBlurInputs half = m;
+                const std::array<float, 3> plane = split_plane_render(scene_split_.plane[h], scale);
+                half.split[0] = plane[0];
+                half.split[1] = plane[1];
+                half.split[2] = plane[2];
+                half.split[3] = 1.0f;
+                recorded |= post_process_.record_motion_blur(
+                    command_list_.Get(), srv_ring_, half, frame_index_, kFramesInFlight);
+            }
+        } else {
+            recorded |= post_process_.record_motion_blur(
+                command_list_.Get(), srv_ring_, m, frame_index_, kFramesInFlight);
+        }
         std::swap(velocity_bar.Transition.StateBefore, velocity_bar.Transition.StateAfter);
         command_list_->ResourceBarrier(1, &velocity_bar);
     }
