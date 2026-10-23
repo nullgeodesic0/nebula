@@ -417,7 +417,8 @@ void JAudioHostMixer::render_channel(std::byte* record, std::uint32_t index,
             replacement_decided_[index] = true;
             // Channels starting one sound in the same subframe share a start stamp.
             replaced_[index] = voice_override_.claim(categories_[index].owner.sound_id,
-                                                     (stats_.subframes << 32u) | categories_[index].owner.sound_id);
+                                                     (stats_.subframes << 32u) | categories_[index].owner.sound_id,
+                                                     categories_[index].owner.luigi);
         }
         // A replaced line: the host's samples take the decoded ones' place, so the channel's filters, volume,
         // pan and effect sends place the replacement in the scene as they would the original.
