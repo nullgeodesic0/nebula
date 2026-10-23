@@ -569,6 +569,14 @@ struct State {
     std::uint32_t partner_archives_collector = 0u;
     std::vector<std::string> partner_archives;
     bool second_riding = false;  // the second player on a launch star: the first flies beside them
+    // Hot join (update_presence): whether the second player is in the game. Absent, he sits out as a player out of
+    // lives does (hidden, untouchable, carried beside the first), with no HUD, pointer or controller. Kept across
+    // stages; `present_known` once the boot's co-op setting or the save select has said how a game starts.
+    bool present = false;
+    bool present_known = false;
+    std::uint32_t join_buttons = 0u;   // his controller's buttons last frame
+    unsigned leave_frames = 0u;        // frames − has been held
+    bool join_seen_connected = false;  // his controller has been connected since he dropped in
     bool second_hidden_for_start = false;
     std::uint32_t star_traced = 0u;
     bool hud_tried = false;
@@ -760,6 +768,7 @@ void create_hud(const Guest& guest, State& s);
 void make_second_director(const Guest& guest, State& s);
 void on_stage_start(const Guest& guest, State& s);
 void tint_second_meter(const Guest& guest, const State& s);
+void sit_out(const Guest& guest, State& s);
 
 void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     SavedContext saved(guest.context());
@@ -839,6 +848,14 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     // moved or drawn.
     create_hud(guest, s);
     make_second_director(guest, s);
+    // Hot join: made in every stage, in the game or sitting out as he was (a game starts as the boot's co-op
+    // setting or the save select's Multiplayer switch says).
+    if (!s.present_known) {
+        s.present = coop_enabled();
+        s.present_known = true;
+    }
+    coop_set_second_present(s.present);
+    if (!s.present) sit_out(guest, s);
     trace("players: first %08X (%s), second %08X (%s)", first, s.own == coop::Character::Luigi ? "Luigi" : "Mario",
           second, s.own == coop::Character::Luigi ? "Mario" : "Luigi");
 }
@@ -2015,6 +2032,78 @@ void respawn_player(const Guest& guest, std::uint32_t actor_address, coop::Vec3 
     if (idle != 0u) guest.call(fn::kChangeAnimationNonStop, actor_address, idle);  // as the down was started
 }
 
+// ---- Drop in, drop out (docs/MULTIPLAYER.md "Drop in, drop out") ----
+// The second player is made in every stage. Absent, he sits out as a player out of lives does (down and out: hidden,
+// untouchable, carried beside the first, and everything that asks for the other brother passes him over), and his
+// HUD, pointer and controller are off. His controller's + drops him in beside the first; − held a second, or his
+// controller going away, drops him out.
+
+constexpr unsigned kLeaveHoldFrames = 60u;
+
+void hide_second_hud(const Guest& guest, const State& s) {
+    for (const std::uint32_t layout : {s.second_meter, s.second_left}) {
+        if (plausible(layout) && (guest.call(fn::kIsLayoutDead, layout) & 0xFFu) == 0u) guest.call(fn::kLayoutKill, layout);
+    }
+}
+
+// Out of the game: as a player out of lives (update_down_player carries him along), at once.
+void sit_out(const Guest& guest, State& s) {
+    s.down[1] = coop::DownState{true, true, coop::kDownHideFrames + 1u};
+    if (!plausible(s.second)) return;
+    SavedContext saved(guest.context());
+    guest.call(fn::kHideModel, s.second);
+    guest.set_u8(s.second + kMarioActorHidden, 1u);
+    guest.call(fn::kInvalidateHitSensors, s.second);
+    hide_second_hud(guest, s);
+    s.pointers.capture_second = false;
+    if (s.pipe.rider == s.second) s.pipe = {};  // a pipe he waited in takes the first through alone
+    s.split.reset();
+    s.follow.reset();
+    s.layout.reset();
+    trace("second player sits out (drop in with + on a second controller)");
+}
+
+// In the second player's turn, after his move: + on his controller while he is out drops him in beside the first;
+// − held, or his controller disconnected, drops him out. Not while the first is down, a miss plays or the level
+// starts (a press then waits for the next).
+void update_presence(const Guest& guest, State& s, coop::Vec3 first_position, coop::Vec3 first_side) {
+    // Online the second player is the other PC's, in for the whole session.
+    if (net_session_requested()) return;
+    const coop::PartnerInput input = coop_partner_input();
+    const std::uint32_t buttons = input.connected ? input.buttons : 0u;
+    const std::uint32_t pressed = buttons & ~s.join_buttons;
+    s.join_buttons = buttons;
+    namespace b = coop::button;
+    if (!s.present) {
+        if ((pressed & b::kPlus) == 0u || s.down[0].down || s.game_miss || s.level_start) return;
+        s.present = true;
+        s.join_seen_connected = true;
+        s.leave_frames = 0u;
+        s.down[1] = {};
+        coop_set_second_present(true);
+        respawn_player(guest, s.second, first_position + first_side * 120.0f);
+        // His HUD back (sit_out killed it): the meter and the lives counter shown again, as a stage starts them.
+        if (plausible(s.second_meter)) {
+            guest.call(fn::kMeterRequests[0], s.second_meter);  // MeterLayout::requestActive
+            guest.call(fn::kShowLayout, s.second_meter);
+        }
+        if (plausible(s.second_left)) guest.call(fn::kPlayerLeftCalls[1], s.second_left);  // PlayerLeft::forceAppear
+        tint_second_meter(guest, s);
+        trace("second player drops in");
+        return;
+    }
+    s.leave_frames = (buttons & b::kMinus) != 0u ? s.leave_frames + 1u : 0u;
+    if (input.connected) s.join_seen_connected = true;
+    const bool unplugged = !input.connected && s.join_seen_connected;
+    if (s.leave_frames < kLeaveHoldFrames && !unplugged) return;
+    s.present = false;
+    s.leave_frames = 0u;
+    s.join_seen_connected = false;
+    coop_set_second_present(false);
+    sit_out(guest, s);
+    trace("second player drops out (%s)", unplugged ? "controller gone" : "- held");
+}
+
 // Once a frame, in a player's own turn: the fallen player vanishes after their fall and comes back beside the
 // other in time; one out of lives is carried along hidden beside the other (the game camera follows the first).
 void update_down_player(const Guest& guest, State& s, unsigned who, coop::Vec3 partner_position,
@@ -2137,7 +2226,8 @@ void create_hud(const Guest& guest, State& s) {
 // game's are (the game kills its HUD for a miss or a cutscene with a virtual call no hook sees).
 void update_hud_count(const Guest& guest, State& s) {
     if (s.second_meter == 0u || !plausible(s.second)) return;
-    const auto mirror_alive = [&](std::uint32_t mine, std::uint32_t theirs, std::uint32_t revive) {
+    if (!s.present) return hide_second_hud(guest, s);  // sitting out (hot join)
+    const auto mirror_alive =[&](std::uint32_t mine, std::uint32_t theirs, std::uint32_t revive) {
         if (!plausible(mine) || !plausible(theirs)) return;
         const bool their_dead = (guest.call(fn::kIsLayoutDead, theirs) & 0xFFu) != 0u;
         const bool my_dead = (guest.call(fn::kIsLayoutDead, mine) & 0xFFu) != 0u;
@@ -2164,6 +2254,13 @@ void place_hud(const Guest& guest, const State& s) {
         Guest::Frame frame(guest);
         guest.call(fn::kLayoutSetTrans, mine, frame.vec(0, at));
     };
+    if (!s.present) {
+        // Sitting out (hot join): the first player's meter and counter where the game keeps them (its HUD layouts
+        // stand at the layout origin).
+        follow(s.first_meter, s.first_meter, 0.0f, 0.0f);
+        follow(s.first_left, s.first_left, 0.0f, 0.0f);
+        return;
+    }
     follow(s.second_meter, s.first_meter, coop::kSecondMeterOffset[0], coop::kSecondMeterOffset[1]);
     if (plausible(s.second_meter)) {
         follow(s.first_meter, s.first_meter, coop::kFirstMeterOffset[0], coop::kFirstMeterOffset[1]);
@@ -2286,7 +2383,10 @@ void move_second_player(const Guest& guest, State& s) {
         s.agent_teleport = false;
     }
     // The second player down: they vanish, come back beside the first, or (out of lives) go along hidden.
-    if (plausible(first_mario)) update_down_player(guest, s, 1u, first_now, guest.vec(first_mario + kMarioSideVec));
+    if (plausible(first_mario)) {
+        update_presence(guest, s, first_now, guest.vec(first_mario + kMarioSideVec));
+        update_down_player(guest, s, 1u, first_now, guest.vec(first_mario + kMarioSideVec));
+    }
     // While the first player flies in at a level start, the second waits unseen and untouchable, out of the
     // camera's picture; they appear beside the first as they land.
     // Riding along on the first player's vehicle, the same.
@@ -2628,7 +2728,8 @@ void keep_second_player_shadow(const Guest& guest, State& s) {
 
 void fill_partner_kpad(const Guest& guest, State& s) {
     if (!plausible(s.kpad_buffer)) return;
-    const coop::KpadStatusBytes bytes = s.kpad.next(coop_partner_input());
+    // Sitting out (hot join): a still Remote, and not a connected one (below), so no pointer of his shows.
+    const coop::KpadStatusBytes bytes = s.kpad.next(s.present ? coop_partner_input() : coop::PartnerInput{});
     for (std::size_t at = 0; at < bytes.size(); at += 4u) {
         guest.set_u32(s.kpad_buffer + static_cast<std::uint32_t>(at),
                       (static_cast<std::uint32_t>(bytes[at]) << 24u) | (static_cast<std::uint32_t>(bytes[at + 1u]) << 16u) |
@@ -2640,7 +2741,7 @@ void fill_partner_kpad(const Guest& guest, State& s) {
     const std::uint32_t holder = guest.call(fn::kGetWPadHolder);
     for (std::uint32_t at = 0u; plausible(holder) && at < 8u; at += 4u) {
         const std::uint32_t pad = guest.u32(holder + at);
-        if (plausible(pad)) guest.set_u8(pad + 0x35u, 1u);
+        if (plausible(pad)) guest.set_u8(pad + 0x35u, at == 0u || s.present ? 1u : 0u);
     }
     guest.context()->gpr[3] = 1u;  // one status read (after the call above, which returns in r3)
 }
@@ -2696,6 +2797,13 @@ void file_select_frame(const Guest& guest, std::uint32_t samples) {
     if (!shown) return;
     RuntimeSettings settings = get_runtime_settings();
     if (!coop_enabled() != !settings.coop) set_coop_session(settings.coop);
+    // Hot join: the Multiplayer switch says whether the save starts with the second player in the game.
+    if (coop_hot_join()) {
+        State& s = state();
+        s.present = settings.coop;
+        s.present_known = true;
+        coop_set_second_present(s.present);
+    }
     if (samples == 0u || samples > 0x10u) return;
     const std::uint32_t hold = guest.u32(s_menu.kpad_buffer);  // KPADStatus::hold, the newest sample
     const std::uint32_t pressed = hold & ~s_menu.hold;
@@ -2735,7 +2843,7 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         rejoin_frame(context, memory, services, guest_pc);
         s_menu.kpad_buffer = context->gpr[4];
     }
-    if (services == nullptr || services->call_guest == nullptr || !coop_enabled()) return;
+    if (services == nullptr || services->call_guest == nullptr || !coop_available()) return;
     State& s = state();
     (void)memory;
     (void)guest_pc;
@@ -2996,7 +3104,7 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
         file_select_frame(Guest(context, memory, services, guest_pc), context->gpr[3]);
         s_menu.kpad_buffer = 0u;
     }
-    if (services == nullptr || services->call_guest == nullptr || !coop_enabled()) return;
+    if (services == nullptr || services->call_guest == nullptr || !coop_available()) return;
     State& s = state();
     const Guest guest(context, memory, services, guest_pc);
     if (id >= call::kMeterRequestFirst && id <= call::kPlayerLeftLast) {
@@ -3004,7 +3112,7 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
         const bool meter = id <= call::kMeterRequestLast;
         const std::uint32_t theirs = meter ? s.first_meter : s.first_left;
         const std::uint32_t mine = meter ? s.second_meter : s.second_left;
-        if (theirs != 0u && mine != 0u && s.hud_call_this == theirs) {
+        if (theirs != 0u && mine != 0u && s.hud_call_this == theirs && s.present) {
             SavedContext saved(context);
             guest.call(meter ? fn::kMeterRequests[id - call::kMeterRequestFirst] : fn::kPlayerLeftCalls[id - call::kPlayerLeftFirst],
                        mine);

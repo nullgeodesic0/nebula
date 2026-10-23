@@ -26,17 +26,43 @@ start-up. On the save-select screen, a panel in the bottom-right corner switches
 | Wii 1 (Xbox X, DualSense square, keyboard 1) | Multiplayer on or off, for the save about to be chosen |
 | Wii + (Menu / Options, keyboard + or P), pressed alone | Odyssey moves on or off (both players) |
 
-Both are written to `runtime_settings.ini` at once. Co-op follows the switch while that screen is up and stays as
-chosen once a save loads; − and + together still open the settings. The panel shows the buttons of the
-controller in use. `moveset_second_player=off` keeps the Odyssey moves for Mario only.
+Both are written to `runtime_settings.ini` at once. The Multiplayer switch says whether a save starts with both
+players; either way a second player can drop in and out at any time (below). − and + together still open the
+settings. The panel shows the buttons of the controller in use. `moveset_second_player=off` keeps the Odyssey
+moves for Mario only.
+
+## Drop in, drop out
+
+As in the LEGO games, a second player can join and leave at any time, with no restart and no stage reload. The
+second brother is made in every stage whatever the setting; while nobody plays him he sits out as a player out
+of lives does (down and out: hidden, untouchable, carried beside the first, `sit_out`), and the camera, split
+screen, talks, pipes, Pull Stars, star bunnies, items and the miss all pass him over. His HUD is hidden (the
+first player's meter and lives counter stand where the game keeps them), his Remote reads still and
+disconnected, so no second pointer shows.
+
+- Drop in: + on a second controller (one that is not the first player's: not the one driving him). He appears
+  beside the first player with full health, his HUD comes back, and split screen, lives and the rest start from
+  there. That controller is his until he leaves. (Not while the first player is down, a miss plays or a level
+  starts: press again after.)
+- Drop out: − held for a second on his controller, or his controller disconnecting. He sits out again, and the
+  controllers all drive the first player, as in one-player play.
+- In or out is kept across stage changes; loading a save from the save select starts as its Multiplayer switch
+  says. Online the second player is the other PC's for the whole session.
+
+While he sits out every controller drives the first player; only the + of a controller other than the one in
+use is taken for the drop-in (`native_host.cpp`), so a lone player's own controller still pauses. Done in
+`update_presence` (coop_guest.cpp, in his turn), from his controller's input, so the agent's second controller
+drops in the same way (`press 2 PLUS 6`; `launch --solo` starts a game with him out). `GALAXY_COOP_HOT_JOIN=0`
+turns it off: co-op only with the setting, as before.
 
 ## Controllers
 
 The first player plays whichever character the save file plays; the second player is the other one.
 
-- Two or more controllers: the first connected controller is the first player's, the second is the
-  second player's. Keyboard and mouse stay the first player's.
-- One controller: the keyboard and mouse are the first player's, the controller is the second player's.
+- A second player who dropped in has the controller he dropped in with.
+- A save started with both players: with two or more controllers, the first connected controller is the first
+  player's, the second is the second player's; with one controller, the keyboard and mouse are the first
+  player's and the controller is the second player's. Keyboard and mouse stay the first player's.
 
 The second player uses their controller's own bindings (F1 > Controls); the spin is the shake binding or a
 real shake. They have the game's second Star Pointer ("P2"). A gyro controller (DualSense, Switch) aims it

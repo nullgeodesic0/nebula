@@ -54,6 +54,11 @@ void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeService
 void rejoin_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc);
 [[nodiscard]] bool netplay_rejoin_press_a() noexcept;
 
+// Local hot join (docs/MULTIPLAYER.md "Drop in, drop out"): whether the second player is in the game, set by
+// coop_guest.cpp, read by the input thread to give him a controller of his own (native_host.cpp).
+void coop_set_second_present(bool present) noexcept;
+[[nodiscard]] bool coop_second_present() noexcept;
+
 // The second player's controller, published by the input thread and read once a game frame.
 void coop_publish_partner_input(const coop::PartnerInput& input) noexcept;
 [[nodiscard]] coop::PartnerInput coop_partner_input();
