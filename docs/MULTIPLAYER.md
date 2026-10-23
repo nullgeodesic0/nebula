@@ -133,10 +133,14 @@ theirs (their controller's camera buttons). `GALAXY_COOP_GAME_CAMERA=0` falls ba
 units behind and 380 above along their gravity, steered with the pointer stick or the D-pad, short of walls.
 Event cameras (warps, launch stars, cutscenes) remain the game camera's, handed over as below.
 
-A camera event the second player sets off (a warp, launch star or pipe) plays in their half with the game's
-own camera (easing in from the second player's), and the first player's half keeps its view from before,
-moving with them; after it, the first player's half holds that view until the game camera is back with them,
-then eases into it.
+Only the brother in an event gets its camera; the other keeps his own the whole time. One brother's own event (a
+launch star he rides, a warp, a pipe) splits the screen even when they stand together (`solo_event`). A camera
+event the second player sets off plays in their half with the game's own camera (easing in from the second
+player's), and the first player's half follows him with a camera of his own: a third CameraDirector, made with
+the second's and run the same way with him as its target (`director3`); after it, his half keeps that camera
+until the game camera is back with him (within 2500 units and settled), then eases into it. A launch star the
+first player rides plays in his half with the game camera at once, even when it starts out near the second
+player (`first_event`), and the second player's half keeps his own camera.
 Each half's EFB copies (the bloom, blur and final scene captures) are its own, so neither half's effects
 show the other's picture. While split, the second player's stick is relative to their own camera, things only the second player can
 see are not clipped (they move and are drawn), their side keeps its shadows (`ShadowController`'s far clip is
@@ -162,6 +166,12 @@ Lives work as in New Super Mario Bros. Wii, without the bubble:
   vanishes after their fall and comes back beside the other about two seconds later, with full health, standing
   (MarioActor::_B90, which keeps the down pose, is cleared). The game's own miss (the "Too Bad!", the restart
   from the checkpoint) does not happen.
+- A black hole is a fall like any other: one life, and back beside the other. The black hole's cameras (its
+  actor camera and the global "ブラックホール" event) never take the camera from the one still playing, and end
+  when the fallen player is back, so the camera follows him again; the HUD the fall puts away stays up, and the
+  fall's shrink and effect are undone. A fall's later steps (exeGameOverBlackHole2) do not count it again.
+- A 1-Up (a mushroom, or a stomp chain's) the second player collects is his (`MR::incPlayerLeft` hook 89: a
+  1-Up item nearer him, or his own trample jump).
 - With no lives left a player sits out, carried along hidden beside the other, until the stage reloads.
 - Both down at once is the game's own miss, and each spends a life; game over only when both are out of lives.
 - A coin heals both players.
@@ -270,6 +280,16 @@ These come from a game written for one player and are what the playtest should l
   player's, so both can take every power-up. Both cannot be Boos at once (the second's Boo parts share the
   first's Boo draw buffer): whoever becomes a Boo second keeps their form.
 - The players push each other aside; neither stomps the other (a landing on the partner bounced forever).
+- After a black hole's fall a brother comes back standing twisted (his up vector still the hole's) until he
+  first moves; the game updates it only on the move.
+- Voices: the brother who is not the save's character speaks with its voice. Each line is one sound whose Luigi
+  take AudSystem::switchToLuigi picks by AudSceneMgr's player mode (+0x14) from the player voice wave set
+  (bank 0x22: set mask 2 Mario, 4 Luigi) that AudSceneMgr::loadPlayerResource loads for the save's character
+  only. Both sets do not fit the 14 MiB ARAM heap (the second takes about 630 KB, and the stage's own sound loads
+  then never finish), so each brother's own voice waits for a larger emulated ARAM (branch `coop-voice-wip`: the
+  mode swapped with gIsLuigi in each player's turn, and the partner's set loaded after loadPlayerResource). The
+  custom voice (`content\mods\voice`) replaces Mario's take only: a line in Luigi's take (its output track's
+  port 12 holds 0x14) keeps the game's voice unless voices.txt gives `luigi` clips for it.
 - Split screen: mirror reflections follow the first player's camera only; the second player's camera has no
   camera areas (the game's fixed and rail cameras are the first player's); an event the second player starts
   through an object (not their own move) plays in the first player's half; the temporal upscaler and motion blur assume one camera a
