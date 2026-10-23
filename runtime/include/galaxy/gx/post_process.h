@@ -197,6 +197,12 @@ public:
         float max_radius = 8.0f;                    // blur radius in pixels at full blur
         float focus_start = 3.0f;                   // blur starts at this multiple of the focus distance
         float focus_full = 4.0f;                    // and is full at this multiple of the start
+        // Co-op split screen: the half this pass covers (render pixels, kept where a*x + b*y + c >= 0; split[3]
+        // = 1 when on), the point its focus is taken at, and which half's focus history it eases (0 or 1).
+        float split[4]{};
+        float focus_point[2]{};
+        bool has_focus_point = false;
+        unsigned view = 0;
     };
     // True when the passes were recorded; the colour is back in RENDER_TARGET.
     bool record_dof(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
@@ -217,6 +223,7 @@ public:
         float viewport[4]{};                        // scene viewport x, y, w, h
         float shutter = 0.5f;                       // fraction of the frame's motion smeared
         float max_length = 32.0f;                   // pixels
+        float split[4]{};                           // the split-screen half, as DofInputs::split
     };
     bool record_motion_blur(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
                             const MotionBlurInputs& inputs, std::uint64_t frame_index,
@@ -252,8 +259,10 @@ private:
         std::uint32_t con3[4];
         float params[4];
         std::int32_t origin[4];
+        float split[4];   // the split-screen half a scene effect stays inside (w = 1 when on)
+        float focus[4];   // depth of field: xy the focus point in render pixels, z = 1 to use it
     };
-    static_assert(sizeof(Constants) == 28u * 4u);
+    static_assert(sizeof(Constants) == 36u * 4u);
 
     bool create_pipeline(D3D12_SHADER_BYTECODE vs, D3D12_SHADER_BYTECODE ps,
                          DXGI_FORMAT format, int stencil,
@@ -313,12 +322,13 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_blur_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> dof_apply_pipeline_;
     // Depth of field focus: two 1x1 R32F targets that alternate as the previous
-    // and current focus distance, so the focus eases over scenes.
-    Target dof_focus_[2];
-    unsigned dof_focus_index_ = 0;
-    bool dof_focus_valid_ = false;
-    float dof_last_near_ = 0.0f;
-    float dof_last_far_ = 0.0f;
+    // and current focus distance, so the focus eases over scenes. One pair per
+    // view: the whole screen (or split screen's first half) and the second half.
+    Target dof_focus_[2][2];
+    unsigned dof_focus_index_[2]{};
+    bool dof_focus_valid_[2]{};
+    float dof_last_near_[2]{};
+    float dof_last_far_[2]{};
     Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_blur_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> ssr_pipeline_;
     // The colour pass shared by depth of field and motion blur: `pipeline`

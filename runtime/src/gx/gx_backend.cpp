@@ -6603,6 +6603,12 @@ void GxBackend::capture_scene_camera() {
     const float fov_y = c != 0.0f ? 2.0f * std::atan(1.0f / std::fabs(c)) : 1.0f;
     if (std::isfinite(near_plane) && std::isfinite(far_plane) &&
         near_plane > 0.0f && far_plane > near_plane) {
+        if (split_draw_pass_ == 1u || split_draw_pass_ == 2u) {
+            split_scene_.near_plane[split_draw_pass_ - 1u] = near_plane;
+            split_scene_.far_plane[split_draw_pass_ - 1u] = far_plane;
+        }
+        // The second half's planes are its own (split_scene_); the scene's are the first view's.
+        if (split_draw_pass_ == 2u) return;
         renderer_.set_scene_camera(near_plane, far_plane, fov_y);
         // XF viewport: wd, ht, zRange, xOrig, yOrig, farZ; centre = orig - 342.
         const float wd = std::fabs(xf_float(xf::kViewportBase));
@@ -6640,6 +6646,8 @@ void GxBackend::write_scene_vs_constants(const GxVsConstants& cpu, GxVsConstants
         (static_cast<std::uint64_t>(state_.cp(cp::kArrayBaseBase)) << 32u) ^
             (static_cast<std::uint64_t>(state_.cp(cp::kVcdLo)) << 16u) ^
             state_.cp(cp::kVcdHi));
+    // Split screen draws each object once per half, through each half's camera: a half's draws only match its own.
+    if (split_draw_pass_ != 0u) record.signature = combine64(record.signature, 0x5A17u + split_draw_pass_);
     record.palette = (vs_key_.flags & 0x01u) != 0u;
     if (record.palette) {
         // PNMTX0 (XF rows 0-2) stands for the per-vertex palette's object.
@@ -6677,8 +6685,10 @@ void GxBackend::write_scene_vs_constants(const GxVsConstants& cpu, GxVsConstants
         return;
     }
 
-    // Previous transform: the matched record, else the camera delta.
-    const Affine34& camera = transform_history_.camera_delta();
+    // Previous transform: the matched record, else the camera delta. The scene's camera delta is the first view's;
+    // the second split-screen half's unmatched draws get none (no motion) rather than the other camera's.
+    static const Affine34 kIdentity{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    const Affine34& camera = split_draw_pass_ == 2u ? kIdentity : transform_history_.camera_delta();
     std::uint32_t mode = 1u;
     std::uint32_t previous_palette = 0u;
     Affine34 prev_pos = camera;
@@ -6745,11 +6755,28 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
         if (view != nullptr) {
             for (unsigned i = 0; i < 3u; ++i) split_clip_[i] = (*view)[i];
             pass = static_cast<unsigned>((*view)[3]);
-            // After the second half: the black separator between the halves, faded in with the split.
-            if (pass == 0u && (*view)[7] > 0.0f) {
-                renderer_.draw_split_line({(*view)[4], (*view)[5], (*view)[6]}, kSplitLineHalfWidth, (*view)[7]);
+            if (pass == 1u || pass == 2u) {
+                // A half begins: its side and, at its first draw, its camera planes (capture_scene_camera).
+                split_scene_.halves[pass - 1u] = true;
+                split_scene_.plane[pass - 1u] = split_clip_;
+                scene_camera_captured_ = false;
+            }
+            // After the second half: the black separator between the halves, faded in with the split. Inside a
+            // scene it waits for the scene's effects (SceneEnd), so they never blur across it.
+            if (pass == 0u) {
+                split_scene_.opacity = (*view)[7];
+                if ((*view)[7] > 0.0f) {
+                    split_line_ = {(*view)[4], (*view)[5], (*view)[6], (*view)[7]};
+                    if (scene_phase_) {
+                        split_line_pending_ = true;
+                    } else {
+                        renderer_.draw_split_line({(*view)[4], (*view)[5], (*view)[6]}, kSplitLineHalfWidth,
+                                                  (*view)[7]);
+                    }
+                }
             }
         }
+        split_draw_pass_ = pass;
 
         // The second half's EFB copies are its own; the game's addresses point at each half's copies while it
         // draws, and back at the first half's after.
@@ -6858,7 +6885,33 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
     // scene that begins before a display copy restores the render EFB.
     bool switched = false;
     if (marker == FifoMarker::SceneEnd) {
+        // Co-op split screen: per-half effects once the split is open; a camera jump restarts the motion history
+        // and this scene's motion blur is skipped (its vectors are the jump).
+        const SplitEffectPlan plan = split_tracker_.next(split_scene_);
+        static const bool trace_split = read_env_u64("GALAXY_SPLIT_EFFECTS_TRACE", 0u) != 0u;
+        static std::uint64_t s_split_scenes = 0u;
+        if (trace_split && s_split_scenes++ % 120u == 0u) {
+            std::cerr << "[split-effects] halves=" << split_scene_.halves[0] << split_scene_.halves[1]
+                      << " opacity=" << split_scene_.opacity << " plane1=" << split_scene_.plane[0][0] << ','
+                      << split_scene_.plane[0][1] << ',' << split_scene_.plane[0][2]
+                      << " planes(near/far)=" << split_scene_.near_plane[0] << '/' << split_scene_.far_plane[0]
+                      << ' ' << split_scene_.near_plane[1] << '/' << split_scene_.far_plane[1]
+                      << " per-half=" << plan.per_half << " reset=" << plan.reset_history << '\n';
+        }
+        renderer_.set_scene_split(split_scene_, plan.per_half, plan.reset_history);
+        if (plan.reset_history) transform_history_.reset();
+        // The next scene's halves: the first half's marker comes before its SceneBegin, so they are gathered from
+        // one SceneEnd to the next. The separator's opacity comes after SceneEnd and stays until the next one.
+        split_scene_.halves[0] = split_scene_.halves[1] = false;
+        split_scene_.near_plane[0] = split_scene_.near_plane[1] = 0.0f;
+        split_scene_.far_plane[0] = split_scene_.far_plane[1] = 0.0f;
         if (renderer_.record_scene_effects()) {
+            frame_bindings_dirty_ = true;
+        }
+        if (split_line_pending_) {
+            split_line_pending_ = false;
+            renderer_.draw_split_line({split_line_[0], split_line_[1], split_line_[2]}, kSplitLineHalfWidth,
+                                      split_line_[3]);
             frame_bindings_dirty_ = true;
         }
         switched = renderer_.begin_output_efb();
