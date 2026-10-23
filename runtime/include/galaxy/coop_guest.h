@@ -71,6 +71,10 @@ void coop_set_partner_input_source(CoopPartnerInputSource source) noexcept;
 // input thread. The game's own Remote reads see a neutral Remote in deterministic mode, so netplay.cpp builds this
 // PC's player's KPAD status from this instead.
 void coop_publish_local_input(const coop::PartnerInput& input) noexcept;
+// Online play's own menu (net_lobby.h gx::online_menu_poll), reached from the input thread through this hook.
+using CoopOnlineMenuPoll = bool (*)(bool toggle, bool up, bool down, bool choose, bool back) noexcept;
+void coop_set_online_menu_poll(CoopOnlineMenuPoll poll) noexcept;
+[[nodiscard]] bool coop_online_menu_poll(bool toggle, bool up, bool down, bool choose, bool back) noexcept;
 [[nodiscard]] coop::PartnerInput coop_local_input();
 
 }  // namespace galaxy

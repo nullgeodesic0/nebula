@@ -24,7 +24,19 @@ struct NetInput {
     std::array<std::uint8_t, kNetStatusSize> status{};  // big-endian, as the guest has it
     std::uint32_t peek_count = 0u;                    // host only: its peek answers from an earlier frame
     std::array<std::uint32_t, kNetMaxPeeks> peeks{};
+    std::uint32_t command = 0u;                       // NetCommand: both PCs carry it out at this frame
 };
+
+// Session-wide actions from a player's online menu (net_lobby.cpp), carried by their input so both PCs act on
+// the same frame (agent_guest.cpp netplay_apply_command).
+enum class NetCommand : std::uint32_t { None = 0, ExitGalaxy = 1 };
+
+// The next local input carries `command` (net_local_input).
+void net_request_command(NetCommand command) noexcept;
+// Ends the session on both PCs: tells the peer, then this game restarts on its own (net_lobby.cpp).
+[[noreturn]] void net_leave();
+// The peer said it left (or has not been heard from for a while): this game should restart on its own.
+[[nodiscard]] bool net_peer_left() noexcept;
 
 // Whether a session was requested (environment read once).
 [[nodiscard]] bool net_session_requested() noexcept;

@@ -1,5 +1,7 @@
 #include "galaxy/net_lobby.h"
 
+#include "galaxy/coop_guest.h"
+#include "galaxy/netplay.h"
 #include "galaxy/netplay_session.h"
 #include "galaxy/runtime_settings.h"
 
@@ -171,7 +173,7 @@ bool receive_message(SOCKET s, sockaddr_in& from, Header& header, std::string& t
     return true;
 }
 
-// Restarts this game into a session: the same program and command line, with the session's variables, once
+// Restarts this game, into a session or (no variables) out of one: the same program and command line, with the session's variables, once
 // this process has gone (GALAXY_NET_WAIT_PID: its instance lease and port must be free first).
 [[noreturn]] void restart_into_session(const std::vector<std::pair<std::wstring, std::wstring>>& variables) {
     for (const auto& [name, value] : variables) SetEnvironmentVariableW(name.c_str(), value.c_str());
@@ -183,7 +185,7 @@ bool receive_message(SOCKET s, sockaddr_in& from, Header& header, std::string& t
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
-    std::fprintf(stderr, "[lobby] restarting into the session\n");
+    std::fprintf(stderr, variables.empty() ? "[lobby] restarting on its own\n" : "[lobby] restarting into the session\n");
     std::fflush(stderr);
     if (CreateProcessW(exe, command_line.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &process)) {
         CloseHandle(process.hThread);
@@ -194,6 +196,12 @@ bool receive_message(SOCKET s, sockaddr_in& from, Header& header, std::string& t
     }
     TerminateProcess(GetCurrentProcess(), 0);
     for (;;) Sleep(1000);
+}
+
+// The online menu's rows (renderer_d3d12.cpp draws them): 0 resume, 1 exit the galaxy, 2 leave the session.
+void menu_action(int row) {
+    if (row == 1) net_request_command(NetCommand::ExitGalaxy);
+    if (row == 2) net_leave();
 }
 
 std::wstring widen(const std::string& text) {
@@ -325,6 +333,22 @@ void run() {
     // GALAXY_NET_AUTOACCEPT=1 accepts the first PC that asks.
     const std::string auto_join = env("GALAXY_NET_AUTOJOIN");
     const bool auto_accept = env("GALAXY_NET_AUTOACCEPT") == "1";
+    // GALAXY_NET_TEST_MENU=<frame>:<row>[,<frame>:<row>...]: the online menu's row chosen at those frames.
+    std::vector<std::pair<std::uint32_t, int>> test_menu;
+    for (const std::string text = env("GALAXY_NET_TEST_MENU"); const std::string& item : [&] {
+             std::vector<std::string> items;
+             for (std::size_t at = 0; at < text.size();) {
+                 const std::size_t end = std::min(text.find(',', at), text.size());
+                 items.push_back(text.substr(at, end - at));
+                 at = end + 1u;
+             }
+             return items;
+         }()) {
+        if (const auto colon = item.find(':'); colon != std::string::npos) {
+            test_menu.emplace_back(static_cast<std::uint32_t>(std::strtoul(item.c_str(), nullptr, 10)),
+                                   std::atoi(item.c_str() + colon + 1u));
+        }
+    }
     const auto started = Clock::now();
     bool auto_joined = false;
     for (;;) {
@@ -336,6 +360,16 @@ void run() {
             std::unique_lock lock(l.mutex);
             if (auto_accept && l.asked) l.accept = true;
             if (!l.in_session) step(l, lock);
+        }
+        while (l.in_session && !test_menu.empty() && netplay_frame() >= test_menu.front().first) {
+            const int row = test_menu.front().second;
+            test_menu.erase(test_menu.begin());
+            std::fprintf(stderr, "[lobby] test: online menu row %d at frame %u\n", row, netplay_frame());
+            menu_action(row);
+        }
+        if (l.in_session && net_peer_left()) {
+            Sleep(1500);  // the line in the log, and the Bye repeats, before this game goes
+            net_restart_alone();
         }
         Sleep(20);
     }
@@ -481,8 +515,28 @@ void net_lobby_start() {
     }
     WSADATA wsa{};
     (void)WSAStartup(MAKEWORD(2, 2), &wsa);
-    gx::set_net_lobby_hooks({&view, &join, &answer, &cancel});
+    gx::set_net_lobby_hooks({&view, &join, &answer, &cancel, &menu_action});
+    coop_set_online_menu_poll(&gx::online_menu_poll);
     std::thread(run).detach();
+}
+
+void net_restart_alone() {
+    // Out of the session: this PC's own saves and settings again (netplay_session.cpp kept them for a joiner).
+    wchar_t value[MAX_PATH]{};
+    const auto restore = [&](const wchar_t* from, const wchar_t* to) {
+        const DWORD length = GetEnvironmentVariableW(from, value, MAX_PATH);
+        SetEnvironmentVariableW(to, length != 0u && length < MAX_PATH ? value : nullptr);
+    };
+    if (GetEnvironmentVariableW(L"GALAXY_NET_HOME_SET", value, MAX_PATH) != 0u) {
+        restore(L"GALAXY_NET_HOME_NAND_ROOT", L"GALAXY_NAND_ROOT");
+        restore(L"GALAXY_NET_HOME_SETTINGS", L"GALAXY_RUNTIME_SETTINGS_PATH");
+        SetEnvironmentVariableW(L"GALAXY_NET_HOME_SET", nullptr);
+    }
+    for (const wchar_t* name : {L"GALAXY_NET_HOST", L"GALAXY_NET_JOIN", L"GALAXY_NET_REJOIN", L"GALAXY_NET_AUTOJOIN",
+                                L"GALAXY_NET_AUTOACCEPT"}) {
+        SetEnvironmentVariableW(name, nullptr);
+    }
+    restart_into_session({});
 }
 
 bool net_location_wanted() noexcept {
