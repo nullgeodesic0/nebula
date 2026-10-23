@@ -21,6 +21,12 @@ void netplay_kpad_after(PpcContext* context, GuestMemoryV1* memory, const Native
 // since probe runs end with TerminateProcess), for diffing two replays' event order.
 [[nodiscard]] bool netplay_tracing() noexcept;
 
+// An EFB peek's answer as a netplay input (deterministic mode). The game reads EFB depth every gameplay frame
+// (the Star Pointer's GXPeekZ): an exact read would wait for the GPU, and its value depends on the GPU and the
+// resolution, so two machines would disagree. The local answer (the render thread's latest published field) is
+// recorded with the frame's input and a replay uses the recorded one, which is what a peer will send.
+[[nodiscard]] std::uint32_t netplay_efb_peek(bool depth, std::uint32_t local_value) noexcept;
+
 // Rollback snapshots, provided by the runtime. save(user) captures the whole machine and returns false, or true
 // when a later restore(user) brought the machine back to it (execution continues from the save). restore(user)
 // does not return. GALAXY_SNAPSHOT_TEST="<save frame>,<restore frame>" saves when that frame starts and rolls back
@@ -29,6 +35,8 @@ struct NetplaySnapshotHooks {
     void* user = nullptr;
     bool (*save)(void* user) = nullptr;
     void (*restore)(void* user) = nullptr;
+    // Re-simulation on/off: frames are simulated but not rendered (GALAXY_SNAPSHOT_RENDER_RESIM=1 renders them).
+    void (*resimulating)(void* user, bool on) = nullptr;
 };
 void netplay_set_snapshot_hooks(const NetplaySnapshotHooks& hooks) noexcept;
 // With GALAXY_DETERMINISTIC_TRACE: a line per frame of host-side state digests (written by `trace(user)` with

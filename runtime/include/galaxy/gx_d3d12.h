@@ -177,6 +177,8 @@ struct GxRollbackState;
 [[nodiscard]] std::shared_ptr<GxRollbackState> make_rollback_state();
 void save_rollback_state(GxRollbackState& out);
 void restore_rollback_state(const GxRollbackState& in);
+// Rollback re-simulation: frames are not rendered (GxBackend::set_render_suppressed).
+void set_render_suppressed(bool suppressed);
 
 void install_guest_dirty_tracker(GuestMemoryV1* memory) noexcept;
 

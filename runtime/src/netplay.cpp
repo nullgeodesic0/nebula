@@ -52,6 +52,7 @@ struct Netplay {
     bool hash_chunks = false;
     std::map<std::pair<std::uint32_t, std::uint32_t>, Sample> replay;  // (frame, channel)
     std::uint32_t frame = 0u;    // game frames so far (channel 0 reads at kFrameReadSite)
+    std::uint32_t peek_sequence = 0u;  // EFB peeks so far this frame (netplay_efb_peek)
     std::uint32_t channel = 0xFFFFFFFFu;
     std::uint32_t buffer = 0u;
     std::uint32_t dump_frame = 0xFFFFFFFFu;
@@ -65,6 +66,8 @@ struct Netplay {
     std::uint32_t snapshot_restore_frame = 0xFFFFFFFFu;
     bool snapshot_saved = false;
     bool snapshot_restored = false;
+    bool resimulating = false;           // between the rollback and the frame it was rolled back from
+    std::uint64_t resim_start_qpc = 0u;
 };
 
 Netplay& netplay() {
@@ -190,6 +193,7 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
     n.channel = context->gpr[3];
     n.buffer = context->gpr[4];
     if (n.channel == 0u) {
+        n.peek_sequence = 0u;
         // A frame starts: its state before this frame's input.
         if (n.hashes != nullptr && n.frame >= n.hash_from && n.frame % n.hash_every == 0u) write_hash(n, memory);
         if (n.dump_frame == n.frame && !n.dump_path.empty()) write_dump(n, memory);
@@ -207,6 +211,18 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
             }
             n.rate_start_qpc = ticks;
         }
+        if (n.resimulating && n.frame == n.snapshot_restore_frame) {
+            n.resimulating = false;
+            if (n.snapshot_hooks.resimulating != nullptr) n.snapshot_hooks.resimulating(n.snapshot_hooks.user, false);
+            LARGE_INTEGER now{}, frequency{};
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&frequency);
+            const double ms = 1000.0 * static_cast<double>(static_cast<std::uint64_t>(now.QuadPart) - n.resim_start_qpc) /
+                              static_cast<double>(frequency.QuadPart);
+            const std::uint32_t frames = n.snapshot_restore_frame - n.snapshot_save_frame;
+            std::fprintf(stderr, "[netplay] re-simulated %u frames in %.1f ms (%.2f ms a frame)\n", frames, ms,
+                         ms / frames);
+        }
         if (n.snapshot_hooks.save != nullptr) {
             if (!n.snapshot_saved && n.frame == n.snapshot_save_frame) {
                 n.snapshot_saved = true;
@@ -219,6 +235,13 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
                     n.channel = channel;
                     n.buffer = buffer;
                     std::fprintf(stderr, "[netplay] rolled back to frame %u\n", frame);
+                    n.resimulating = true;
+                    LARGE_INTEGER now{};
+                    QueryPerformanceCounter(&now);
+                    n.resim_start_qpc = static_cast<std::uint64_t>(now.QuadPart);
+                    if (n.snapshot_hooks.resimulating != nullptr && env("GALAXY_SNAPSHOT_RENDER_RESIM").empty()) {
+                        n.snapshot_hooks.resimulating(n.snapshot_hooks.user, true);
+                    }
                 } else {
                     std::fprintf(stderr, "[netplay] saved at frame %u\n", frame);
                 }
@@ -301,6 +324,25 @@ std::FILE* trace_file() noexcept {
     return file;
 }
 }  // namespace
+
+std::uint32_t netplay_efb_peek(bool depth, std::uint32_t local_value) noexcept {
+    Netplay& n = netplay();
+    if (!n.initialized) initialize(n);
+    // Peek answers ride in the input stream as channel kPeekChannel + their order in the frame (count = value).
+    constexpr std::uint32_t kPeekChannel = 0x100u;
+    const std::uint32_t channel = kPeekChannel + (n.peek_sequence++ & 0xFFFFu) + (depth ? 0u : 0x10000u);
+    if (!n.replay.empty()) {
+        const auto it = n.replay.find({n.frame, channel});
+        if (it != n.replay.end()) return it->second.count;
+    }
+    if (n.record != nullptr) {
+        const std::uint32_t head[3] = {n.frame, channel, local_value};
+        static const std::array<std::uint8_t, kStatusSize> kEmpty{};
+        std::fwrite(head, sizeof(head), 1, n.record);
+        std::fwrite(kEmpty.data(), kStatusSize, 1, n.record);
+    }
+    return local_value;
+}
 
 void netplay_set_snapshot_hooks(const NetplaySnapshotHooks& hooks) noexcept {
     netplay().snapshot_hooks = hooks;

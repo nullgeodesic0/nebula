@@ -5530,6 +5530,34 @@ void GxBackend::restore_rollback_state(const RollbackState& in) {
     dependency_pending_fifo_ = in.dependency_pending;
     state_ = in.render_state;
     pending_fifo_ = in.render_pending;
+    // Guest memory went back: every cache derived from its contents starts over.
+    invalidate_guest_derived_caches();
+}
+
+void GxBackend::set_render_suppressed(bool suppressed) {
+    if (suppressed == render_suppressed_) return;
+    if (suppressed) wait_for_render_idle();
+    render_suppressed_ = suppressed;
+    if (!suppressed) resume_from_event_state_ = true;
+}
+
+// Dependency ranges, immutable ranges, decoded vertex runs and PE classification, all derived from guest memory
+// contents. Only with the render thread idle.
+void GxBackend::invalidate_guest_derived_caches() {
+    for (DependencyRangeCacheEntry& entry : dependency_range_cache_) {
+        entry = DependencyRangeCacheEntry{};
+    }
+    dependency_range_cache_tick_ = 0u;
+    dependency_draw_run_range_cache_.clear();
+    dependency_draw_run_range_cache_tick_ = 0u;
+    dependency_draw_run_range_cache_bytes_ = 0u;
+    decoded_packet_run_cache_.clear();
+    decoded_packet_run_cache_tick_ = 0u;
+    decoded_packet_run_cache_bytes_ = 0u;
+    immutable_range_cache_.clear();
+    immutable_range_cache_tick_ = 0u;
+    immutable_range_cache_bytes_ = 0u;
+    pe_event_classifier_.reset();
 }
 
 // Producer (sim thread): snapshot the frame and hand it to the render thread. Blocks only when
@@ -5595,6 +5623,34 @@ FramePeCompletionToken GxBackend::render_frame(
     std::vector<GuestWriteRange>& drained_dirty_ranges = drain_scratch_ranges_;
     drain_guest_memory_writes(drained_dirty_ranges);
     coalesce_dirty_ranges(drained_dirty_ranges);
+    if (render_suppressed_) {
+        // Re-simulation: PE events exactly as a rendered frame raises them, nothing for the GPU. The writes go on
+        // to the next rendered frame; the event parser's display-list cache sees them now.
+        invalidate_dirty_display_list_ranges(event_parser_, drained_dirty_ranges);
+        pending_async_dirty_ranges_.insert(
+            pending_async_dirty_ranges_.end(), drained_dirty_ranges.begin(), drained_dirty_ranges.end());
+        coalesce_dirty_ranges(pending_async_dirty_ranges_);
+        if (fifo_empty) return {};
+        scan_pe_events_on_sim_thread(fifo_data, fifo_size, memory, services);
+        FrameChunk discarded;
+        take_attached_pointer_depth_capture(discarded, fifo_size);
+        take_attached_fifo_markers(discarded, fifo_size);
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        return frame_pe_completions_.issue_event_free();
+    }
+    if (resume_from_event_state_) {
+        // The renderer missed the re-simulated frames: it takes their GX state from the PE-event parser, which
+        // parsed every one of them, and redraws everything from scratch.
+        resume_from_event_state_ = false;
+        wait_for_render_idle();
+        state_ = event_state_;
+        state_.mark_all_dirty();
+        pending_fifo_ = event_pending_fifo_;
+        dependency_state_ = event_state_;
+        dependency_state_.mark_all_dirty();
+        dependency_pending_fifo_ = event_pending_fifo_;
+        invalidate_guest_derived_caches();
+    }
     if (fifo_empty) {
         if (!drained_dirty_ranges.empty()) {
             if (!worker_snapshot) {
@@ -7125,7 +7181,7 @@ bool GxBackend::skip_for_present_rate() {
 void GxBackend::present_cached_xfb(
     std::uint32_t displayed_xfb_addr,
     bool present_swap_chain) {
-    if (!initialized_ || !present_swap_chain) {
+    if (!initialized_ || !present_swap_chain || render_suppressed_) {
         return;
     }
 

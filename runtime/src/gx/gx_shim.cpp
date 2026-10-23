@@ -131,6 +131,10 @@ void restore_rollback_state(const GxRollbackState& in) {
     backend().restore_rollback_state(in.state);
 }
 
+void set_render_suppressed(bool suppressed) {
+    backend().set_render_suppressed(suppressed);
+}
+
 void install_guest_dirty_tracker(GuestMemoryV1* memory) noexcept {
     backend().install_guest_dirty_tracker(memory);
 }

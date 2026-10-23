@@ -5170,7 +5170,13 @@ bool deterministic_mode() {
             (void)_putenv_s("GALAXY_PE_EVENTS_GPU_FENCE", "0");
             (void)_putenv_s("GALAXY_SUBMIT_GX_AT_DRAW_DONE_WAIT", "0");
             (void)_putenv_s("GALAXY_SCAN_PE_EVENTS_ON_SIM_THREAD", "0");
-            (void)_putenv_s("GALAXY_EFB_PEEK_EXACT", "1");
+            // EFB peeks are netplay inputs (gx_efb_peek). Render from per-frame memory snapshots so the render
+            // thread can lag behind the simulation without reading memory the guest is changing; no feature that
+            // writes render results back into guest memory or takes a host window size into the guest.
+            (void)_putenv_s("GALAXY_RENDER_LIVE_MEMORY_WAIT", "0");
+            (void)_putenv_s("GALAXY_RENDER_MEMORY_SNAPSHOT", "1");
+            (void)_putenv_s("GALAXY_INDEPENDENT_VI_PE_COMPLETION", "0");
+            (void)_putenv_s("GALAXY_NATIVE_MOUSE_POINTER_FRAME", "0");
             if (deterministic_unpaced()) {
                 // Nothing paces the run: frames are not shown (the render thread then never waits on the
                 // display) and audio is off (its output would block once real time fell behind). The renderer
@@ -17982,6 +17988,9 @@ void wait_for_frame_pe_completion_cooperatively(
         // works, so the boundary completes at the same guest instant however long the GPU takes.
         bool complete = false;
         try {
+            // Detached VI receipts may still be outstanding; the render thread finishes them first, so this pass
+            // is the only one, whatever the host's timing.
+            if (deterministic_mode()) galaxy::gx::wait_for_render_fifo_effects_idle();
             complete = poll_draw_done_submissions(state) &&
                 galaxy::gx::wait_for_frame_pe_completion_for(token, deterministic_pe_wait_ms());
         } catch (const std::exception& error) {
@@ -19804,9 +19813,13 @@ bool dispatch_vi_retrace(
     capture.present_this_vi = present_this_vi;
     capture.present_in_render_frame = present_in_render_frame;
     capture.xfb_copies_before_render = xfb_copies_before_render;
-    capture.render_completion_independent = independent_vi_pe_capture_allowed(
-        state, xfb_copies_before_render, rendered_retrace_frame,
-        present_in_render_frame);
+    // Deterministic mode: PE events were raised on this thread at submission, so the render thread's token is
+    // host progress only. It detaches into a receipt (retired without blocking) and the boundary goes on at once:
+    // the render thread lags behind instead of the simulation waiting for it.
+    capture.render_completion_independent = deterministic_mode() ||
+        independent_vi_pe_capture_allowed(
+            state, xfb_copies_before_render, rendered_retrace_frame,
+            present_in_render_frame);
     capture.started = std::chrono::steady_clock::now();
     if (state.active_cadence_record_valid) {
         auto& record = state.active_cadence_record;
@@ -30244,10 +30257,11 @@ struct RollbackRuntimeFields {
 };
 
 void rollback_save_runtime(const RuntimeState& state, RollbackRuntimeFields& out) {
-    // A frame boundary has no interrupt dispatch and no draw-done submission in flight; those trackers are not
-    // copyable, so the snapshot requires them idle instead.
-    if (state.external_dispatch.active() || !state.pending_draw_done_submissions.empty()) {
-        throw RuntimeFailure("rollback snapshot with an external dispatch or a draw-done submission in flight");
+    // A frame boundary has no interrupt dispatch in flight (the tracker is not copyable, so the snapshot requires
+    // it idle). Draw-done submissions are off in deterministic mode; what that queue holds is the detached VI
+    // receipts, host progress only: a restore retires them (rollback_restore_runtime).
+    if (state.external_dispatch.active() || state.draw_done_submit_owed) {
+        throw RuntimeFailure("rollback snapshot with an external dispatch or an owed draw-done capture");
     }
     out.gate_depths = {state.checkpoint_gate.full_scope_depth(), state.checkpoint_gate.inline_scope_depth()};
 #define GALAXY_ROLLBACK_SAVE(name) out.name = state.name;
@@ -30345,6 +30359,10 @@ bool rollback_save(void* user) {
     // Resumed by rollback_restore: the stacks are back; now the rest.
     const auto restore_started = std::chrono::steady_clock::now();
     galaxy::gx::restore_rollback_state(*s.gx);
+    // The render thread is idle: every detached VI receipt is complete and retires now.
+    if (!poll_draw_done_submissions(*s.state) || !s.state->pending_draw_done_submissions.empty()) {
+        throw RuntimeFailure("rollback restore left a render receipt outstanding");
+    }
     galaxy::coop_rollback_restore(*s.coop);
     galaxy::odyssey_rollback_restore(*s.odyssey);
     galaxy::voice::restore_playback(s.voice);
@@ -30397,7 +30415,8 @@ void start_cooperative_scheduler(
     rollback.state = &state;
     rollback.context = context;
     rollback.memory = memory;
-    galaxy::netplay_set_snapshot_hooks({&rollback, &rollback_save, &rollback_restore});
+    galaxy::netplay_set_snapshot_hooks({&rollback, &rollback_save, &rollback_restore,
+                                        [](void*, bool on) { galaxy::gx::set_render_suppressed(on); }});
     galaxy::netplay_set_digest_hook(
         [](void* user) {
             auto& s = *static_cast<RollbackSnapshot*>(user);
@@ -30807,6 +30826,15 @@ static bool gx_efb_peek(
     static const bool exact_only = read_env_flag("GALAXY_EFB_PEEK_EXACT", false);
     static const bool trace_peeks = read_env_flag("GALAXY_TRACE_EFB_PEEK", false);
     const auto peek_kind = depth ? galaxy::gx::EfbPeekKind::Depth : galaxy::gx::EfbPeekKind::Color;
+    if (deterministic_mode()) {
+        // The answer is a netplay input (netplay_efb_peek): this machine's latest published value, never waiting
+        // for the GPU, recorded with the frame's input; a replay (or, online, the peer) supplies the same value.
+        std::uint32_t local = 0u;
+        if (!galaxy::gx::peek_efb_published(x, y, peek_kind, local)) local = depth ? 0x00FFFFFFu : 0u;
+        *value = galaxy::netplay_efb_peek(depth, local);
+        ++state->efb_peek_published_count;
+        return true;
+    }
     if (!exact_only) {
         std::uint32_t cached = 0;
         if (galaxy::gx::peek_efb_published(x, y, peek_kind, cached)) {

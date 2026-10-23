@@ -300,6 +300,11 @@ public:
     };
     void save_rollback_state(RollbackState& out);
     void restore_rollback_state(const RollbackState& in);
+    // Rollback re-simulation: while suppressed, render_frame raises a capture's PE events on the simulation
+    // thread exactly as when rendering and returns an already-complete receipt, with no GPU work and no present.
+    // The first frame after suppression ends takes the PE-event parser's GX state for the renderer.
+    void set_render_suppressed(bool suppressed);
+    [[nodiscard]] bool render_suppressed() const noexcept { return render_suppressed_; }
     void install_guest_dirty_tracker(GuestMemoryV1* memory) noexcept;
     void notify_guest_memory_write(
         std::uint32_t address,
@@ -839,6 +844,9 @@ private:
     std::vector<std::byte> pending_fifo_;
     GxState event_state_;
     std::vector<std::byte> event_pending_fifo_;
+    bool render_suppressed_ = false;
+    bool resume_from_event_state_ = false;  // suppression ended: the renderer adopts event_state_ next frame
+    void invalidate_guest_derived_caches();
     GxState dependency_state_;
     std::vector<std::byte> dependency_pending_fifo_;
 
