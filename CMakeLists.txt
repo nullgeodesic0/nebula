@@ -707,6 +707,8 @@ add_library(galaxy_gx STATIC
     runtime/src/gx/game_asset_extract.cpp
     runtime/src/gx/game_disc.cpp
     runtime/src/gx/game_font.cpp
+    runtime/src/gx/menu_kit.cpp
+    runtime/src/gx/menu_kit_raster.cpp
 )
 # AMD FidelityFX FSR 3.1 (MIT): the FidelityFX SDK 1.1.4 `sdk` directory
 # after its own build (bin/ffx_sdk holds the static libraries with the
@@ -763,6 +765,20 @@ add_executable(galaxy_game_menu_assets_tests
     runtime/src/gx/game_asset_extract.cpp)
 target_include_directories(galaxy_game_menu_assets_tests PRIVATE runtime/include)
 target_compile_features(galaxy_game_menu_assets_tests PRIVATE cxx_std_20)
+
+set(galaxy_menu_kit_sources
+    runtime/src/gx/menu_kit.cpp
+    runtime/src/gx/menu_kit_raster.cpp
+    runtime/src/gx/game_disc.cpp
+    runtime/src/gx/game_font.cpp
+    runtime/src/gx/game_asset_extract.cpp)
+add_executable(galaxy_menu_kit_tests runtime/src/gx/menu_kit_tests.cpp ${galaxy_menu_kit_sources})
+target_include_directories(galaxy_menu_kit_tests PRIVATE runtime/include)
+target_compile_features(galaxy_menu_kit_tests PRIVATE cxx_std_20)
+# Not a test: draws the menu kit over a screenshot to compare with the game's own menus.
+add_executable(galaxy_menu_kit_preview tools/dev/menu_kit_preview.cpp ${galaxy_menu_kit_sources})
+target_include_directories(galaxy_menu_kit_preview PRIVATE runtime/include)
+target_compile_features(galaxy_menu_kit_preview PRIVATE cxx_std_20)
 
 add_executable(NebulaRuntime
     runtime/src/native_runtime.cpp
@@ -1182,6 +1198,7 @@ if(MSVC)
         galaxy_verify_thp_native
         galaxy_game_asset_extract_tests
         galaxy_game_menu_assets_tests
+        galaxy_menu_kit_tests
         NebulaRuntime
         galaxy_native_api_tests
         galaxy_native_fast_float_tests
@@ -1323,6 +1340,7 @@ galaxy_add_native_test(efb_decoded_allocation_budget galaxy_efb_conversion_tests
 galaxy_add_native_test(line_point_raster galaxy_line_point_raster_tests)
 galaxy_add_native_test(cosmetic_game_asset_extract galaxy_game_asset_extract_tests)
 galaxy_add_native_test(game_menu_assets galaxy_game_menu_assets_tests)
+galaxy_add_native_test(menu_kit galaxy_menu_kit_tests)
 galaxy_add_native_test(sorted_dirty_ranges galaxy_sorted_dirty_ranges_tests)
 galaxy_add_native_test(same_context_rfi galaxy_same_context_rfi_tests)
 galaxy_add_native_test(pipeline_cache_persistence galaxy_pipeline_cache_persistence_tests)
