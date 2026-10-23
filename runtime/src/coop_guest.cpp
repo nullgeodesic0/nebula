@@ -227,6 +227,11 @@ constexpr std::uint32_t kSolidHeapFreeSize = 0x6Cu;  // JKRSolidHeap::mFreeSize
 // MarioActor::_482: set, MarioActor::draw leaves the player's model out, as in a black hole (MR::hideModel does
 // not; _A61 would also darken the screen, MarioActor::drawPreWipe).
 constexpr std::uint32_t kMarioActorHidden = 0x482u;
+// NameObj::mFlags (u16 at +8), its low byte: bit 0 suspended (NameObj::requestSuspend asks with bit 1, requestResume
+// with bit 2; NameObj::syncWithFlags applies them).
+constexpr std::uint32_t kNameObjFlagsLow = 0x9u;
+constexpr std::uint8_t kNameObjSuspended = 0x01u;
+constexpr std::uint8_t kNameObjRequests = 0x06u;
 // MarioActor's own nerve for ordinary play (NrvMarioActor::MarioActorNrvWait::sInstance).
 constexpr std::uint32_t kMarioActorNrvWait = 0x8069F038u;
 // MarioActor::exeGameOver* (the player down: exeGameOver to exeTimeWait, and exeGameOverBlackHole2).
@@ -1503,6 +1508,9 @@ void respawn_player(const Guest& guest, std::uint32_t actor_address, coop::Vec3 
     guest.set_u32(actor_address + 0x380u, 3u);  // MarioActor::mHealth
     guest.set_u32(actor_address + 0x3E0u, 3u);  // MarioActor::mMaxHealth
     guest.set_u8(actor_address + 0x39Du, 0u);   // the down's kind
+    // MarioActor::_B90, set by changeGameOverAnimation: while set the player stays in the down pose (the game
+    // never needed to clear it: a miss reloads the stage).
+    guest.set_u8(actor_address + 0xB90u, 0u);
     guest.call(fn::kShowModel, actor_address);
     guest.set_u8(actor_address + kMarioActorHidden, 0u);
     guest.call(fn::kValidateHitSensors, actor_address);
@@ -1686,6 +1694,14 @@ void move_second_player(const Guest& guest, State& s) {
         s.split.reset();
         s.follow.reset();
         return;
+    }
+    // The second player moves only here, in their turn: suspended in the game's movement list (NameObj::mFlags
+    // bit 0). A galaxy's start resumes the scene's suspended objects, him with them, and the game then moved him a
+    // second time each frame with the first player's controller (Luigi crept, tied to the keyboard, until the
+    // stage reloaded).
+    if (const std::uint8_t flags = guest.u8(s.second + kNameObjFlagsLow); (flags & kNameObjSuspended) == 0u) {
+        guest.set_u8(s.second + kNameObjFlagsLow, static_cast<std::uint8_t>((flags & ~kNameObjRequests) | kNameObjSuspended));
+        trace("second player was resumed in the game's movement list: suspended again");
     }
     const std::uint32_t pad_holder = guest.call(fn::kGetWPadHolder);
     const bool pads = plausible(pad_holder) && plausible(guest.u32(pad_holder)) && plausible(guest.u32(pad_holder + 4u));
