@@ -179,6 +179,7 @@ bool receive_message(SOCKET s, sockaddr_in& from, Header& header, std::string& t
     for (const auto& [name, value] : variables) SetEnvironmentVariableW(name.c_str(), value.c_str());
     SetEnvironmentVariableW(L"GALAXY_TWO_PLAYERS", L"1");
     SetEnvironmentVariableW(L"GALAXY_NET_WAIT_PID", std::to_wstring(GetCurrentProcessId()).c_str());
+    SetEnvironmentVariableW(L"GALAXY_AGENT_RESUMED", L"1");  // agent_guest.cpp: no command runs twice
     wchar_t exe[MAX_PATH]{};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     std::wstring command_line = GetCommandLineW();

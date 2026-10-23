@@ -148,6 +148,18 @@ Agent& agent_state() {
             std::fprintf(stderr, "[agent] commands from %s\\commands.txt\n", value);
         }
         std::free(value);
+        // A game the online lobby restarted (net_lobby.cpp) goes on from where the old process was in the command
+        // file: commands that already ran there must not run again here, on one PC only.
+        value = nullptr;
+        if (made.enabled && _dupenv_s(&value, &length, "GALAXY_AGENT_RESUMED") == 0 && value != nullptr) {
+            if (FILE* file = _fsopen((made.directory + "\\commands.txt").c_str(), "rb", _SH_DENYNO)) {
+                if (_fseeki64(file, 0, SEEK_END) == 0) made.read_offset = _ftelli64(file);
+                std::fclose(file);
+            }
+            SetEnvironmentVariableA("GALAXY_AGENT_RESUMED", nullptr);
+            _putenv_s("GALAXY_AGENT_RESUMED", "");
+        }
+        std::free(value);
         return made;
     }();
     return a;
