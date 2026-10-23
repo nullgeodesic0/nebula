@@ -4885,6 +4885,24 @@ void GxBackend::notify_guest_memory_write(
     mark_alias(0xD0000000u, kMem2Size, kMem2PhysicalBase);
 }
 
+void GxBackend::harvest_rollback_dirty(std::uint64_t* out) noexcept {
+    for (std::size_t group = 0; group < kDirtyWordSummaryCount; ++group) {
+        std::uint64_t bits = rollback_dirty_[group];
+        rollback_dirty_[group] = 0u;
+        // Not drained yet: the group's words themselves, read and left for the renderer's drain.
+        if (dirty_word_summary_[group].load(std::memory_order_relaxed) != 0u) {
+            const std::size_t first = group * 64u;
+            const std::size_t end = std::min<std::size_t>(first + 64u, kDirtyPageWordCount);
+            for (std::size_t word = first; word < end; ++word) {
+                if (dirty_page_words_[word].load(std::memory_order_relaxed) != 0u) {
+                    bits |= std::uint64_t{1} << (word - first);
+                }
+            }
+        }
+        out[group] |= bits;
+    }
+}
+
 void GxBackend::drain_guest_memory_writes(
     std::vector<GuestWriteRange>& out) noexcept {
     out.clear();
@@ -4959,6 +4977,7 @@ void GxBackend::drain_guest_memory_writes(
             // concurrent additions.
             std::uint64_t bits = dirty_page_words_[candidate].exchange(
                 0u, std::memory_order_relaxed);
+            if (bits != 0u) rollback_dirty_[candidate / 64u] |= std::uint64_t{1} << (candidate % 64u);
             // A run of consecutive dirty pages at a time (a written buffer sets whole words).
             while (bits != 0u) {
                 const unsigned first =

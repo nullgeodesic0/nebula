@@ -876,6 +876,10 @@ bool netplay_rejoin_press_a() noexcept {
     return rejoin_state().press_a;
 }
 
+bool netplay_rejoin_active() noexcept {
+    return rejoin_state().active;
+}
+
 void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc) {
     Agent& a = agent_state();
     if (!a.enabled) return;

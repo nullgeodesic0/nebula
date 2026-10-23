@@ -145,6 +145,10 @@ void notify_guest_memory_write(
     backend().notify_guest_memory_write(address, size);
 }
 
+void harvest_rollback_dirty(std::uint64_t* out) noexcept {
+    backend().harvest_rollback_dirty(out);
+}
+
 void pump_messages() {
     backend().pump_messages();
 }
