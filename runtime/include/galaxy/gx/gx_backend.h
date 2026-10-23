@@ -1203,6 +1203,18 @@ private:
     std::array<std::atomic_uint64_t, kDirtyPageWordCount> dirty_page_words_{};
     std::array<std::atomic_uint64_t, kDirtyWordSummaryCount>
         dirty_word_summary_{};
+    // Rollback's dirty record (harvest_rollback_dirty): a bit per bitmap word (2 KiB of guest memory) the drain
+    // found written since the last harvest. The simulation thread alone drains and harvests.
+    std::array<std::uint64_t, kDirtyWordSummaryCount> rollback_dirty_{};
+
+public:
+    static constexpr std::size_t kRollbackDirtyWords = kDirtyWordSummaryCount;
+    static constexpr std::uint32_t kRollbackBlockBytes = kDirtyPageSize * 64u;  // 2 KiB, physical addresses
+    // ORs into `out` (kRollbackDirtyWords words) every 2 KiB block written since the last harvest, drained or not
+    // yet drained, and starts the record again. Simulation thread only.
+    void harvest_rollback_dirty(std::uint64_t* out) noexcept;
+
+private:
 
     // Cached per-draw bindings, rebuilt when the matching dirty bit fires.
     PixelShaderKey ps_key_{};

@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <string>
 #include <thread>
 #include <vector>
@@ -160,6 +161,20 @@ struct Session {
     std::vector<std::pair<std::uint32_t, std::uint64_t>> my_hashes;  // (frame, hash), recent
     std::uint64_t stalls = 0u;
     double stalled_ms = 0.0;
+    // Rollback (GALAXY_NET_ROLLBACK=1): a frame whose peer input has not arrived runs on a prediction (the peer's
+    // newest input, held) instead of waiting, up to max_ahead frames past the newest that arrived; when the real one
+    // differs, netplay.cpp restores the frame and simulates forward again (net_rollback_target).
+    bool rollback = false;
+    std::uint32_t max_ahead = 8u;
+    std::vector<NetInput> predicted;               // by frame, the input a prediction used
+    std::vector<std::uint8_t> was_predicted;
+    std::uint32_t unconfirmed_from = kNone;        // the oldest frame run on a prediction not yet checked
+    std::uint64_t rollbacks = 0u;
+    std::uint64_t rolled_frames = 0u;
+    std::uint64_t predictions = 0u;
+    std::uint32_t last_hashed_frame = kNone;
+    bool resimulating = false;  // netplay.cpp re-running frames after a rollback: nothing local is sampled again
+    bool must_wait = false;     // the next net_input waits rather than predicts (an EFB peek's input)
     std::atomic<bool> peer_left{false};                 // set on the game thread, read by the lobby's
     std::atomic<std::uint32_t> pending_command{0u};     // the next local input's NetCommand (the menu's thread)
     // The session bundle: the host's save files and game settings (host: built on the first request; joiner:
@@ -238,14 +253,58 @@ std::uint64_t build_identity() {
     return h;
 }
 
+// GALAXY_NET_TEST_LATENCY_MS=<ms>: every datagram this PC sends leaves that much later (tests of rollback on one
+// PC, where the network is instant). Held ones go out as later sends and receives pass by.
+struct HeldDatagram {
+    std::int64_t due = 0;
+    std::vector<char> bytes;
+};
+
+std::int64_t qpc_now() {
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    return now.QuadPart;
+}
+
+std::deque<HeldDatagram>& held_datagrams() {
+    static std::deque<HeldDatagram> held;
+    return held;
+}
+
+std::int64_t test_latency_ticks(const Session& s) {
+    static const std::int64_t ticks = [&] {
+        const int ms = std::atoi(env("GALAXY_NET_TEST_LATENCY_MS").c_str());
+        return ms > 0 ? s.frequency.QuadPart * ms / 1000 : 0;
+    }();
+    return ticks;
+}
+
+void flush_held(Session& s) {
+    auto& held = held_datagrams();
+    const std::int64_t now = qpc_now();
+    while (!held.empty() && held.front().due <= now) {
+        (void)sendto(s.socket, held.front().bytes.data(), static_cast<int>(held.front().bytes.size()), 0,
+                     reinterpret_cast<const sockaddr*>(&s.peer), sizeof(s.peer));
+        held.pop_front();
+    }
+}
+
 void send_raw(Session& s, const void* data, int size) {
     if (s.socket == INVALID_SOCKET || !s.peer_known) return;
+    if (const std::int64_t latency = test_latency_ticks(s); latency > 0) {
+        const auto* bytes = static_cast<const char*>(data);
+        held_datagrams().push_back({qpc_now() + latency, std::vector<char>(bytes, bytes + size)});
+        flush_held(s);
+        return;
+    }
     (void)sendto(s.socket, static_cast<const char*>(data), size, 0, reinterpret_cast<const sockaddr*>(&s.peer),
                  sizeof(s.peer));
 }
 
 void send_hello(Session& s, Packet type) {
-    const WireHello packet{{kMagic, static_cast<std::uint8_t>(type), kVersion, 0u}, s.delay, s.build_id};
+    // The delay word carries rollback's window too: both PCs must play with the same (or neither with it).
+    const std::uint32_t timing = s.delay | (s.rollback ? s.max_ahead << 8u : 0u);
+    const WireHello packet{{kMagic, static_cast<std::uint8_t>(type), kVersion, 0u}, timing, s.build_id};
     send_raw(s, &packet, sizeof(packet));
 }
 
@@ -631,12 +690,12 @@ void handle_packet(Session& s, const std::uint8_t* data, int size, const sockadd
         std::uint64_t build = 0u;
         std::memcpy(&delay, data + sizeof(Header), 4u);
         std::memcpy(&build, data + sizeof(Header) + 4u, 8u);
-        if (build != s.build_id || delay != s.delay) {
+        if (build != s.build_id || delay != (s.delay | (s.rollback ? s.max_ahead << 8u : 0u))) {
             static bool s_warned = false;
             if (!s_warned) {
                 s_warned = true;
                 std::fprintf(stderr, "[net] refused a peer with a different %s\n",
-                             build != s.build_id ? "build" : "input delay");
+                             build != s.build_id ? "build" : "input delay or rollback setting");
             }
             return;
         }
@@ -752,6 +811,7 @@ void handle_packet(Session& s, const std::uint8_t* data, int size, const sockadd
 
 void receive(Session& s) {
     if (s.socket == INVALID_SOCKET) return;
+    if (test_latency_ticks(s) > 0 && s.peer_known) flush_held(s);
     std::uint8_t buffer[2048];
     for (;;) {
         sockaddr_in from{};
@@ -831,11 +891,20 @@ void initialize(Session& s) {
     throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
     throttling.StateMask = 0u;
     (void)SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
+    // Rollback is on unless GALAXY_NET_ROLLBACK=0; with it the input delay is 2 frames, without it 3.
+    s.rollback = env("GALAXY_NET_ROLLBACK") != "0";
+    s.delay = s.rollback ? 2u : 3u;
     if (const std::string delay = env("GALAXY_NET_DELAY"); !delay.empty()) {
         s.delay = static_cast<std::uint32_t>(std::clamp(std::atoi(delay.c_str()), 1, 30));
     }
     s.build_id = build_identity();
     for (auto& ring : s.inputs) ring.assign(kRing, Slot{});
+    if (const std::string ahead = env("GALAXY_NET_ROLLBACK_FRAMES"); !ahead.empty()) {
+        s.max_ahead = static_cast<std::uint32_t>(std::clamp(std::atoi(ahead.c_str()), 1, 12));
+    }
+    s.predicted.assign(kRing, NetInput{});
+    s.was_predicted.assign(kRing, 0u);
+    if (s.rollback) std::fprintf(stderr, "[net] rollback on: up to %u frames predicted\n", s.max_ahead);
     s.local_peeks.assign(kRing, {});
     s.local_peek_counts.assign(kRing, 0u);
     QueryPerformanceFrequency(&s.frequency);
@@ -1206,16 +1275,24 @@ void net_frame_begin(std::uint32_t frame, const GuestMemoryV1* memory) {
     // No pacing here: the guest's virtual time is kept to real time (native_runtime.cpp
     // deterministic_advance_to), as a game frame may span several VI frames.
     const bool booting = s.live && !s.host && s.phase == Session::Live::Booting;
-    if (frame % kHashEvery == 0u && s.connected && !booting) {
+    // A frame's hash only once, and only when every input before it is real (not a prediction a rollback may undo).
+    const bool settled = s.unconfirmed_from == kNone && (s.last_hashed_frame == kNone || frame > s.last_hashed_frame);
+    if (frame % kHashEvery == 0u && s.connected && !booting && settled && !s.resimulating) {
+        s.last_hashed_frame = frame;
         const std::uint64_t hash = mem1_hash(memory);
         s.my_hashes.emplace_back(frame, hash);
         if (s.my_hashes.size() > 64u) s.my_hashes.erase(s.my_hashes.begin());
         const WireHash packet{{kMagic, static_cast<std::uint8_t>(Packet::Hash), kVersion, 0u}, frame, hash};
         send_raw(s, &packet, sizeof(packet));
     }
-    if (frame % 600u == 0u && s.stalls != 0u) {
+    if (frame % 600u == 0u && s.stalls != 0u && !s.resimulating) {
         std::fprintf(stderr, "[net] frame %u: %llu stalls, %.0f ms waiting for the peer\n", frame,
                      static_cast<unsigned long long>(s.stalls), s.stalled_ms);
+    }
+    if (frame % 600u == 0u && s.rollback && !s.resimulating) {
+        std::fprintf(stderr, "[net] frame %u: %llu predictions, %llu rollbacks, %llu frames simulated again\n", frame,
+                     static_cast<unsigned long long>(s.predictions), static_cast<unsigned long long>(s.rollbacks),
+                     static_cast<unsigned long long>(s.rolled_frames));
     }
 }
 
@@ -1255,6 +1332,57 @@ void net_local_input(std::uint32_t frame, std::uint32_t count, const std::uint8_
     send_inputs(s);
 }
 
+// The frames rollback may predict: a session's lockstep part (not a live session's solo phase, nor before the
+// joiner's first input applies), and not while a rejoin plays its way back (its state is outside the snapshot).
+bool rollback_frame(const Session& s, std::uint32_t frame) {
+    if (netplay_rejoin_active()) return false;
+    if (!s.live) return frame >= s.delay;
+    return s.join_frame != kNone && frame >= s.join_frame + s.delay;
+}
+
+bool same_input(const NetInput& a, const NetInput& b) {
+    // Peeks are not compared: a frame's peek answers are read from an earlier, real input (net_peek).
+    return a.count == b.count && a.status == b.status && a.command == b.command;
+}
+
+std::uint32_t net_rollback_target(std::uint32_t frame) {
+    Session& s = session();
+    if (!s.rollback || s.unconfirmed_from == kNone) return kNone;
+    receive(s);
+    const unsigned peer = 1u - me(s);
+    for (std::uint32_t f = s.unconfirmed_from; f < frame; ++f) {
+        if (!s.was_predicted[f % kRing]) continue;
+        const Slot& real = slot(s, peer, f);
+        if (real.frame != f) {
+            s.unconfirmed_from = f;  // not here yet: checked again next frame
+            return kNone;
+        }
+        if (!same_input(real.input, s.predicted[f % kRing])) {
+            for (std::uint32_t g = f; g < frame; ++g) s.was_predicted[g % kRing] = 0u;
+            s.unconfirmed_from = kNone;
+            ++s.rollbacks;
+            s.rolled_frames += frame - f;
+            return f;
+        }
+        s.was_predicted[f % kRing] = 0u;
+    }
+    s.unconfirmed_from = kNone;
+    return kNone;
+}
+
+void net_set_resimulating(bool on) noexcept {
+    session().resimulating = on;
+}
+
+bool net_rollback_enabled() noexcept {
+    return session().rollback;
+}
+
+bool net_rollback_frame(std::uint32_t frame) noexcept {
+    const Session& s = session();
+    return s.rollback && s.connected && rollback_frame(s, frame);
+}
+
 const NetInput& net_input(std::uint32_t frame, unsigned player) {
     Session& s = session();
     static const NetInput kNeutral{};
@@ -1274,6 +1402,26 @@ const NetInput& net_input(std::uint32_t frame, unsigned player) {
     }
     Slot& from = slot(s, player, frame);
     if (from.frame == frame) return from.input;
+    if (s.rollback && player != me(s) && s.connected && rollback_frame(s, frame) && !s.must_wait) {
+        // Not here yet: run on a prediction, the peer's newest input held, within the window.
+        const std::uint32_t newest = s.any_remote ? s.newest_remote_frame : 0u;
+        if (frame <= newest + s.max_ahead) {
+            NetInput& guess = s.predicted[frame % kRing];
+            if (!s.was_predicted[frame % kRing]) {
+                const Slot& last = slot(s, player, newest);
+                guess = s.any_remote && last.frame == newest ? last.input : NetInput{};
+                // Held, not pressed again: no presses or releases, no command.
+                for (const std::size_t at : {coop::kpad::kTrig, coop::kpad::kRelease}) {
+                    std::fill_n(guess.status.begin() + at, 4u, std::uint8_t{0});
+                }
+                guess.command = 0u;
+                s.was_predicted[frame % kRing] = 1u;
+                if (s.unconfirmed_from == kNone || frame < s.unconfirmed_from) s.unconfirmed_from = frame;
+                ++s.predictions;
+            }
+            return guess;
+        }
+    }
     // The peer's input for this frame has not arrived: wait for it (lockstep), resending ours.
     const std::int64_t started = now_qpc();
     std::int64_t last_send = started;
@@ -1308,7 +1456,7 @@ const NetInput& net_input(std::uint32_t frame, unsigned player) {
 
 std::uint32_t net_peek(std::uint32_t frame, std::uint32_t sequence, std::uint32_t local) noexcept {
     Session& s = session();
-    if (s.host && sequence < kNetMaxPeeks) {
+    if (s.host && sequence < kNetMaxPeeks && !s.resimulating) {
         s.local_peeks[frame % kRing][sequence] = local;
         s.local_peek_counts[frame % kRing] = sequence + 1u;
     }
@@ -1325,8 +1473,12 @@ std::uint32_t net_peek(std::uint32_t frame, std::uint32_t sequence, std::uint32_
         }
         return to.input.peeks[std::min(sequence, to.input.peek_count - 1u)];
     }
-    // Both PCs answer with the host's value carried by the host's input for this frame.
-    const NetInput& host_input = net_input(frame, 0u);
+    // Both PCs answer with the host's value carried by the host's input for this frame. With rollback, the input of
+    // max_ahead frames earlier, which has arrived whenever this frame may run (a peek is never predicted).
+    const bool shifted = s.rollback && rollback_frame(s, frame);
+    s.must_wait = shifted;
+    const NetInput& host_input = net_input(shifted ? frame - s.max_ahead : frame, 0u);
+    s.must_wait = false;
     if (host_input.peek_count == 0u) return 0x00FFFFFFu;
     return host_input.peeks[std::min(sequence, host_input.peek_count - 1u)];
 }

@@ -40,6 +40,8 @@ namespace {
 constexpr std::uint32_t kFrameReadSite = 0x803AB2B0u;  // WPadHolder::updateReadDataOnly's KPADRead
 constexpr std::uint32_t kStatusSize = 0x84u;           // KPADStatus
 constexpr std::uint32_t kChannels = 2u;                // the two players
+constexpr std::uint32_t kNoFrame = 0xFFFFFFFFu;
+constexpr std::uint32_t kPendingKept = 32u;            // rollback: frames of pending commands kept (> the ring)
 
 struct Sample {
     std::uint32_t count = 0u;
@@ -58,6 +60,12 @@ struct Netplay {
     std::uint32_t frame = 0u;    // game frames so far (channel 0 reads at kFrameReadSite)
     std::uint32_t peek_sequence = 0u;  // EFB peeks so far this frame (netplay_efb_peek)
     std::uint32_t pending_command = 0u;  // a NetCommand from this frame's inputs (netplay_take_command)
+    // Rollback (rollback_frame_start): the frame a re-simulation runs up to, and each kept frame's pending command
+    // (C++ state outside the snapshot).
+    std::uint32_t resim_to = 0xFFFFFFFFu;
+    std::array<std::uint32_t, 32> pending_at{};
+    std::uint32_t ring_test_depth = 0u;  // GALAXY_ROLLBACK_RING_TEST
+    std::uint32_t ring_test_last = 0xFFFFFFFFu;
     std::uint32_t channel = 0xFFFFFFFFu;
     std::uint32_t buffer = 0u;
     std::uint32_t other_channel = 0xFFFFFFFFu;  // a KPADRead off the frame site, online
@@ -155,6 +163,9 @@ void initialize(Netplay& n) {
     if (const std::string rate = env("GALAXY_NETPLAY_RATE"); !rate.empty()) {
         n.rate_every = static_cast<std::uint32_t>(std::strtoul(rate.c_str(), nullptr, 10));
     }
+    if (const std::string ring = env("GALAXY_ROLLBACK_RING_TEST"); !ring.empty()) {
+        n.ring_test_depth = std::min<std::uint32_t>(static_cast<std::uint32_t>(std::strtoul(ring.c_str(), nullptr, 10)) * 4u, 15u);
+    }
     if (const std::string exit_at = env("GALAXY_STATE_EXIT_FRAME"); !exit_at.empty()) {
         n.exit_frame = static_cast<std::uint32_t>(std::strtoul(exit_at.c_str(), nullptr, 10));
     }
@@ -211,6 +222,39 @@ void write_dump(Netplay& n, const GuestMemoryV1* memory) {
     }
 }
 
+// Rollback, at a frame's start (net_rollback_target): a re-simulation that has reached the present ends; a
+// prediction found wrong sends the machine back to that frame (it does not return then); then this frame is kept.
+void rollback_frame_start(Netplay& n) {
+    const NetplaySnapshotHooks& hooks = n.snapshot_hooks;
+    if (n.resim_to != kNoFrame && n.frame >= n.resim_to) {
+        n.resim_to = kNoFrame;
+        net_set_resimulating(false);
+        if (hooks.catch_up != nullptr) hooks.catch_up(hooks.user, false);
+    }
+    const std::uint32_t target = net_rollback_target(n.frame);
+    if (target != kNoFrame) {
+        if (hooks.ring_has(hooks.user, target)) {
+            if (n.resim_to == kNoFrame || n.frame > n.resim_to) n.resim_to = n.frame;
+            net_set_resimulating(true);
+            if (hooks.catch_up != nullptr) hooks.catch_up(hooks.user, true);
+            hooks.ring_restore(hooks.user, target);  // resumes in the ring_save below, at `target`
+        }
+        std::fprintf(stderr, "[netplay] frame %u is no longer kept: rollback impossible, the PCs will differ\n", target);
+    }
+    n.pending_at[n.frame % kPendingKept] = n.pending_command;
+    const std::uint32_t frame = n.frame;
+    const std::uint32_t channel = n.channel;
+    const std::uint32_t buffer = n.buffer;
+    if (hooks.ring_save(hooks.user, frame)) {
+        // Back at the start of `frame`, in this read: what the snapshot does not hold.
+        n.frame = frame;
+        n.channel = channel;
+        n.buffer = buffer;
+        n.pending_command = n.pending_at[frame % kPendingKept];
+        n.peek_sequence = 0u;
+    }
+}
+
 }  // namespace
 
 void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::uint32_t guest_pc) {
@@ -231,6 +275,31 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
     if (n.channel == 0u) {
         n.peek_sequence = 0u;
         net_frame_begin(n.frame, memory);
+        if (net_session_requested() && (net_rollback_frame(n.frame) || n.resim_to != kNoFrame) &&
+            n.snapshot_hooks.ring_save != nullptr) {
+            rollback_frame_start(n);
+        } else if (n.ring_test_depth != 0u && n.snapshot_hooks.ring_save != nullptr && n.frame >= 580u) {
+            // GALAXY_ROLLBACK_RING_TEST=<n>: every frame kept; every 47 frames, back 4n frames and forward again.
+            const NetplaySnapshotHooks& hooks = n.snapshot_hooks;
+            if (n.resim_to != kNoFrame && n.frame >= n.resim_to) {
+                n.resim_to = kNoFrame;
+                if (hooks.catch_up != nullptr) hooks.catch_up(hooks.user, false);
+            }
+            const std::uint32_t back = n.frame - n.ring_test_depth;
+            if (n.resim_to == kNoFrame && n.frame > 600u && n.frame % 47u == 0u && n.frame != n.ring_test_last &&
+                hooks.ring_has(hooks.user, back)) {
+                n.ring_test_last = n.frame;
+                n.resim_to = n.frame;
+                if (hooks.catch_up != nullptr) hooks.catch_up(hooks.user, true);
+                hooks.ring_restore(hooks.user, back);
+            }
+            const std::uint32_t frame = n.frame, channel = n.channel, buffer = n.buffer;
+            if (hooks.ring_save(hooks.user, frame)) {
+                n.frame = frame;
+                n.channel = channel;
+                n.buffer = buffer;
+            }
+        }
         // A frame starts: its state before this frame's input.
         if (n.hashes != nullptr && n.frame >= n.hash_from && n.frame % n.hash_every == 0u) write_hash(n, memory);
         if (n.dump_frame == n.frame && !n.dump_path.empty()) write_dump(n, memory);
@@ -408,7 +477,9 @@ void netplay_kpad_after(PpcContext* context, GuestMemoryV1* memory, const Native
     if (net_session_requested()) {
         // Online: this PC's controller (the local first-player read) is its player's input `delay` frames on;
         // the first player plays the host's input and the second the joiner's, on both PCs.
-        if (channel == 0u) {
+        // A frame simulated again after a rollback reads its input from the session as it was sent: the
+        // controller is sampled once a frame, on the frame's first run.
+        if (channel == 0u && n.resim_to == kNoFrame) {
             // The game's Remote is neutral in deterministic mode (native_host.cpp): this PC's player is its
             // controller as the input thread published it, a KPAD status a frame.
             static coop::KpadSynth s_local_kpad;

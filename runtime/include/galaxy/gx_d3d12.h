@@ -186,6 +186,12 @@ void notify_guest_memory_write(
     std::uint32_t address,
     std::uint32_t size) noexcept;
 
+// Rollback's incremental snapshots (native_runtime.cpp): ORs into `out` a bit per 2 KiB block of physical guest
+// memory (0..0x14000000) written since the last call. Simulation thread only.
+inline constexpr std::size_t kRollbackDirtyWords = 2560u;  // 0x14000000 / 2 KiB / 64
+inline constexpr std::uint32_t kRollbackBlockBytes = 2048u;
+void harvest_rollback_dirty(std::uint64_t* out) noexcept;
+
 // Pump Win32 messages; call periodically from the guest execution loop.
 void pump_messages();
 [[nodiscard]] bool quit_requested() noexcept;
