@@ -95,10 +95,17 @@ again when both are back within 60% of the shared picture (the gap keeps it from
 3. Joining runs the same backwards, and the single screen comes back only when both halves show one
    picture again.
 
-The second player's camera trails them 1000 units behind and 380 above along their gravity. They steer it
-with the stick bound to the pointer (usually the right stick; it has no pointer in co-op) or the D-pad: left
-and right orbit it around them, up and down raise or lower it; C puts it behind them again. It stops short of
-walls between it and the player (the game's `MR::getFirstPolyOnLineToMap`).
+The second player's camera is the game's own camera system run a second time for them: a second
+CameraDirector (`make_second_director`, made when they are, as CameraDirector's constructor makes its parts:
+its own camera holder with every camera type, camera man, target (the second player), pose, interpolation,
+shaker; the stage's camera parameters, rails and registers shared with the game's). It runs each frame right
+after the game's camera (`run_second_director`, movement category 2) with the second player as the game's player
+and as MR::getCameraDirector's answer, and CameraContext is the game camera's again after it. So their half gets
+the stage's camera areas (CubeCamera), ground camera codes and every camera type as the first player's does: the
+Pull Star stretches in Space Junk frame the same for either brother. They turn it as the first player turns
+theirs (their controller's camera buttons). `GALAXY_COOP_GAME_CAMERA=0` falls back to the old follow camera: 1000
+units behind and 380 above along their gravity, steered with the pointer stick or the D-pad, short of walls.
+Event cameras (warps, launch stars, cutscenes) remain the game camera's, handed over as below.
 
 A camera event the second player sets off (a warp, launch star or pipe) plays in their half with the game's
 own camera (easing in from the second player's), and the first player's half keeps its view from before,

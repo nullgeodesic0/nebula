@@ -247,6 +247,45 @@ constexpr std::uint32_t kFovy = 0xB8u;  // degrees
 constexpr std::uint32_t kIsLuigi = 0x806A18C8u;               // gIsLuigi (bool)
 constexpr std::uint32_t kResourceHolderManager = 0x806A2480u;  // SingletonHolder<ResourceHolderManager>::sInstance
 constexpr std::uint32_t kMovementTypePlayer = 0x25u;          // MR::MovementType_Player
+constexpr std::uint32_t kMovementTypeCamera = 0x02u;          // MR::connectToSceneCamera's
+// The second player's own game camera (second_director): a second CameraDirector next to the game's.
+namespace director {
+constexpr std::uint32_t kSceneObj = 0x31u;        // MR::getCameraDirector(): SceneObjHolder slot
+constexpr std::uint32_t kSize = 0x1F4u;
+constexpr std::uint32_t kName = 0x04u;            // NameObj::mName
+constexpr std::uint32_t kStack = 0x10u;           // CameraManStack* {CameraMan** elements, u32 capacity, u32 count}
+constexpr std::uint32_t kOnlyCamera = 0x14u;
+constexpr std::uint32_t kPoseParam1 = 0x18u;
+constexpr std::uint32_t kPoseParam2 = 0x1Cu;
+constexpr std::uint32_t kHolder = 0x20u;
+constexpr std::uint32_t kChunkHolder = 0x24u;     // shared with the game's (the stage's camera parameters)
+constexpr std::uint32_t kTargetHolder = 0x34u;
+constexpr std::uint32_t kShaker = 0x38u;
+constexpr std::uint32_t kViewInterpolator = 0x3Cu;
+constexpr std::uint32_t kCover = 0x40u;
+constexpr std::uint32_t kRotChecker = 0x44u;
+constexpr std::uint32_t kCameraManGame = 0x48u;
+constexpr std::uint32_t kEventNum = 0x16Cu;
+constexpr std::uint32_t kCoverSize = 0x4Cu;
+// Constructors and sizes as CameraDirector::CameraDirector makes them.
+constexpr std::uint32_t kNew = 0x80409AF8u;       // operator new(u32)
+constexpr std::uint32_t kNewArray = 0x80409B1Cu;  // operator new[](u32)
+constexpr std::uint32_t kOnlyCameraCtor = 0x800B6C68u, kOnlyCameraSize = 0x40u;
+constexpr std::uint32_t kPoseParamCtor = 0x800AB14Cu, kPoseParamSize = 0x58u;
+constexpr std::uint32_t kHolderCtor = 0x800A0D98u, kHolderSize = 0x1Cu;
+constexpr std::uint32_t kTargetHolderCtor = 0x800AF85Cu, kTargetHolderSize = 0x10u;
+constexpr std::uint32_t kTargetHolderSetPlayer = 0x800AF914u;  // CameraTargetHolder::set(const MarioActor*)
+constexpr std::uint32_t kShakerCtor = 0x800AD784u, kShakerSize = 0x54u;
+constexpr std::uint32_t kInterpolatorCtor = 0x800B37D8u, kInterpolatorSize = 0xC0u;
+constexpr std::uint32_t kRotCheckerCtor = 0x800AD084u, kRotCheckerSize = 0x34u;
+constexpr std::uint32_t kManGameCtor = 0x800A4B14u, kManGameSize = 0x78u;  // (holder, chunk holder, name)
+constexpr std::uint32_t kPush = 0x800992A4u;      // CameraDirector::push(CameraMan*)
+constexpr std::uint32_t kStarted = 0x80099E8Cu;   // CameraDirector::started(): no start-position camera
+constexpr std::uint32_t kMovement = 0x800991C0u;  // CameraDirector::movement()
+// CameraContext's view, inverse, projection and lens (+0x0C to +0xC4), saved around the second director's run.
+constexpr std::uint32_t kContextFirst = 0x0Cu;
+constexpr std::uint32_t kContextEnd = 0xC4u;
+}  // namespace director
 constexpr std::uint32_t kPlayerHeapSize = 0x500000u;          // PlayerHeapHolder's heaps, one character's set
 // Room for the second character's model, face and shadow archives next to the first's.
 constexpr std::uint32_t kPartnerHeapExtra = 0x200000u;
@@ -532,6 +571,10 @@ struct State {
     // The first player's camera and projection as the game made them, restored after the second half.
     coop::CameraMatrices camera1;
     std::array<float, 16> projection{};
+    // The second player's game camera (second_director): its CameraDirector and the view it made this frame.
+    std::uint32_t director2 = 0u;
+    bool director2_view_valid = false;
+    coop::CameraMatrices director2_view;
     // The camera's lens, for the second player's clipping.
     float fovy = 45.0f;
     float aspect = 16.0f / 9.0f;
@@ -687,6 +730,7 @@ void add_partner_resources(const Guest& guest, State& s) {
 // Right after the game sets up its player, the second player: the same MarioActor as the other character,
 // beside the first, out of the movement list.
 void create_hud(const Guest& guest, State& s);
+void make_second_director(const Guest& guest, State& s);
 void on_stage_start(const Guest& guest, State& s);
 void tint_second_meter(const Guest& guest, const State& s);
 
@@ -765,6 +809,7 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     // The second player's HUD is made with the stage's own objects: layouts made once the stage runs are not
     // moved or drawn.
     create_hud(guest, s);
+    make_second_director(guest, s);
     trace("players: first %08X (%s), second %08X (%s)", first, s.own == coop::Character::Luigi ? "Luigi" : "Mario",
           second, s.own == coop::Character::Luigi ? "Mario" : "Luigi");
 }
@@ -898,6 +943,10 @@ void update_second_camera(const Guest& guest, State& s, coop::Vec3 first_positio
         }
     }
 
+    // His own game camera (run_second_director) when it has a view: the stage's camera areas, Pull Star framing
+    // and the rest as the first player has them. The follow camera above is the fallback.
+    if (s.director2_view_valid) s.follow_view = s.director2_view;
+
     // The line follows the first player's view as their half shows it: while it is held (the game camera is
     // the second player's event or warp camera) the held view, so the line does not swing with that camera.
     const coop::CameraMatrices layout_camera = s.hold.active() ? s.hold.view(first_position) : first_camera;
@@ -996,6 +1045,131 @@ void set_game_player(const Guest& guest, State& s, bool second) {
     guest.call(fn::kSetMarioActor, holder, second ? s.second : s.first);
     if (pads) swap_pads(guest, pad_holder);
     s.moving_second = second;
+}
+
+// ---- The second player's game camera (docs/MULTIPLAYER.md "Split screen") ----
+// The game's camera (CameraDirector: its camera men, the stage's camera areas and ground camera codes, every camera
+// type) follows the game's player. The second player gets a second CameraDirector, made as the game makes its own
+// but sharing the stage's camera parameters, rails and registers, with its own cameras, target (him), pose,
+// interpolation and shaker; it runs each frame after the game's, with him as the game's player, and its view is his
+// half's camera. Not made through CameraDirector's constructor: that would join the scene (and run by itself), make
+// a second CameraCover and centre-screen blur.
+
+std::uint32_t director_slot(const Guest& guest) {
+    std::uint32_t object = guest.u32(guest.context()->gpr[13] - 0x3A78u);
+    for (const std::uint32_t offset : {0x24u, 0xACu, 0x10u}) {
+        if (!plausible(object)) return 0u;
+        object = guest.u32(object + offset);
+    }
+    return plausible(object) ? object + director::kSceneObj * 4u : 0u;
+}
+
+bool second_camera_by_director() {
+    static const bool enabled = [] {
+        char* value = nullptr;
+        std::size_t length = 0u;
+        const bool off = _dupenv_s(&value, &length, "GALAXY_COOP_GAME_CAMERA") == 0 && value != nullptr && value[0] == '0';
+        std::free(value);
+        return !off;
+    }();
+    return enabled;
+}
+
+void make_second_director(const Guest& guest, State& s) {
+    s.director2 = 0u;
+    s.director2_view_valid = false;
+    if (!second_camera_by_director() || !plausible(s.second)) return;
+    SavedContext saved(guest.context());
+    const std::uint32_t slot = director_slot(guest);
+    const std::uint32_t first = slot != 0u ? guest.u32(slot) : 0u;
+    if (!plausible(first)) {
+        trace("second camera: no game camera director yet");
+        return;
+    }
+    const auto make = [&](std::uint32_t size) {
+        const std::uint32_t at = guest.call(director::kNew, size);
+        if (plausible(at)) {
+            for (std::uint32_t i = 0u; i < size; i += 4u) guest.set_u32(at + i, 0u);
+        }
+        return plausible(at) ? at : 0u;
+    };
+    const std::uint32_t second = make(director::kSize);
+    const std::uint32_t stack = make(0xCu);
+    const std::uint32_t elements = guest.call(director::kNewArray, 0x20u);
+    const std::uint32_t only = make(director::kOnlyCameraSize);
+    const std::uint32_t pose1 = make(director::kPoseParamSize);
+    const std::uint32_t pose2 = make(director::kPoseParamSize);
+    const std::uint32_t holder = make(director::kHolderSize);
+    const std::uint32_t target = make(director::kTargetHolderSize);
+    const std::uint32_t shaker = make(director::kShakerSize);
+    const std::uint32_t interpolator = make(director::kInterpolatorSize);
+    const std::uint32_t cover = make(director::kCoverSize);
+    const std::uint32_t rot = make(director::kRotCheckerSize);
+    const std::uint32_t man = make(director::kManGameSize);
+    for (const std::uint32_t at : {second, stack, elements, only, pose1, pose2, holder, target, shaker, interpolator,
+                                   cover, rot, man}) {
+        if (!plausible(at)) {
+            trace("second camera: out of memory");
+            return;
+        }
+    }
+    // The game's director as it stands (vtable, shared holders, flags), then its own parts.
+    for (std::uint32_t i = 0u; i < director::kSize; i += 4u) guest.set_u32(second + i, guest.u32(first + i));
+    const std::uint32_t name = guest.u32(first + director::kName);
+    guest.set_u32(stack + 0u, elements);
+    guest.set_u32(stack + 4u, 8u);
+    guest.set_u32(stack + 8u, 0u);
+    guest.call(director::kOnlyCameraCtor, only, name);
+    guest.call(director::kPoseParamCtor, pose1);
+    guest.call(director::kPoseParamCtor, pose2);
+    guest.call(director::kHolderCtor, holder, name);
+    guest.call(director::kTargetHolderCtor, target);
+    guest.call(director::kTargetHolderSetPlayer, target, s.second);
+    guest.call(director::kShakerCtor, shaker, name);
+    guest.call(director::kInterpolatorCtor, interpolator);
+    guest.call(director::kRotCheckerCtor, rot);
+    guest.call(director::kManGameCtor, man, holder, guest.u32(first + director::kChunkHolder), name);
+    guest.set_u32(second + director::kStack, stack);
+    guest.set_u32(second + director::kOnlyCamera, only);
+    guest.set_u32(second + director::kPoseParam1, pose1);
+    guest.set_u32(second + director::kPoseParam2, pose2);
+    guest.set_u32(second + director::kHolder, holder);
+    guest.set_u32(second + director::kTargetHolder, target);
+    guest.set_u32(second + director::kShaker, shaker);
+    guest.set_u32(second + director::kViewInterpolator, interpolator);
+    guest.set_u32(second + director::kCover, cover);  // CameraDirector::cover only sets its flags
+    guest.set_u32(second + director::kRotChecker, rot);
+    guest.set_u32(second + director::kCameraManGame, man);
+    guest.set_u32(second + director::kEventNum, 0u);
+    guest.call(director::kPush, second, man);
+    guest.call(director::kStarted, second);
+    s.director2 = second;
+    trace("second camera: director %08X (the game's %08X)", second, first);
+}
+
+// After the game's camera has moved (its movement category): the second player's, as the game's player, with
+// MR::getCameraDirector answering it; CameraContext (which it writes) is the game camera's again after.
+void run_second_director(const Guest& guest, State& s) {
+    s.director2_view_valid = false;
+    if (!plausible(s.director2) || !plausible(s.second) || s.down[1].down || s.level_start) return;
+    const std::uint32_t context = camera_context(guest);
+    const std::uint32_t slot = director_slot(guest);
+    if (context == 0u || slot == 0u) return;
+    SavedContext saved(guest.context());
+    std::array<std::uint32_t, (director::kContextEnd - director::kContextFirst) / 4u> kept{};
+    for (std::size_t i = 0; i < kept.size(); ++i) kept[i] = guest.u32(context + director::kContextFirst + 4u * static_cast<std::uint32_t>(i));
+    const std::uint32_t game_director = guest.u32(slot);
+    guest.set_u32(slot, s.director2);
+    set_game_player(guest, s, true);
+    guest.call(director::kMovement, s.director2);
+    set_game_player(guest, s, false);
+    guest.set_u32(slot, game_director);
+    const coop::CameraMatrices view = read_camera(guest, context);
+    for (std::size_t i = 0; i < kept.size(); ++i) guest.set_u32(context + director::kContextFirst + 4u * static_cast<std::uint32_t>(i), kept[i]);
+    if (finite(view.view) && finite(view.inverse)) {
+        s.director2_view = view;
+        s.director2_view_valid = true;
+    }
 }
 
 // Puts a player (0 the first, 1 the second) at a position, made the game's player for MR::setPlayerPos.
@@ -2902,7 +3076,12 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
         if (s.category_depth == 0u) return;
         --s.category_depth;
         const std::uint32_t category = s.category_depth < s.categories.size() ? s.categories[s.category_depth] : 0u;
-        if (category != kMovementTypePlayer || s.moving_second || !plausible(s.first) || !plausible(s.second)) return;
+        if (s.moving_second || !plausible(s.first) || !plausible(s.second)) return;
+        if (category == kMovementTypeCamera) {
+            run_second_director(guest, s);
+            return;
+        }
+        if (category != kMovementTypePlayer) return;
         move_second_player(guest, s);
         return;
     }
