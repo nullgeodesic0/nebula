@@ -1,6 +1,8 @@
 #include "galaxy/netplay.h"
 #include "galaxy/netplay_session.h"
 
+#include "galaxy/coop.h"
+#include "galaxy/coop_guest.h"
 #include "guest_access.h"
 
 #include <array>
@@ -223,6 +225,20 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
             }
             n.rate_start_qpc = ticks;
         }
+        // GALAXY_SIM_PROFILE_WINDOW=<from>,<to> (with GALAXY_SIM_PROFILE=1 GALAXY_SIM_PROFILE_RESIM=1): a profile of
+        // those frames alone, unrendered as a re-simulation is.
+        static const std::pair<std::uint32_t, std::uint32_t> profile_window = [] {
+            const std::string value = env("GALAXY_SIM_PROFILE_WINDOW");
+            const std::size_t comma = value.find(',');
+            if (comma == std::string::npos) return std::pair<std::uint32_t, std::uint32_t>{0u, 0u};
+            return std::pair<std::uint32_t, std::uint32_t>{
+                static_cast<std::uint32_t>(std::strtoul(value.c_str(), nullptr, 10)),
+                static_cast<std::uint32_t>(std::strtoul(value.c_str() + comma + 1u, nullptr, 10))};
+        }();
+        if (profile_window.second != 0u && n.snapshot_hooks.resimulating != nullptr &&
+            (n.frame == profile_window.first || n.frame == profile_window.second)) {
+            n.snapshot_hooks.resimulating(n.snapshot_hooks.user, n.frame == profile_window.first);
+        }
         if (n.resimulating && n.frame == n.snapshot_restore_frame) {
             n.resimulating = false;
             if (n.snapshot_hooks.resimulating != nullptr) n.snapshot_hooks.resimulating(n.snapshot_hooks.user, false);
@@ -323,10 +339,11 @@ void netplay_kpad_after(PpcContext* context, GuestMemoryV1* memory, const Native
         // Online: this PC's controller (the local first-player read) is its player's input `delay` frames on;
         // the first player plays the host's input and the second the joiner's, on both PCs.
         if (channel == 0u) {
-            std::array<std::uint8_t, kStatusSize> local{};
-            const std::uint32_t local_count = context->gpr[3];
-            if (static_cast<std::int32_t>(local_count) > 0) read(n.buffer, local.data(), kStatusSize);
-            net_local_input(n.frame, local_count, local.data());
+            // The game's Remote is neutral in deterministic mode (native_host.cpp): this PC's player is its
+            // controller as the input thread published it, a KPAD status a frame.
+            static coop::KpadSynth s_local_kpad;
+            const coop::KpadStatusBytes local = s_local_kpad.next(coop_local_input());
+            net_local_input(n.frame, 1u, local.data());
         }
         const NetInput& input = net_input(n.frame, channel == 0u ? 0u : 1u);
         write(n.buffer, input.status.data(), kStatusSize);

@@ -3,6 +3,7 @@
 #include "galaxy/ai_dma_timing.h"
 #include "galaxy/native_audio_anomaly.h"
 #include "galaxy/netplay.h"
+#include "galaxy/netplay_session.h"
 #include "galaxy/native_audio_queue.h"
 #include "galaxy/agent.h"
 #include "galaxy/button_prompts.h"
@@ -8844,7 +8845,8 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     constexpr std::size_t kNoPartnerPad = static_cast<std::size_t>(-1);
     std::size_t partner_pad = kNoPartnerPad;
     galaxy::coop::PartnerInput partner_input{};
-    if (galaxy::coop_enabled() && use_pads) {
+    // Online, each PC is one player: every controller here is theirs.
+    if (galaxy::coop_enabled() && use_pads && !galaxy::net_session_requested()) {
         std::size_t connected = 0u;
         for (std::size_t index = 0; index < live_pads.size(); ++index) {
             if (!live_pads[index].sample.connected) continue;
@@ -9433,6 +9435,27 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     (void)advance_nunchuk_shake_accel(
         snapshot, held(WiiTarget::NunchukShake) || motion_shake_nunchuk,
         s_previous_nunchuk_shake, s_nunchuk_shake_frames);
+    if (galaxy::net_session_requested()) {
+        // Online: this PC's player, as the Remote and Nunchuk above have it (netplay.cpp makes its KPAD status).
+        namespace button = galaxy::coop::button;
+        galaxy::coop::PartnerInput local{};
+        local.connected = true;
+        const auto bit = [](bool on, std::uint32_t mask) { return on ? mask : 0u; };
+        local.buttons = bit(snapshot.buttons.a, button::kA) | bit(snapshot.buttons.b, button::kB) |
+                        bit(snapshot.buttons.one, button::kOne) | bit(snapshot.buttons.two, button::kTwo) |
+                        bit(snapshot.buttons.plus, button::kPlus) | bit(snapshot.buttons.minus, button::kMinus) |
+                        bit(snapshot.buttons.up, button::kUp) | bit(snapshot.buttons.down, button::kDown) |
+                        bit(snapshot.buttons.left, button::kLeft) | bit(snapshot.buttons.right, button::kRight) |
+                        bit(snapshot.nunchuk.c, button::kC) | bit(snapshot.nunchuk.z, button::kZ) |
+                        bit(snapshot.buttons.home, button::kHome);
+        local.stick_x = stick_x;
+        local.stick_y = stick_y;
+        local.shake = shake_pressed || held(WiiTarget::NunchukShake) || motion_shake_nunchuk;
+        local.pointer_valid = ir_active;
+        local.pointer_x = s_pointer_x;
+        local.pointer_y = s_pointer_y;
+        galaxy::coop_publish_local_input(local);
+    }
 
     const std::uint16_t buttons = wiimote_trace_button_bits(snapshot.buttons);
     const bool trace_interesting =

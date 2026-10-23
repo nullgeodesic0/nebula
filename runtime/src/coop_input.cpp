@@ -71,6 +71,25 @@ coop::PartnerInput coop_partner_input() {
     return slot.input;
 }
 
+namespace {
+PartnerInputSlot& local_input_slot() {
+    static PartnerInputSlot slot;
+    return slot;
+}
+}  // namespace
+
+void coop_publish_local_input(const coop::PartnerInput& input) noexcept {
+    PartnerInputSlot& slot = local_input_slot();
+    std::lock_guard lock(slot.mutex);
+    slot.input = input;
+}
+
+coop::PartnerInput coop_local_input() {
+    PartnerInputSlot& slot = local_input_slot();
+    std::lock_guard lock(slot.mutex);
+    return slot.input;
+}
+
 void agent_set_pad(unsigned player, const agent::Pad& pad) noexcept {
     if (player > 1u) return;
     AgentPadSlots& slots = agent_pad_slots();

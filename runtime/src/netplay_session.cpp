@@ -54,7 +54,6 @@ constexpr const char* kHostSettingKeys[] = {
 constexpr std::uint32_t kInputsPerPacket = 8u;  // every packet repeats the last frames: a lost one costs nothing
 constexpr std::uint32_t kRing = 1024u;          // frames of inputs kept
 constexpr std::uint32_t kHashEvery = 120u;
-constexpr double kFramePeriodSeconds = 1001.0 / 60000.0;  // NTSC 59.94 Hz
 
 #pragma pack(push, 1)
 struct Header {
@@ -116,9 +115,6 @@ struct Session {
     bool any_remote = false;
     std::uint32_t peer_newest_of_ours = 0u;       // what the peer says it has of ours
     LARGE_INTEGER frequency{};
-    std::int64_t pace_origin = 0;                 // QPC at pace_origin_frame
-    std::uint32_t pace_origin_frame = 0u;
-    bool paced = false;
     std::vector<std::pair<std::uint32_t, std::uint64_t>> my_hashes;  // (frame, hash), recent
     std::uint64_t stalls = 0u;
     double stalled_ms = 0.0;
@@ -730,41 +726,8 @@ void net_frame_begin(std::uint32_t frame, const GuestMemoryV1* memory) {
     receive(s);
     if (!s.connected && !s.host) send_hello(s, Packet::Hello);
     s.local_peek_counts[frame % kRing] = 0u;
-    // 59.94 Hz: each frame starts at its own deadline from the pacing origin. A stall (waiting for the peer)
-    // moves the origin instead of making later frames rush to catch up.
-    const std::int64_t period = static_cast<std::int64_t>(kFramePeriodSeconds * static_cast<double>(s.frequency.QuadPart));
-    std::int64_t now = now_qpc();
-    if (!s.paced) {
-        s.paced = true;
-        s.pace_origin = now;
-        s.pace_origin_frame = frame;
-    }
-    std::int64_t deadline = s.pace_origin + static_cast<std::int64_t>(frame - s.pace_origin_frame) * period;
-    // Running ahead of the peer (it has fewer of our inputs than we have of its): give it a millisecond.
-    if (s.connected && s.any_remote && s.newest_local_frame > s.peer_newest_of_ours + s.delay) {
-        deadline += s.frequency.QuadPart / 1000;
-    }
-    if (now > deadline + 6 * period) {
-        s.pace_origin = now;
-        s.pace_origin_frame = frame;
-        deadline = now;
-    }
-    // A high-resolution waitable timer, not Sleep: Windows ignores a background or occluded process's timer
-    // resolution, which makes Sleep(1) last a whole 15.6 ms tick and the frame late.
-    static const HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                                                       TIMER_ALL_ACCESS);
-    while (now < deadline) {
-        const double remaining_ms = 1000.0 * static_cast<double>(deadline - now) / static_cast<double>(s.frequency.QuadPart);
-        if (remaining_ms > 1.0 && timer != nullptr) {
-            LARGE_INTEGER due{};
-            due.QuadPart = -static_cast<LONGLONG>((remaining_ms - 0.5) * 10000.0);  // 100 ns units, relative
-            if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, 50);
-        } else {
-            SwitchToThread();
-        }
-        receive(s);
-        now = now_qpc();
-    }
+    // No pacing here: the guest's virtual time is kept to real time (native_runtime.cpp
+    // deterministic_advance_to), as a game frame may span several VI frames.
     if (frame % kHashEvery == 0u && s.connected) {
         const std::uint64_t hash = mem1_hash(memory);
         s.my_hashes.emplace_back(frame, hash);
@@ -826,8 +789,6 @@ const NetInput& net_input(std::uint32_t frame, unsigned player) {
         Sleep(0);
     }
     s.stalled_ms += 1000.0 * static_cast<double>(now_qpc() - started) / static_cast<double>(s.frequency.QuadPart);
-    // A wait moves the pacing origin: the frames after it run at their normal rate, not in a burst.
-    s.paced = false;
     return from.input;
 }
 

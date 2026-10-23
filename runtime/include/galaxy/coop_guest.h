@@ -58,4 +58,10 @@ void coop_publish_partner_input(const coop::PartnerInput& input) noexcept;
 using CoopPartnerInputSource = bool (*)(coop::PartnerInput& out);
 void coop_set_partner_input_source(CoopPartnerInputSource source) noexcept;
 
+// Online play: this PC's whole controller input (every pad and the keyboard: one player a PC), published by the
+// input thread. The game's own Remote reads see a neutral Remote in deterministic mode, so netplay.cpp builds this
+// PC's player's KPAD status from this instead.
+void coop_publish_local_input(const coop::PartnerInput& input) noexcept;
+[[nodiscard]] coop::PartnerInput coop_local_input();
+
 }  // namespace galaxy

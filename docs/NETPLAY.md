@@ -26,16 +26,19 @@ Both PCs must run the same build and content (a mismatched build is refused).
 
 - **Deterministic mode** (`GALAXY_DETERMINISTIC=1`, implied by a session): the game's clock comes from the
   instructions executed, not the wall clock; deadlines, disc and NAND completions, PE (draw-done) events and the
-  native DSP all happen at fixed points of guest execution. Replays of one input recording are byte-identical
-  on any PC, at any speed (docs/AGENT_TESTING.md, "Determinism probe").
-- **Inputs** (`runtime/src/netplay.cpp`, `runtime/src/netplay_session.cpp`): at the per-frame controller read
-  each PC's own controller becomes its player's input `delay` frames later, sent over UDP (every packet repeats
-  the last 8 frames, so a lost packet costs nothing). A frame waits for the peer's input if it has not arrived
+  native DSP all happen at fixed points of guest execution (a checkpoint, about one loop iteration, is 3 ticks of
+  the 60.75 MHz time base: GALAXY_TICKS_PER_CHECKPOINT, the same on both PCs). Replays of one input recording are
+  byte-identical on any PC, at any speed (docs/AGENT_TESTING.md, "Determinism probe").
+- **Inputs** (`runtime/src/netplay.cpp`, `runtime/src/netplay_session.cpp`): the game's own Wii Remote is neutral
+  in deterministic mode; at the per-frame controller read each PC's controllers (every pad and the keyboard: one
+  player a PC), as the input thread published them, become a KPAD status: its player's input `delay` frames later,
+  sent over UDP (every packet repeats the last 8 frames, so a lost packet costs nothing). A frame waits for the peer's input if it has not arrived
   (lockstep). Every other read of a controller in the game, and the co-op second player's camera steering, use
   the same synchronised input.
 - **EFB peeks** (the Star Pointer reads screen depth every frame, a GPU-dependent value) are the host's answers,
   carried with its input.
-- **Pacing**: frames start at 59.94 Hz; a wait for the peer moves the pacing origin instead of bursting.
+- **Pacing**: guest time is kept to real time (as in paced deterministic play), not game frames: a game frame can
+  span several VI frames, and audio must play at the rate it is made.
 - **Session start**: the host snapshots its save directory (every file and directory with its NAND metadata
   stream) and its game settings (co-op, moveset options, text speed, language, custom model/voice/animations,
   audio gains) when it starts. The joiner downloads that bundle before its game reads its save and plays from

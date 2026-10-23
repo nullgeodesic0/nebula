@@ -5189,6 +5189,15 @@ bool deterministic_mode() {
             (void)_putenv_s("GALAXY_NATIVE_MOUSE_POINTER_FRAME", "0");
             // The dynamic aspect takes the window's shape into the guest's camera: two PCs' windows differ.
             (void)_wputenv_s(L"GALAXY_EXPERIMENTAL_DYNAMIC_ASPECT", L"0");
+            // A checkpoint is about one loop iteration of guest code: 8 ticks (~100 Broadway cycles), not the
+            // default 50, which made the title screen's ~70k iterations a frame take 5.5 VI frames of guest time.
+            // Both PCs of a session must use the same value.
+            if (char* value = nullptr; _dupenv_s(&value, nullptr, "GALAXY_TICKS_PER_CHECKPOINT") == 0 &&
+                                       value == nullptr) {
+                (void)_putenv_s("GALAXY_TICKS_PER_CHECKPOINT", "3");
+            } else {
+                std::free(value);
+            }
             if (deterministic_unpaced()) {
                 // Nothing paces the run: frames are not shown (the render thread then never waits on the
                 // display) and audio is off (its output would block once real time fell behind). The renderer
@@ -18827,8 +18836,9 @@ void deterministic_advance_to(RuntimeState& state, std::uint64_t target_ticks, c
     const std::uint64_t now = runtime_time_base_ticks(state);
     if (target_ticks <= now) return;
     trace_deterministic_advance(state, why, now, target_ticks);
-    // Unpaced probes never wait; an online session paces whole frames itself (netplay_session.cpp, 59.94 Hz).
-    if (deterministic_unpaced() || galaxy::net_session_requested()) {
+    // Unpaced probes never wait. An online session waits here too: virtual time kept to real time is what paces
+    // it (a game frame can span several VI frames, so pacing game frames would make audio faster than it plays).
+    if (deterministic_unpaced()) {
         state.virtual_idle_ticks += target_ticks - now;
         (void)runtime_time_base_ticks(state);  // publishes what is now due
         return;
