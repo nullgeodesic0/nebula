@@ -1,7 +1,9 @@
 #include "galaxy/native_input.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <condition_variable>
 #include <deque>
 #include <limits>
@@ -14,6 +16,28 @@
 #include "galaxy/windows_power.h"
 
 namespace galaxy::input {
+
+namespace {
+std::atomic<bool> g_home_button_enabled{false};
+}  // namespace
+
+void set_home_button_enabled(bool enabled) noexcept {
+    g_home_button_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+bool home_button_enabled() noexcept {
+    return g_home_button_enabled.load(std::memory_order_relaxed);
+}
+
+bool home_menu_wanted(bool setting) noexcept {
+    static const int env = [] {
+        char value[8]{};
+        std::size_t length = 0u;
+        if (getenv_s(&length, value, sizeof(value), "GALAXY_HOME_MENU") != 0 || length <= 1u) return -1;
+        return value[0] == '0' ? 0 : 1;
+    }();
+    return env < 0 ? setting : env == 1;
+}
 
 bool parse_native_input_script_u64(
     std::string_view text,
@@ -109,7 +133,7 @@ void write_core_buttons(
     if (buttons.b) byte1 |= 0x04u;
     if (buttons.a) byte1 |= 0x08u;
     if (buttons.minus) byte1 |= 0x10u;
-    if (buttons.home) byte1 |= 0x80u;
+    if (buttons.home && home_button_enabled()) byte1 |= 0x80u;
     if (include_accel_lsb) {
         // A real Wii Remote carries the accelerometer's available low bits in
         // otherwise-unused core-button bits. RMGE01's raw-HID decoder masks

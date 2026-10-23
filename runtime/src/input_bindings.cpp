@@ -368,15 +368,9 @@ BindingTable version6_binding_table(ControlScheme scheme) {
     return table;
 }
 
-// The Super Mario Galaxy on Switch shape with the player's choices: A or B
-// jump (B backs out of menus), L/LB Star Bits, ZL/LT crouch, the north face
-// button, ZR (Xbox Y/RB/RT) or a shake spin, the left-stick click resets the
-// camera (Wii C), R / right-stick click recenters (held: pinned at the
-// centre), the gyro points and the right stick turns the camera (the pointer
-// when the gyro is off; Xbox: the pointer). The west face button (Xbox X,
-// DualSense square, Switch Y) is Wii 1, the Odyssey moveset's cap button (dive,
-// roll, roll boost), and no longer spins.
-BindingTable default_binding_table(ControlScheme scheme) {
+// Default bindings of controls version 7 (Wii HOME on keyboard H, Switch Home and DualSense PS), kept for
+// migration.
+BindingTable version7_binding_table(ControlScheme scheme) {
     BindingTable table = version6_binding_table(scheme);
     if (scheme == ControlScheme::Keyboard) {
         return table;
@@ -390,6 +384,21 @@ BindingTable default_binding_table(ControlScheme scheme) {
     } else {
         set(table, T::Shake, {button(pad::kNorthBit), axis_pos(PadAxis::RightTrigger)});
     }
+    return table;
+}
+
+// The Super Mario Galaxy on Switch shape with the player's choices: A or B
+// jump (B backs out of menus), L/LB Star Bits, ZL/LT crouch, the north face
+// button, ZR (Xbox Y/RB/RT) or a shake spin, the left-stick click resets the
+// camera (Wii C), R / right-stick click recenters (held: pinned at the
+// centre), the gyro points and the right stick turns the camera (the pointer
+// when the gyro is off; Xbox: the pointer). The west face button (Xbox X,
+// DualSense square, Switch Y) is Wii 1, the Odyssey moveset's cap button (dive,
+// roll, roll boost), and no longer spins. Wii HOME is unbound: the game's HOME
+// Menu is off (ControlsConfig::home_menu).
+BindingTable default_binding_table(ControlScheme scheme) {
+    BindingTable table = version7_binding_table(scheme);
+    table[WiiTarget::Home] = {};
     return table;
 }
 
@@ -442,12 +451,13 @@ unsigned migrate_legacy_controls(ControlsConfig& config, unsigned version) noexc
         const BindingTable version3 = version3_binding_table(scheme);
         const BindingTable version5 = version5_binding_table(scheme);
         const BindingTable version6 = version6_binding_table(scheme);
+        const BindingTable version7 = version7_binding_table(scheme);
         const BindingTable current = default_binding_table(scheme);
         for (std::size_t t = 0; t < kWiiTargetCount; ++t) {
             TargetBindings& bindings = config.tables[s].targets[t];
             const bool old_default = bindings == legacy.targets[t] || bindings == version2.targets[t] ||
                                      bindings == version3.targets[t] || bindings == version5.targets[t] ||
-                                     bindings == version6.targets[t];
+                                     bindings == version6.targets[t] || bindings == version7.targets[t];
             if (old_default && bindings != current.targets[t]) {
                 bindings = current.targets[t];
                 ++changed;
@@ -461,7 +471,8 @@ unsigned migrate_legacy_controls(ControlsConfig& config, unsigned version) noexc
             tuning.gyro_pointer = current_tuning.gyro_pointer;
             ++changed;
         }
-        if (version < kControlsVersion && scheme_is_gamepad(scheme)) {
+        // The still-pointer and vibration defaults changed in version 5; a later file's values are choices.
+        if (version < 5u && scheme_is_gamepad(scheme)) {
             const bool old_seconds =
                 (version < 4u && tuning.pointer_hide_seconds == kVersion3PointerHideSeconds) ||
                 tuning.pointer_hide_seconds == kVersion4PointerHideSeconds;
@@ -651,6 +662,11 @@ void add_binding(TargetBindings& bindings, InputSource source) noexcept {
 }
 
 bool apply_controls_setting(ControlsConfig& config, std::string_view key_text, std::string_view value) {
+    if (key_text == "home_menu") {
+        bool flag = false;
+        if (parse_bool(value, flag)) config.home_menu = flag;
+        return true;
+    }
     const bool bind = key_text.starts_with("bind.");
     const bool tune = key_text.starts_with("tune.");
     if (!bind && !tune) return false;
@@ -741,7 +757,7 @@ ControlsConfig sanitize_controls_config(ControlsConfig config) noexcept {
 }
 
 std::string format_controls_settings(const ControlsConfig& config) {
-    std::string text;
+    std::string text = std::string("home_menu=") + (config.home_menu ? "on" : "off") + "\n";
     for (std::size_t s = 0; s < kControlSchemeCount; ++s) {
         const auto scheme = static_cast<ControlScheme>(s);
         const std::string prefix = std::string(control_scheme_id(scheme)) + ".";

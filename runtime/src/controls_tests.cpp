@@ -122,6 +122,7 @@ void test_ini_round_trip() {
     config.tune(ControlScheme::Keyboard).invert_pointer_y = true;
     config.tune(ControlScheme::Xbox).vibration = false;
     config.tune(ControlScheme::SwitchPro).rumble = 70;
+    config.home_menu = true;
     const std::string text = format_controls_settings(config);
     ControlsConfig parsed = default_controls_config();
     std::size_t lines = 0;
@@ -229,7 +230,7 @@ void test_evaluation() {
            "merge ORs buttons and keeps the larger axis");
 
     const KeyList keys = referenced_keys(config.table(ControlScheme::Keyboard));
-    expect(keys.count == 32u, "default keyboard map reads the 32 keys of the fixed map");
+    expect(keys.count == 31u, "default keyboard map reads the 31 keys of the fixed map (no H: HOME is unbound)");
 }
 
 void test_chord_and_capture() {
@@ -351,8 +352,8 @@ void test_switch_pro_decoding() {
     const LogicalInput logic = evaluate_pad_bindings(
         default_binding_table(ControlScheme::SwitchPro), sample, 96.0f / 255.0f);
     expect(logic.held(WiiTarget::A) && logic.held(WiiTarget::B) && logic.held(WiiTarget::Plus) &&
-               logic.held(WiiTarget::Home) && logic.held(WiiTarget::DpadUp) && !logic.held(WiiTarget::Z) && logic.held(WiiTarget::Shake),
-           "Switch defaults: A->A, L->B, ZR->spin, Plus, Home, D-pad");
+               !logic.held(WiiTarget::Home) && logic.held(WiiTarget::DpadUp) && !logic.held(WiiTarget::Z) && logic.held(WiiTarget::Shake),
+           "Switch defaults: A->A, L->B, ZR->spin, Plus, D-pad; Home is unbound");
 
     // Simple 0x3F report (Bluetooth default mode).
     std::vector<std::uint8_t> simple(12, 0);
@@ -616,13 +617,20 @@ void test_dualsense() {
                    buffer[43] == 0x02 && buffer[45] == 0x04 && buffer[48] == 0x40,
                "dualsense lightbar and player LED report");
     }
-    // Bindings: positional Xbox faces, PlayStation names, PS button is HOME.
+    // Bindings: positional Xbox faces, PlayStation names; PS and the touchpad are unbound.
     {
         const BindingTable table = default_binding_table(ControlScheme::DualSense);
         expect(table[WiiTarget::A][0] == InputSource{SourceKind::Button, pad::kSouthBit},
                "dualsense A is Cross");
-        expect(table[WiiTarget::Home][0] == InputSource{SourceKind::Button, pad::kHomeBit},
-               "dualsense HOME is the PS button");
+        expect(table[WiiTarget::Home][0].empty(), "dualsense HOME is unbound (the PS button does nothing)");
+        bool touchpad_bound = false;
+        for (std::size_t t = 0; t < kWiiTargetCount; ++t) {
+            for (const InputSource& source : table.targets[t]) {
+                touchpad_bound = touchpad_bound || source == InputSource{SourceKind::Button, pad::kCaptureBit} ||
+                                 source == InputSource{SourceKind::Button, pad::kHomeBit};
+            }
+        }
+        expect(!touchpad_bound, "the dualsense touchpad click and PS button are bound to nothing");
         expect(format_input_source(ControlScheme::DualSense, {SourceKind::Button, pad::kSouthBit}) == "Cross" &&
                    format_input_source(ControlScheme::DualSense, {SourceKind::AxisPositive, 5}) == "R2",
                "dualsense names");
@@ -1479,6 +1487,48 @@ void test_defaults_and_migration() {
         ControlsConfig v6_again = v6;
         expect(migrate_legacy_controls(v6_again, kControlsVersion) == 0u && v6_again == v6,
                "a migrated version-6 file is current");
+    }
+    // A version-7 file: Wii HOME on keyboard H, Switch Home and DualSense PS goes unbound; a HOME binding the
+    // player chose, and a still-pointer time and vibration strength they set, stay.
+    {
+        ControlsConfig v7 = default_controls_config();
+        for (std::size_t i = 0; i < kControlSchemeCount; ++i) {
+            v7.tables[i] = version7_binding_table(static_cast<ControlScheme>(i));
+        }
+        expect(only(v7.table(ControlScheme::DualSense)[WiiTarget::Home], {SourceKind::Button, pad::kHomeBit}) &&
+                   only(v7.table(ControlScheme::Keyboard)[WiiTarget::Home], {SourceKind::Key, 'H'}),
+               "version 7 bound HOME to PS and H");
+        v7.table(ControlScheme::SwitchPro)[WiiTarget::Home] = {};
+        add_binding(v7.table(ControlScheme::SwitchPro)[WiiTarget::Home], {SourceKind::Button, pad::kCaptureBit});
+        v7.tune(ControlScheme::Xbox).pointer_hide_seconds = kVersion4PointerHideSeconds;
+        v7.tune(ControlScheme::DualSense).rumble = kVersion4Rumble;
+        expect(migrate_legacy_controls(v7, 7u) > 0u, "version-7 defaults migrate");
+        for (const auto scheme : {ControlScheme::Keyboard, ControlScheme::Xbox, ControlScheme::SwitchPro2,
+                                  ControlScheme::DualSense}) {
+            expect(v7.table(scheme)[WiiTarget::Home][0].empty(), "an untouched version-7 HOME binding goes");
+        }
+        expect(only(v7.table(ControlScheme::SwitchPro)[WiiTarget::Home], {SourceKind::Button, pad::kCaptureBit}),
+               "a HOME binding the player chose stays");
+        expect(v7.tune(ControlScheme::Xbox).pointer_hide_seconds == kVersion4PointerHideSeconds &&
+                   v7.tune(ControlScheme::DualSense).rumble == kVersion4Rumble,
+               "a version-7 file's still-pointer time and vibration strength are choices and stay");
+        ControlsConfig v7_again = v7;
+        expect(migrate_legacy_controls(v7_again, kControlsVersion) == 0u && v7_again == v7,
+               "a migrated version-7 file is current");
+    }
+    // HOME: unbound everywhere by default, the HOME Menu off; home_menu=on|off is a controls line.
+    {
+        const ControlsConfig defaults = default_controls_config();
+        for (std::size_t i = 0; i < kControlSchemeCount; ++i) {
+            expect(defaults.tables[i][WiiTarget::Home][0].empty(), "no default binding for Wii HOME");
+        }
+        expect(!defaults.home_menu, "the HOME Menu is off by default");
+        expect(format_controls_settings(defaults).find("home_menu=off\n") != std::string::npos,
+               "home_menu=off is written");
+        ControlsConfig on = defaults;
+        expect(apply_controls_setting(on, "home_menu", "on") && on.home_menu, "home_menu=on turns it on");
+        expect(apply_controls_setting(on, "home_menu", "0") && !on.home_menu, "home_menu=0 turns it off");
+        expect(apply_controls_setting(on, "home_menu", "maybe") && !on.home_menu, "an unknown value changes nothing");
     }
     // A version-4 file: a 2 s still pointer and 100% vibration move to 4 s and 50%. Values the player
     // changed stay.

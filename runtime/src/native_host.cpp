@@ -8613,6 +8613,9 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     }
     input_poll_diagnostic_stage(NativeInputPollStage::Keys);
     const LiveControls& controls = live_controls();
+    // The game's HOME Menu stays shut unless home_menu=on (or GALAXY_HOME_MENU=1): the report encoders
+    // drop Wii HOME from every source (native_input.h).
+    galaxy::input::set_home_button_enabled(galaxy::input::home_menu_wanted(controls.config.home_menu));
     const galaxy::input::BindingTable& keyboard_table =
         controls.config.table(galaxy::input::ControlScheme::Keyboard);
     galaxy::input::KeyboardMouseLevels keyboard_levels{};
