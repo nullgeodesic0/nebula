@@ -3134,6 +3134,9 @@ void GxBackend::reset_fifo_session_state() {
     // Every dirty guest range reaches the event parser before its next scan (render_frame), so its cached
     // display lists need no byte comparison. GALAXY_GX_EVENT_DL_VERIFY=1 compares them anyway.
     event_parser_.set_display_list_bytes_trusted(!env_flag_enabled("GALAXY_GX_EVENT_DL_VERIFY"));
+    // It looks for events alone (XF loads and event-free display lists skipped), more than halving the
+    // simulation thread's parse; the renderer keeps the full state.
+    event_parser_.set_event_classification_only(true);
     event_pending_fifo_.clear();
 
     dependency_state_ = GxState{};
@@ -5648,14 +5651,18 @@ FramePeCompletionToken GxBackend::render_frame(
         return frame_pe_completions_.issue_event_free();
     }
     if (resume_from_event_state_) {
-        // The renderer missed the re-simulated frames: it takes their GX state from the PE-event parser, which
-        // parsed every one of them, and redraws everything from scratch.
+        // The renderer missed the re-simulated frames. The PE-event parser read every one of them, but only for
+        // events: its CP registers (vertex formats, arrays, matrix indices), BP write mask and command tail are
+        // exact, and the renderer takes those. XF and BP stay as the rollback restored them, from the frame the
+        // re-simulation started at: a game resends its draw state every frame, so a register a skipped frame
+        // changed and the next one does not send again is rare and only draws with its older value until sent.
+        // Everything is redrawn from scratch.
         resume_from_event_state_ = false;
         wait_for_render_idle();
-        state_ = event_state_;
+        state_.adopt_command_processor_state(event_state_);
         state_.mark_all_dirty();
         pending_fifo_ = event_pending_fifo_;
-        dependency_state_ = event_state_;
+        dependency_state_ = state_;
         dependency_state_.mark_all_dirty();
         dependency_pending_fifo_ = event_pending_fifo_;
         invalidate_guest_derived_caches();
