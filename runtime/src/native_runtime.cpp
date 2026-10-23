@@ -30697,6 +30697,8 @@ bool hot_join_write(void* user, const char* path, std::uint32_t frame) {
 void hot_join_load_image(void* user, const std::uint8_t* data, std::size_t size) {
     auto& live = *static_cast<RollbackSnapshot*>(user);
     const auto started = std::chrono::steady_clock::now();
+    galaxy::hot_join::set_resuming(true);
+    galaxy::hot_join::trace("adopting the image");
     galaxy::hot_join::FileHeader header;
     if (!galaxy::hot_join::adopt_image(data, size, header)) {
         std::fprintf(stderr, "[hot-join] the snapshot image cannot be used\n");
@@ -30706,7 +30708,9 @@ void hot_join_load_image(void* user, const std::uint8_t* data, std::size_t size)
     root->state = live.state;
     root->context = live.context;
     root->memory = live.memory;
+    galaxy::hot_join::trace("image adopted");
     const auto here = galaxy::hot_join::host_ranges(live.state, hot_join_anchors(*live.state));
+    galaxy::hot_join::trace("ranges");
     std::vector<std::string> unmatched;
     std::size_t moved = 0u;
     std::vector<std::pair<const void*, std::size_t>> skip;
@@ -30717,7 +30721,9 @@ void hot_join_load_image(void* user, const std::uint8_t* data, std::size_t size)
     }
     // The snapshot's own objects hold a few image addresses too (shared_ptr control blocks' vtables): another PC
     // loads the runtime and the game module elsewhere.
+    galaxy::hot_join::trace("stacks relocated");
     const std::size_t moved_in_arena = galaxy::hot_join::relocate_arena(skip, header.ranges, here);
+    galaxy::hot_join::trace("arena relocated");
     for (const auto& range : header.ranges) {
         const auto same = std::find_if(here.begin(), here.end(), [&](const auto& r) { return r.name == range.name; });
         if (same != here.end() && same->lo != range.lo && range.name.rfind("tls:", 0) != 0) {
@@ -30731,12 +30737,12 @@ void hot_join_load_image(void* user, const std::uint8_t* data, std::size_t size)
         }
     }
     live.state->coop->adopt_stacks(root->scheduler);
+    galaxy::hot_join::trace("stacks adopted");
     live.state->address_space->adopt_device_snapshot(*root->devices);
     std::fprintf(stderr,
                  "[hot-join] loaded frame %u: %zu stack words and %zu snapshot words relocated, %.1f ms\n",
                  header.frame, moved, moved_in_arena, hot_join_ms_since(started));
     std::fflush(stderr);
-    galaxy::hot_join::set_resuming(true);
     galaxy::hot_join::trace("restore");
     rollback_restore(root);
 }
@@ -33585,6 +33591,17 @@ int wmain(int argc, wchar_t** argv) {
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
     HMODULE module = LoadLibraryExW(
         abs_module_path.c_str(), nullptr, kModuleSearchFlags);
+    // GALAXY_TEST_MODULE_ELSEWHERE=1 (hot join's test of another PC's image bases, docs/HOT_JOIN.md): the module
+    // loaded again with the place it took first held, so the loader puts it at another address.
+    if (module != nullptr && read_env_flag("GALAXY_TEST_MODULE_ELSEWHERE", false)) {
+        MODULEINFO info{};
+        GetModuleInformation(GetCurrentProcess(), module, &info, sizeof(info));
+        FreeLibrary(module);
+        void* const held = VirtualAlloc(info.lpBaseOfDll, info.SizeOfImage, MEM_RESERVE, PAGE_NOACCESS);
+        module = LoadLibraryExW(abs_module_path.c_str(), nullptr, kModuleSearchFlags);
+        std::fprintf(stderr, "[hot-join] test: the game module at %p instead of %p (held %p)\n",
+                     static_cast<void*>(module), info.lpBaseOfDll, held);
+    }
     if (module == nullptr) {
         std::wcerr << L"Failed to load native module: " << module_path.c_str()
                    << L"  error=" << GetLastError() << L'\n';

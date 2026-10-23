@@ -1118,6 +1118,13 @@ void live_host_frame(Session& s, std::uint32_t frame) {
         std::fprintf(stderr, "[net] test: exit galaxy at frame %u\n", frame);
         s.pending_command = static_cast<std::uint32_t>(NetCommand::ExitGalaxy);
     }
+    // GALAXY_NET_TEST_STAR_AFTER_JOIN=<frames>: a Power Star appears (its cutscene on both PCs) that many frames on.
+    static const auto s_star_after =
+        static_cast<std::uint32_t>(std::strtoul(env("GALAXY_NET_TEST_STAR_AFTER_JOIN").c_str(), nullptr, 10));
+    if (s_star_after != 0u && s.join_frame != kNone && frame == s.join_frame + s_star_after) {
+        std::fprintf(stderr, "[net] test: a Power Star appears at frame %u\n", frame);
+        s.pending_command = static_cast<std::uint32_t>(NetCommand::TestStarAppear);
+    }
     // A joiner that stopped asking before it joined is gone: back to playing alone (the lobby listens again).
     if (s.phase == Session::Live::Streaming && now_qpc() - s.last_request > s.frequency.QuadPart * 15) {
         std::fprintf(stderr, "[net] the joiner went away before joining: playing on alone\n");

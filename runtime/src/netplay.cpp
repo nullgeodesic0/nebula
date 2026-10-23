@@ -117,8 +117,16 @@ void initialize(Netplay& n) {
         }
         std::fprintf(stderr, "[netplay] replaying %zu channel frames from %s\n", n.replay.size(), path.c_str());
     }
-    if (const std::string path = env("GALAXY_STATE_HASH"); !path.empty()) {
-        if (fopen_s(&n.hashes, path.c_str(), "w") != 0) n.hashes = nullptr;
+    if (std::string path = env("GALAXY_STATE_HASH"); !path.empty()) {
+        // "{pid}": this process's id, for a game that restarts itself (a live joiner), whose new process inherits
+        // the old one's open file.
+        if (const std::size_t at = path.find("{pid}"); at != std::string::npos) {
+            path.replace(at, 5u, std::to_string(GetCurrentProcessId()));
+        }
+        if (fopen_s(&n.hashes, path.c_str(), "w") != 0) {
+            n.hashes = nullptr;
+            std::fprintf(stderr, "[netplay] cannot write the state hashes to %s\n", path.c_str());
+        }
         if (const std::string every = env("GALAXY_STATE_HASH_EVERY"); !every.empty()) {
             n.hash_every = static_cast<std::uint32_t>(std::max(1, std::atoi(every.c_str())));
         }

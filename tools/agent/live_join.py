@@ -76,12 +76,20 @@ def main(argv=None):
     parser.add_argument('--play', type=float, default=20.0, help='seconds the host plays in the galaxy first')
     parser.add_argument('--after', type=int, default=1800, help='frames to keep playing after the join')
     parser.add_argument('--exit-after', type=int, default=0, help='Exit Galaxy this many frames after the join')
+    parser.add_argument('--star-after', type=int, default=0,
+                        help="a Power Star appears (its cutscene) this many frames after the join")
     parser.add_argument('--env', action='append', help='NAME=VALUE for both copies')
+    parser.add_argument('--fallback', action='store_true',
+                        help='the host not live (GALAXY_NET_JOINABLE=0): the lobby restarts both into a session at the '
+                             "host's place; passes if the session's MEM1 check finds no DESYNC for --after frames")
+    parser.add_argument('--join-env', action='append',
+                        help='NAME=VALUE for the joiner only (GALAXY_TEST_MODULE_ELSEWHERE=1: its game module at '
+                             'another address, as on another PC)')
     args = parser.parse_args(argv)
     out = os.path.abspath(args.out)
     os.makedirs(out, exist_ok=True)
-    for name in ('host.hash', 'join.hash'):
-        if os.path.exists(os.path.join(out, name)):
+    for name in os.listdir(out):
+        if name.endswith('.hash'):
             os.remove(os.path.join(out, name))
     common = dict(determinism.parse_env(args.env), GALAXY_STATE_HASH_EVERY='30', GALAXY_STATE_HASH_CHUNKS='1')
     started = time.time()
@@ -93,9 +101,15 @@ def main(argv=None):
     set_settings(host, {'net_joinable': 'on', 'net_port': str(args.port)})
     set_settings(joiner, {'net_joinable': 'off'})
     host_env = dict(common, GALAXY_NET_AUTOACCEPT='1', GALAXY_STATE_HASH=os.path.join(out, 'host.hash'))
+    if args.fallback:
+        host_env['GALAXY_NET_JOINABLE'] = '0'
+        host_env['GALAXY_STATE_HASH'] = os.path.join(out, 'host-{pid}.hash')
     if args.exit_after:
         host_env['GALAXY_NET_TEST_EXIT_AFTER_JOIN'] = str(args.exit_after)
+    if args.star_after:
+        host_env['GALAXY_NET_TEST_STAR_AFTER_JOIN'] = str(args.star_after)
     ok = True
+    join_frame = None
     try:
         host.launch(extra_env=host_env)
         host.boot_through_menus(timeout=240.0)
@@ -111,14 +125,26 @@ def main(argv=None):
             host.command('wait 30', timeout=60.0)
             k += 1
         joiner.launch(extra_env=dict(common, GALAXY_NET_AUTOJOIN='127.0.0.1:%d' % args.port,
-                                     GALAXY_STATE_HASH=os.path.join(out, 'join.hash')))
+                                     GALAXY_STATE_HASH=os.path.join(out, 'join-{pid}.hash'),
+                                     **determinism.parse_env(args.join_env)))
         asked = time.time()
+        if args.fallback:
+            wait_log(host, '[net] connected', 240.0)
+            print('restarted into a session, %.0f s after the joiner started' % (time.time() - asked))
+            time.sleep(args.after / 60.0 + 60.0)  # the rejoin's boot, then --after frames
+            for inst in (host, joiner):
+                for pattern in ('DESYNC', '[crash]', 'stalls', '[net] connected'):
+                    lines = log_lines(inst, pattern)
+                    print('  %s: %d x "%s"%s' % (inst.name, len(lines), pattern, (' (%s)' % lines[-1][:100]) if lines else ''))
+            ok = not any(log_lines(i, 'DESYNC') or i.crash() for i in (host, joiner))
+            return 0 if ok else 1
         line = wait_log(host, 'the joiner drops in', 240.0)
         join_frame = int(re.search(r'frame (\d+)', line).group(1))
         print('joined at frame %d, %.0f s after the joiner started' % (join_frame, time.time() - asked))
         for inst in (host, joiner):
             for pattern in ('[net] snapshot of frame', '[hot-join] frame', '[hot-join] loaded', '[net] the host\'s game',
-                            '[net] the snapshot of frame', 'caught up', 'catching up', '[lobby]'):
+                            '[net] the snapshot of frame', 'caught up', 'catching up', '[lobby]', 'moved',
+                            'test: the game module'):
                 for l in log_lines(inst, pattern)[:3]:
                     print('  %s: %s' % (inst.name, l))
         wait_log(joiner, 'in the game', 60.0)
@@ -136,23 +162,10 @@ def main(argv=None):
                 sum(r[0] for r in rates) / len(rates), sum(r[1] for r in rates) / len(rates),
                 min(r[0] for r in rates), min(r[1] for r in rates)))
         for inst in (host, joiner):
-            for pattern in ('drops in', 'DESYNC', '[crash]', 'test: exit galaxy', 'exiting', 'stalls'):
+            for pattern in ('drops in', 'DESYNC', '[crash]', 'test: ', 'exiting', 'stalls', 'cutscene 1'):
                 lines = log_lines(inst, pattern)
                 if lines:
                     print('  %s: %d x "%s" (%s)' % (inst.name, len(lines), pattern, lines[-1][:120]))
-        a = determinism.read_hashes(os.path.join(out, 'host.hash'))
-        b = determinism.read_hashes(os.path.join(out, 'join.hash'))
-        frames = sorted(f for f in set(a) & set(b) if f >= join_frame)
-        bad = [f for f in frames if a[f][0] != b[f][0]]
-        if not frames:
-            print('no frames to compare')
-            ok = False
-        elif bad:
-            mb = [k for k in range(len(a[bad[0]][1])) if a[bad[0]][1][k] != b[bad[0]][1][k]]
-            print('MEM1 differs from frame %d (MB %s) of %d..%d' % (bad[0], mb, frames[0], frames[-1]))
-            ok = False
-        else:
-            print('MEM1 identical at all %d samples, frames %d..%d' % (len(frames), frames[0], frames[-1]))
         if any(log_lines(i, 'DESYNC') for i in (host, joiner)):
             ok = False
     except nebula_agent.GameError as e:
@@ -168,6 +181,30 @@ def main(argv=None):
             inst.stop()
         time.sleep(2.0)
         end_copies_of(args.run)
+    # The hash files are read once both copies have gone (a copy still running or ending keeps them locked).
+    for _ in range(40):
+        a = determinism.read_hashes(os.path.join(out, 'host.hash'))
+        # The joiner restarted itself: its second process's file has the frames from the join on.
+        b = {}
+        for name in os.listdir(out):
+            if name.startswith('join-'):
+                b.update(determinism.read_hashes(os.path.join(out, name)))
+        if join_frame is None or (a and b and max(b) >= join_frame):
+            break
+        time.sleep(0.5)
+    frames = sorted(f for f in set(a) & set(b) if join_frame is not None and f >= join_frame)
+    bad = [f for f in frames if a[f][0] != b[f][0]]
+    if join_frame is None:
+        pass
+    elif not frames:
+        print('no frames to compare')
+        ok = False
+    elif bad:
+        mb = [k for k in range(len(a[bad[0]][1])) if a[bad[0]][1][k] != b[bad[0]][1][k]]
+        print('MEM1 differs from frame %d (MB %s) of %d..%d' % (bad[0], mb, frames[0], frames[-1]))
+        ok = False
+    else:
+        print('MEM1 identical at all %d samples, frames %d..%d' % (len(frames), frames[0], frames[-1]))
     print('%s (%.0f s)' % ('PASS' if ok else 'FAIL', time.time() - started))
     return 0 if ok else 1
 

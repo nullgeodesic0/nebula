@@ -380,8 +380,10 @@ std::size_t relocate_arena(const std::vector<std::pair<const void*, std::size_t>
     }
     std::vector<std::pair<std::size_t, std::size_t>> holes;  // arena offsets [begin, end) left alone
     for (const auto& [p, n] : skip) {
+        // Empty entries (a guest memory view copied under another alias) have no bytes, here or anywhere.
+        if (n == 0u || !in_arena(p)) continue;
         const std::size_t begin = static_cast<std::size_t>(address(p) - kArenaBase);
-        holes.push_back({begin & ~std::size_t{7}, begin + n});
+        holes.push_back({begin & ~std::size_t{7}, std::min(begin + n, g_used)});
     }
     std::sort(holes.begin(), holes.end());
     std::size_t moved = 0u;

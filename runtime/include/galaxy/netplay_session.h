@@ -30,7 +30,8 @@ struct NetInput {
 
 // Session-wide actions from a player's online menu (net_lobby.cpp), carried by their input so both PCs act on
 // the same frame (agent_guest.cpp netplay_apply_command).
-enum class NetCommand : std::uint32_t { None = 0, ExitGalaxy = 1, Join = 2 };
+// TestStarAppear (tests only, tools/agent/live_join.py): a stage's Power Star appears, with its cutscene.
+enum class NetCommand : std::uint32_t { None = 0, ExitGalaxy = 1, Join = 2, TestStarAppear = 0x100 };
 
 // The next local input carries `command` (net_local_input).
 void net_request_command(NetCommand command) noexcept;
