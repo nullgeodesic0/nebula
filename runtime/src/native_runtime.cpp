@@ -33809,6 +33809,8 @@ int wmain(int argc, wchar_t** argv) {
     if (read_env_flag("GALAXY_SIM_PROFILE", false) && function_records_fn != nullptr) {
         const galaxy::FunctionRecordV1* records = nullptr;
         const std::size_t record_count = function_records_fn(&records);
+        // A re-simulation profile samples nothing until the first re-simulation (boot left out).
+        if (read_env_flag("GALAXY_SIM_PROFILE_RESIM", false)) g_sim_profiler.set_sampling(false);
         g_sim_profiler.start(records, record_count, module);
     }
     if (read_env_flag("GALAXY_RENDER_PROFILE", false)) {
