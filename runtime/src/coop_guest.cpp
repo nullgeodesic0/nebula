@@ -126,6 +126,7 @@ constexpr std::uint32_t kPointerDecoration = 85u; // StarPointerLayout::drawDeco
 constexpr std::uint32_t kStarPieceCode = 86u;     // calls into StarPiece's code
 constexpr std::uint32_t kSoundRelPos = 87u;       // AudDopplerAudienceState::convertAbsToRel(const TVec3f&, RelPos*)
 constexpr std::uint32_t kClipFrustumFar = 88u;    // ClippingJudge::isJudgedToClipFrustum(const TVec3f&, f32) const
+constexpr std::uint32_t kOneUp = 89u;             // MR::incPlayerLeft() (skippable)
 }  // namespace call
 
 namespace fn {
@@ -226,6 +227,14 @@ constexpr std::uint32_t kGetScreenWidth = 0x803F6B44u;          // MR::getScreen
 constexpr std::uint32_t kIsPowerStarGetDemoActive = 0x803CA2BCu;  // MR::isPowerStarGetDemoActive()
 constexpr std::uint32_t kMarioChangeAnimation = 0x802AF658u;      // MarioActor::changeAnimation(const char*, const char*)
 constexpr std::uint32_t kMarioAccessSetBaseMtx = 0x80303E44u;     // MarioAccess::setBaseMtx(MtxPtr): the game's player
+// A black hole's cameras, ended when a player who fell in comes back.
+constexpr std::uint32_t kEndActorCamera = 0x803BCB8Cu;        // MR::endActorCamera(actor, ActorCameraInfo*, bool, s32)
+// And what the fall left on the player (MarioActor::exeGameOverBlackHole2 starts them; a miss never stopped them).
+constexpr std::uint32_t kStopEffectForce = 0x802DDCA8u;       // MarioActor::stopEffectForce(const char*)
+constexpr std::uint32_t kBlackHoleEffect = 0x805A64EAu;         // the game's "共通ブラックホール"
+constexpr std::uint32_t kActivateDefaultGameLayout = 0x803F78B0u;  // MR::activateDefaultGameLayout()
+constexpr std::uint32_t kIsActiveDefaultGameLayout = 0x803F78F8u;  // MR::isActiveDefaultGameLayout()
+constexpr std::uint32_t kEndGlobalEventCamera = 0x803C7A3Cu;  // MR::endGlobalEventCamera(const char*, s32, bool)
 }  // namespace fn
 constexpr std::uint32_t kPointerLayoutChannel = 0x34u;  // StarPointerLayout::mPadChannel
 // StarPointerDirector +4: StarPointerController[2], each kStarPointerControllerSize; mPastInfo.mPos (the position
@@ -241,6 +250,8 @@ constexpr std::uint32_t kStarPieceVtable = 0x8058F2A0u;  // __vt__9StarPiece
 constexpr std::uint32_t kPowerStarVtable = 0x80587430u;  // __vt__9PowerStar
 constexpr std::uint32_t kPowerStarBaseMtx = 0xE8u;       // PowerStar::mBaseMtx (TPos3f), the player's place
 constexpr float kStarGetSide = 110.0f;                   // the other brother's place beside the taker
+constexpr std::uint32_t kMarioActorBlackHole = 0xF4Cu;   // MarioActor::mBlackHole, the one he fell into
+constexpr std::uint32_t kBlackHoleCameraInfo = 0x108u;   // BlackHole::mCameraInfo (ActorCameraInfo*)
 // AudDopplerAudienceState: its listener matrix (3x4, +0x00) and position (+0x3C); JAUDopplerAudibleRelPos: the
 // source relative to it (+0x00), its direction (+0x0C) and distance (+0x18).
 constexpr std::uint32_t kAudienceMtx = 0x00u;
@@ -492,6 +503,8 @@ struct State {
     // At the start of the second player's event the game camera travels over from the first player: their
     // half keeps its own camera until the game camera has arrived, then eases into it.
     bool second_awaits_event = false;
+    bool solo_event = false;  // the game camera plays one brother's own event (keep_camera_on_first_player)
+    bool first_event = false;  // the game camera plays the first player's own event (his launch star's flight)
     // The second player travels with the first (second_player_waits, the first player parked at the origin, a
     // level start until the first has had control a moment); `controllable_frames` counts frames the first
     // player has been in ordinary play.
@@ -633,6 +646,10 @@ struct State {
     std::uint32_t director2 = 0u;
     bool director2_view_valid = false;
     coop::CameraMatrices director2_view;
+    // The first player's own director, his half's camera while the game camera plays the second player's event.
+    std::uint32_t director3 = 0u;
+    bool director3_view_valid = false;
+    coop::CameraMatrices director3_view;
     // The camera's lens, for the second player's clipping.
     float fovy = 45.0f;
     float aspect = 16.0f / 9.0f;
@@ -663,6 +680,13 @@ struct State {
         bool pointing_target = false;  // ... called from GCaptureTarget
     } pointers;
 };
+
+// The first player's half while the game camera is away on the second player's event: his own director's view (his
+// camera following him, as the game's would), else the game camera's last view of him carried along with him.
+constexpr float kOwnCameraBackDistance = 2500.0f;  // the game camera this near the first player is back with him
+coop::CameraMatrices first_own_view(const State& s, coop::Vec3 first_position) {
+    return s.director3_view_valid ? s.director3_view : s.hold.view(first_position);
+}
 
 bool split_screen_enabled() {
     static const bool enabled = [] {
@@ -929,6 +953,8 @@ void bump_players(const Guest& guest, const State& s, coop::Vec3 first_position,
 // they set off (MR::setCameraTargetToPlayer, CameraTargetArg::setTarget) points the camera at them. While
 // that event camera plays it stays theirs (event_second: their half shows it); after, the camera is the
 // first player's again.
+bool rides_star(const Guest& guest, std::uint32_t actor_address);
+
 void keep_camera_on_first_player(const Guest& guest, State& s) {
     const std::uint32_t director = guest.call(fn::kGetCameraDirector);
     if (!plausible(director)) return;
@@ -943,10 +969,16 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     // them (a launch star, a warp pad) points it at the first player, but then only the second player is
     // in a special state (flying, warping).
     const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
-    const bool first_special = plausible(first_mario) && guest.u32(first_mario + kMarioState) != 0u;
-    const bool second_special = plausible(s.second_mario) && guest.u32(s.second_mario + kMarioState) != 0u;
+    // A brother a launch star has caught is in its event from the catch (before his flight's special state).
+    const bool first_special = (plausible(first_mario) && guest.u32(first_mario + kMarioState) != 0u) ||
+                               rides_star(guest, s.first);
+    const bool second_special = (plausible(s.second_mario) && guest.u32(s.second_mario + kMarioState) != 0u) ||
+                                rides_star(guest, s.second);
     // At a level start every camera is the first player's (the intro ends where the second player waits).
     s.event_second = !s.level_start && coop::camera_event_is_second(actor, s.second, event, second_special, first_special);
+    // One brother's own event (his launch star, warp, pipe): the screen splits so the other keeps his own camera.
+    s.solo_event = event && !s.level_start && first_special != second_special;
+    s.first_event = s.solo_event && first_special;
     const unsigned inputs = (event ? 1u : 0u) | (actor == s.second ? 2u : actor == s.first ? 4u : 0u) |
                             (second_special ? 8u : 0u) | (first_special ? 16u : 0u);
     if (inputs != s.event_inputs) {
@@ -959,7 +991,7 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     if (s.event_second != was) {
         trace("second player's camera event %s", s.event_second ? "begins" : "ends");
         s.camera_trace_frames = 120u;
-        if (s.event_second && s.split.amount() > 0.0f) {
+        if (s.event_second) {
             // Their half blends from their own camera into the event's; the first player's half holds the
             // game camera's view from before the event.
             // The event camera aims at the first player for its first frames (until it follows the second),
@@ -1035,7 +1067,7 @@ void update_second_camera(const Guest& guest, State& s, coop::Vec3 first_positio
 
     // The line follows the first player's view as their half shows it: while it is held (the game camera is
     // the second player's event or warp camera) the held view, so the line does not swing with that camera.
-    const coop::CameraMatrices layout_camera = s.hold.active() ? s.hold.view(first_position) : first_camera;
+    const coop::CameraMatrices layout_camera = s.hold.active() ? first_own_view(s, first_position) : first_camera;
     const coop::Vec3 a = coop::transform_point(layout_camera.view, first_position);
     const coop::Vec3 b = coop::transform_point(layout_camera.view, second_position);
     s.layout.update(b.x - a.x, a.y - b.y);  // screen y runs down
@@ -1168,16 +1200,15 @@ bool second_camera_by_director() {
     return enabled;
 }
 
-void make_second_director(const Guest& guest, State& s) {
-    s.director2 = 0u;
-    s.director2_view_valid = false;
-    if (!second_camera_by_director() || !plausible(s.second)) return;
+// A director of its own for `player` (made as CameraDirector's constructor makes its parts, the stage's camera
+// parameters, rails and registers shared with the game's), or 0.
+std::uint32_t make_director(const Guest& guest, std::uint32_t player) {
     SavedContext saved(guest.context());
     const std::uint32_t slot = director_slot(guest);
     const std::uint32_t first = slot != 0u ? guest.u32(slot) : 0u;
     if (!plausible(first)) {
-        trace("second camera: no game camera director yet");
-        return;
+        trace("own camera: no game camera director yet");
+        return 0u;
     }
     const auto make = [&](std::uint32_t size) {
         const std::uint32_t at = guest.call(director::kNew, size);
@@ -1202,8 +1233,8 @@ void make_second_director(const Guest& guest, State& s) {
     for (const std::uint32_t at : {second, stack, elements, only, pose1, pose2, holder, target, shaker, interpolator,
                                    cover, rot, man}) {
         if (!plausible(at)) {
-            trace("second camera: out of memory");
-            return;
+            trace("own camera: out of memory");
+            return 0u;
         }
     }
     // The game's director as it stands (vtable, shared holders, flags), then its own parts.
@@ -1217,7 +1248,7 @@ void make_second_director(const Guest& guest, State& s) {
     guest.call(director::kPoseParamCtor, pose2);
     guest.call(director::kHolderCtor, holder, name);
     guest.call(director::kTargetHolderCtor, target);
-    guest.call(director::kTargetHolderSetPlayer, target, s.second);
+    guest.call(director::kTargetHolderSetPlayer, target, player);
     guest.call(director::kShakerCtor, shaker, name);
     guest.call(director::kInterpolatorCtor, interpolator);
     guest.call(director::kRotCheckerCtor, rot);
@@ -1236,32 +1267,49 @@ void make_second_director(const Guest& guest, State& s) {
     guest.set_u32(second + director::kEventNum, 0u);
     guest.call(director::kPush, second, man);
     guest.call(director::kStarted, second);
-    s.director2 = second;
-    trace("second camera: director %08X (the game's %08X)", second, first);
+    trace("own camera: director %08X for %08X (the game's %08X)", second, player, first);
+    return second;
 }
 
-// After the game's camera has moved (its movement category): the second player's, as the game's player, with
-// MR::getCameraDirector answering it; CameraContext (which it writes) is the game camera's again after.
-void run_second_director(const Guest& guest, State& s) {
-    s.director2_view_valid = false;
-    if (!plausible(s.director2) || !plausible(s.second) || s.down[1].down || s.level_start) return;
+// Two of them a stage: the second player's (his half's camera), and the first player's own, for his half while the
+// game camera plays the second player's event (a launch star's flight, a warp): each brother not in an event keeps
+// a camera of his own, following him.
+void make_second_director(const Guest& guest, State& s) {
+    s.director2 = s.director3 = 0u;
+    s.director2_view_valid = s.director3_view_valid = false;
+    if (!second_camera_by_director() || !plausible(s.second) || !plausible(s.first)) return;
+    s.director2 = make_director(guest, s.second);
+    s.director3 = make_director(guest, s.first);
+}
+
+// One own director's frame, as `second` or the first player (the game's player meanwhile), with
+// MR::getCameraDirector answering it; CameraContext (which it writes) is the game camera's again after. False if
+// it made no view.
+bool run_director(const Guest& guest, State& s, std::uint32_t own, bool second, coop::CameraMatrices& view) {
     const std::uint32_t context = camera_context(guest);
     const std::uint32_t slot = director_slot(guest);
-    if (context == 0u || slot == 0u) return;
+    if (context == 0u || slot == 0u) return false;
     SavedContext saved(guest.context());
     std::array<std::uint32_t, (director::kContextEnd - director::kContextFirst) / 4u> kept{};
     for (std::size_t i = 0; i < kept.size(); ++i) kept[i] = guest.u32(context + director::kContextFirst + 4u * static_cast<std::uint32_t>(i));
     const std::uint32_t game_director = guest.u32(slot);
-    guest.set_u32(slot, s.director2);
-    set_game_player(guest, s, true);
-    guest.call(director::kMovement, s.director2);
-    set_game_player(guest, s, false);
+    guest.set_u32(slot, own);
+    if (second) set_game_player(guest, s, true);
+    guest.call(director::kMovement, own);
+    if (second) set_game_player(guest, s, false);
     guest.set_u32(slot, game_director);
-    const coop::CameraMatrices view = read_camera(guest, context);
+    view = read_camera(guest, context);
     for (std::size_t i = 0; i < kept.size(); ++i) guest.set_u32(context + director::kContextFirst + 4u * static_cast<std::uint32_t>(i), kept[i]);
-    if (finite(view.view) && finite(view.inverse)) {
-        s.director2_view = view;
-        s.director2_view_valid = true;
+    return finite(view.view) && finite(view.inverse);
+}
+
+// After the game's camera has moved (its movement category): the brothers' own directors.
+void run_second_director(const Guest& guest, State& s) {
+    s.director2_view_valid = s.director3_view_valid = false;
+    if (!plausible(s.second) || s.down[1].down || s.level_start) return;
+    if (plausible(s.director2)) s.director2_view_valid = run_director(guest, s, s.director2, true, s.director2_view);
+    if (plausible(s.director3) && !s.down[0].down) {
+        s.director3_view_valid = run_director(guest, s, s.director3, false, s.director3_view);
     }
 }
 
@@ -2111,6 +2159,12 @@ void on_stage_start(const Guest& guest, State& s) {
 // death camera, the pointer demo). For a player going down while the other plays on, none of them happen: the
 // first decides, and the player's down state skips the rest that frame.
 void on_game_over_call(std::uint32_t id, const Guest& guest, State& s, PpcContext* context, std::uint32_t guest_pc) {
+    // The second player going down alone (a black hole's fall starts its camera through MR::startBlackHoleCamera,
+    // from the camera code): the game camera stays the first player's.
+    if (id == call::kStartDeathCamera && s.moving_second && s.down[1].down && !s.game_miss) {
+        context->pc = kCoopSkipCall;
+        return;
+    }
     if (!in_game_over_step(guest_pc) || !plausible(s.first) || !plausible(s.second)) return;
     // The MarioActor going down: exeGameOver* keeps itself in r30 or r31.
     const std::uint32_t r30 = context->gpr[30];
@@ -2124,7 +2178,13 @@ void on_game_over_call(std::uint32_t id, const Guest& guest, State& s, PpcContex
     }
     coop::DownState& self = s.down[who];
     const coop::DownState& partner = s.down[1u - who];
-    if (!(self.down && self.frames == 0u) && !s.game_miss) {
+    // Already down alone: a later step of the same fall (a black hole's exeGameOverBlackHole2) neither counts
+    // again nor starts the game's miss.
+    if (self.down && !s.game_miss) {
+        context->pc = kCoopSkipCall;
+        return;
+    }
+    if (!s.game_miss) {
         // A race lost is the game's to handle (MarioActor::_39D: 1, 2 and 5 are race outcomes).
         const std::uint32_t actor_address = who == 0u ? s.first : s.second;
         const std::uint8_t kind = guest.u8(actor_address + 0x39Du);
@@ -2192,7 +2252,7 @@ void on_game_over_call(std::uint32_t id, const Guest& guest, State& s, PpcContex
 
 // Puts a player who was down back in play at `there`: ordinary nerve, full health, visible, touchable. Called in
 // that player's turn (the game's player is them), so MR::setPlayerPosAndWait places them.
-void respawn_player(const Guest& guest, std::uint32_t actor_address, coop::Vec3 there) {
+void respawn_player(const Guest& guest, std::uint32_t actor_address, coop::Vec3 there, bool black_hole) {
     guest.call(fn::kSetNerve, actor_address, kMarioActorNrvWait);
     guest.set_u32(actor_address + 0x380u, 3u);  // MarioActor::mHealth
     guest.set_u32(actor_address + 0x3E0u, 3u);  // MarioActor::mMaxHealth
@@ -2209,6 +2269,11 @@ void respawn_player(const Guest& guest, std::uint32_t actor_address, coop::Vec3 
     static std::uint32_t idle = 0u;
     if (idle == 0u) idle = guest.find_string("\x91\xD2\x8B\x40");
     if (idle != 0u) guest.call(fn::kChangeAnimationNonStop, actor_address, idle);  // as the down was started
+    if (!black_hole) return;
+    // A black hole's fall (MarioActor::exeGameOverBlackHole2) also shrank him and left its effect on him: full size,
+    // and the effect off. (He still stands twisted, his up vector the hole's, until he first moves.)
+    for (const std::uint32_t axis : {0x24u, 0x28u, 0x2Cu}) guest.set_f32(actor_address + axis, 1.0f);  // LiveActor::mScale
+    guest.call(fn::kStopEffectForce, actor_address, fn::kBlackHoleEffect);
 }
 
 // ---- Drop in, drop out (docs/MULTIPLAYER.md "Drop in, drop out") ----
@@ -2252,7 +2317,7 @@ void drop_in(const Guest& guest, State& s, coop::Vec3 first_position, coop::Vec3
     s.leave_frames = 0u;
     s.down[1] = {};
     coop_set_second_present(true);
-    respawn_player(guest, s.second, first_position + first_side * 120.0f);
+    respawn_player(guest, s.second, first_position + first_side * 120.0f, false);
     // His HUD back (sit_out killed it): the meter and the lives counter shown again, as a stage starts them.
     if (plausible(s.second_meter)) {
         guest.call(fn::kMeterRequests[0], s.second_meter);  // MeterLayout::requestActive
@@ -2362,6 +2427,24 @@ void gather_for_boss(const Guest& guest, State& s) {
     trace("boss fight: the %s player brought into the arena", first_in ? "second" : "first");
 }
 
+// A player back from going down alone: the cameras his fall started end, so the game camera follows him again. A
+// black hole's: its own actor camera (BlackHole::tryStartDemoCamera) or the global "ブラックホール" event
+// (MR::startBlackHoleCamera). The game never ended them (a fall reloaded the stage).
+void end_down_cameras(const Guest& guest, std::uint32_t actor_address, bool forget_hole = true) {
+    SavedContext saved(guest.context());
+    const std::uint32_t hole = guest.u32(actor_address + kMarioActorBlackHole);
+    const std::uint32_t info = plausible(hole) ? guest.u32(hole + kBlackHoleCameraInfo) : 0u;
+    if (plausible(info)) guest.call(fn::kEndActorCamera, hole, info, 1u, 0xFFFFFFFFu);
+    static constexpr char kBlackHoleCamera[] = "\x83\x75\x83\x89\x83\x62\x83\x4E\x83\x7A\x81\x5B\x83\x8B";  // ブラックホール
+    Guest::Frame frame(guest);
+    const std::uint32_t name = frame.scratch();
+    for (std::uint32_t i = 0u; i < sizeof(kBlackHoleCamera); ++i) {
+        guest.set_u8(name + i, static_cast<std::uint8_t>(kBlackHoleCamera[i]));
+    }
+    guest.call(fn::kEndGlobalEventCamera, name, 0xFFFFFFFFu, 1u);
+    if (forget_hole && plausible(hole)) guest.set_u32(actor_address + kMarioActorBlackHole, 0u);
+}
+
 // Once a frame, in a player's own turn: the fallen player vanishes after their fall and comes back beside the
 // other in time; one out of lives is carried along hidden beside the other (the game camera follows the first).
 void update_down_player(const Guest& guest, State& s, unsigned who, coop::Vec3 partner_position,
@@ -2376,8 +2459,17 @@ void update_down_player(const Guest& guest, State& s, unsigned who, coop::Vec3 p
     }
     const coop::Vec3 beside = partner_position + partner_side * 120.0f;
     if (s.game_miss) return;  // the game's own miss reloads the stage: nobody comes back meanwhile
+    // The second player's black hole fall while the first plays on: the game camera is the first player's, so the
+    // black hole's camera (started from the hole's and the camera's own code, not his turn) never takes it.
+    if (plausible(guest.u32(actor_address + kMarioActorBlackHole))) {
+        if (who == 1u) end_down_cameras(guest, actor_address, false);
+        // The fall also put the HUD away (MR::deactivateDefaultGameLayout), for the one still playing too.
+        if ((guest.call(fn::kIsActiveDefaultGameLayout) & 0xFFu) == 0u) guest.call(fn::kActivateDefaultGameLayout);
+    }
     if (coop::respawn_due(self, s.down[1u - who])) {
-        respawn_player(guest, actor_address, beside);
+        const bool black_hole = plausible(guest.u32(actor_address + kMarioActorBlackHole));
+        respawn_player(guest, actor_address, beside, black_hole);
+        end_down_cameras(guest, actor_address);
         // Their life meter broke and hid itself at zero (MeterLayout::exeZeroMeterBreak): back with the player.
         const std::uint32_t meter = who == 0u ? s.first_meter : s.second_meter;
         if (plausible(meter)) guest.call(fn::kShowLayout, meter);
@@ -2705,6 +2797,9 @@ void move_second_player(const Guest& guest, State& s) {
         } else if (online_views()) {
             // Online: each PC shows its own player's camera full screen (begin_split_draw), always.
             s.split.hold_full();
+        } else if (s.solo_event) {
+            // One brother's event: split, his half the event's camera, the other's his own (as far apart).
+            s.split.update(10.0f, distance, tuning);
         } else if (!s.event_second) {
             s.split.update(shared_extent(guest, s, first_position, second_position), distance, tuning);
         }
@@ -2852,8 +2947,9 @@ void begin_split_draw(const Guest& guest, State& s) {
     const coop::Vec3 second_position = guest.vec(s.second + actor::kPosition);
     if (!events_swapped(s)) {
         // A game camera set up at the second player's warp while aiming at the first player is not the first
-        // player's: their half holds its last good view until the game camera is back with them.
-        if (!s.level_start &&
+        // player's: their half holds its last good view until the game camera is back with them. Not while the
+        // first player is in his own flight: the game camera, lagging behind near the second player, is his.
+        if (!s.level_start && !s.first_event &&
             coop::camera_is_second_players(coop::pose_of(s.camera1.inverse).eye, first_position, second_position)) {
             if (!s.hold.active()) {
                 s.hold.start(s.last_camera1, s.last_origin, s.last_projection);
@@ -2868,7 +2964,7 @@ void begin_split_draw(const Guest& guest, State& s) {
         }
     }
     // Pans from the first player's view at the split to the second player's own.
-    s.camera2 = events_swapped(s) ? s.hold.view(first_position)
+    s.camera2 = events_swapped(s) ? first_own_view(s, first_position)
                                   : coop::blend_cameras(s.camera1, s.follow_view, s.split.eased());
     if (!events_swapped(s) && s.second_handover.active()) {
         s.camera2 = s.second_handover.camera(s.camera2, true);
@@ -2894,8 +2990,20 @@ void begin_split_draw(const Guest& guest, State& s) {
     }
     if (s.hold.active() && !events_swapped(s)) {
         // The first player's half, held through the second player's flight and until the game camera is back.
-        const coop::CameraMatrices held = s.hold.view(first_position);
-        if (s.hold.returning() && s.hold.back(s.camera1, first_position)) {
+        const coop::CameraMatrices held = first_own_view(s, first_position);
+        // With his own camera live, his half has no reason to give up on the game camera's slow way back: it keeps
+        // waiting while that is still far from him.
+        if (s.hold.returning() && s.director3_view_valid && !s.first_event &&
+            coop::length(coop::pose_of(s.camera1.inverse).eye - first_position) > kOwnCameraBackDistance) {
+            s.hold.rearm();
+        }
+        if (s.first_event) {
+            // His own event (a launch star he rides): the game camera is his, wherever it is.
+            const std::array<float, 16> held_lens = s.hold.projection();
+            s.hold.reset();
+            s.handover.start(held, false, &held_lens);
+            trace("the first player's own event: his half takes the game camera");
+        } else if (s.hold.returning() && s.hold.back(s.camera1, first_position)) {
             const std::array<float, 16> held_lens = s.hold.projection();
             s.handover.start(held, false, &held_lens);
             trace("the game camera is back with the first player");
@@ -3254,6 +3362,33 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         star_piece_code_begin(Guest(context, memory, services, guest_pc), s);
         return;
     }
+    if (id == call::kOneUp) {
+        // A life won by the second player is his: a 1-Up mushroom (BenefitItemObj::exeCatch, the item in r31) he is
+        // nearer, or his own stomp chain (MarioActor::doTrampleJump in his turn). Others (the Observatory's Toads,
+        // 50 Star Bits) stay the first player's.
+        const Guest guest(context, memory, services, guest_pc);
+        bool his = false;
+        if (plausible(s.first) && plausible(s.second) && !s.down[1].down) {
+            if (guest_pc >= 0x801B4B10u && guest_pc < 0x801B4BA4u && plausible(context->gpr[31])) {
+                const coop::Vec3 at = guest.vec(context->gpr[31] + actor::kPosition);
+                his = coop::length(guest.vec(s.second + actor::kPosition) - at) <
+                      coop::length(guest.vec(s.first + actor::kPosition) - at);
+            } else if (guest_pc >= 0x802BEA74u && guest_pc < 0x802BEC98u) {
+                his = s.moving_second;
+            }
+        }
+        if (his) {
+            context->pc = kCoopSkipCall;
+            ensure_second_lives(guest, s);
+            s.second_lives = std::min(s.second_lives + 1, 99);
+            if (plausible(s.second_left)) {
+                guest.set_u32(s.second_left + kPlayerLeftCount, static_cast<std::uint32_t>(s.second_lives));
+                guest.call(fn::kPlayerLeftCalls[1], s.second_left);  // PlayerLeft::forceAppear
+            }
+            trace("1-Up for the second player: %d lives", s.second_lives);
+        }
+        return;
+    }
     if (id == call::kSoundRelPos) {
         s.sound_args = {context->gpr[3], context->gpr[4], context->gpr[5]};
         return;
@@ -3513,7 +3648,7 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
         pointers_after(id, guest, s, context);
         return;
     }
-    if (id == call::kAddRushSensor || id == call::kPointerDecoration) return;
+    if (id == call::kAddRushSensor || id == call::kPointerDecoration || id == call::kOneUp) return;
     if (id == call::kStarPieceCode) {
         star_piece_code_end(guest, s);
         return;

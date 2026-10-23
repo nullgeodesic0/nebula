@@ -41,11 +41,11 @@ struct JAudioGuestMemory {
 };
 
 // Replaces sounds with audio from the host (voice_replacement.h). claim() is asked when a channel starts a
-// sound with a known owner and returns 0 (keep), 1 (this channel carries the replacement: render() supplies
-// its samples in place of the decoded ones, before filters, volume, pan and effect sends) or 2 (silence it).
-// mix_remainder() runs once per subframe after the channels.
+// sound with a known owner (`luigi`: a voice line in Luigi's take) and returns 0 (keep), 1 (this channel carries
+// the replacement: render() supplies its samples in place of the decoded ones, before filters, volume, pan and
+// effect sends) or 2 (silence it). mix_remainder() runs once per subframe after the channels.
 struct JAudioVoiceOverride {
-    std::uint8_t (*claim)(std::uint32_t sound_id, std::uint64_t start){};
+    std::uint8_t (*claim)(std::uint32_t sound_id, std::uint64_t start, bool luigi){};
     void (*render)(std::int16_t* out, std::uint32_t count){};
     void (*mix_remainder)(std::int16_t* left, std::int16_t* right, std::uint32_t count, std::uint32_t gain_q16){};
     // Whether the replacement still has samples; when its channel ends first, the mixer finishes it through a

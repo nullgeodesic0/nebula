@@ -109,7 +109,13 @@ enum class JAudioOwnerRoute : std::uint8_t { Format, Se, Seq, Stream };
 struct JAudioChannelOwner {
     JAudioOwnerRoute route{JAudioOwnerRoute::Format};
     std::uint32_t sound_id{};
+    // A player voice line in Luigi's take: AudSystem::switchToLuigi wrote 0x14 to its output track's port 12
+    // (JASTrack +0x5C JASTrackPort, its values from +0x04).
+    bool luigi{};
 };
+
+inline constexpr std::uint32_t kJasTrackLuigiPort = 0x5Cu + 0x04u + 12u * 2u;
+inline constexpr std::uint32_t kJasTrackLuigiValue = 0x14u;
 
 inline constexpr std::uint32_t kJasDspChannelsPointer = 0x806A2BD0u;
 inline constexpr std::uint32_t kJasDspChannelSize = 0x1cu;
@@ -148,7 +154,8 @@ template <class ReadU32>
         }
         const std::uint32_t se = root - 0xc8u;
         if (read_u32(se) == se) {
-            return {JAudioOwnerRoute::Se, read_u32(se + 0x28u)};
+            const bool luigi = (read_u32(root + kJasTrackLuigiPort) >> 16u) == kJasTrackLuigiValue;
+            return {JAudioOwnerRoute::Se, read_u32(se + 0x28u), luigi};
         }
         return {JAudioOwnerRoute::Seq, read_u32(root - 0xa8u + 0x18u)};
     }

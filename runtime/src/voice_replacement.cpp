@@ -23,6 +23,7 @@ struct Clip {
 // Written by load() before the audio thread starts; read and played on the audio thread only.
 std::vector<Clip> s_clips;
 std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> s_lines;
+std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> s_luigi_lines;
 std::uint32_t s_playing = UINT32_MAX;
 std::size_t s_position = 0;
 std::uint64_t s_last_start = UINT64_MAX;
@@ -94,6 +95,8 @@ void load(const std::filesystem::path& content_root) {
         std::istringstream fields(line);
         std::string id_text;
         if (!(fields >> id_text)) continue;
+        const bool luigi = id_text == "luigi";
+        if (luigi && !(fields >> id_text)) continue;
         const std::uint32_t id = static_cast<std::uint32_t>(std::stoul(id_text, nullptr, 0));
         std::string name;
         while (fields >> name) {
@@ -108,14 +111,14 @@ void load(const std::filesystem::path& content_root) {
                 found = loaded.emplace(name, static_cast<std::uint32_t>(s_clips.size())).first;
                 s_clips.push_back(std::move(clip));
             }
-            s_lines[id].push_back(found->second);
+            (luigi ? s_luigi_lines : s_lines)[id].push_back(found->second);
         }
     }
-    std::cerr << "[voice] " << s_lines.size() << " voice lines, " << s_clips.size() << " clips from "
-              << folder.string() << '\n';
+    std::cerr << "[voice] " << s_lines.size() << " voice lines (" << s_luigi_lines.size() << " Luigi's), "
+              << s_clips.size() << " clips from " << folder.string() << '\n';
 }
 
-Claim claim(std::uint32_t sound_id, std::uint64_t start) noexcept {
+Claim claim(std::uint32_t sound_id, std::uint64_t start, bool luigi) noexcept {
     // GALAXY_TRACE_VOICE=1 logs every player voice line the game starts, replaced or not.
     static const bool trace = [] {
         char value[8]{};
@@ -123,11 +126,13 @@ Claim claim(std::uint32_t sound_id, std::uint64_t start) noexcept {
         return getenv_s(&length, value, sizeof(value), "GALAXY_TRACE_VOICE") == 0 && length > 1u && value[0] == '1';
     }();
     if (trace && (sound_id >> 16u) == 1u && start != s_last_start) {
-        std::cerr << "[voice] line 0x" << std::hex << sound_id << std::dec
-                  << (s_lines.count(sound_id) ? " replaced" : " kept") << '\n';
+        std::cerr << "[voice] line 0x" << std::hex << sound_id << std::dec << (luigi ? " (Luigi)" : "")
+                  << ((luigi ? s_luigi_lines : s_lines).count(sound_id) ? " replaced" : " kept") << '\n';
     }
-    const auto line = s_lines.find(sound_id);
-    if (line == s_lines.end() || line->second.empty() || !get_runtime_settings().custom_voice) {
+    // Mario's clips never stand in for Luigi: his take keeps the game's voice unless clips of his own are given.
+    const auto& lines = luigi ? s_luigi_lines : s_lines;
+    const auto line = lines.find(sound_id);
+    if (line == lines.end() || line->second.empty() || !get_runtime_settings().custom_voice) {
         return Claim::None;
     }
     if (start == s_last_start) {
