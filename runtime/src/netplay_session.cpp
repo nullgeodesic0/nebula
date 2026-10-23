@@ -1,6 +1,9 @@
 #include "galaxy/netplay_session.h"
 
+#include "galaxy/coop.h"
+#include "galaxy/coop_guest.h"
 #include "galaxy/gx_d3d12.h"
+#include "galaxy/netplay.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -40,6 +43,7 @@ constexpr std::uint32_t kMagic = 0x504E424Eu;  // "NBNP"
 constexpr std::uint8_t kVersion = 1u;
 enum class Packet : std::uint8_t { Hello = 1, HelloAck = 2, Inputs = 3, Hash = 4, BundleRequest = 5, BundleChunk = 6 };
 constexpr std::uint32_t kChunkBytes = 1024u;
+constexpr const wchar_t* kNandMetaStream = L":galaxy.isfs.meta";  // native_host.cpp's per-file NAND metadata
 constexpr std::uint32_t kChunkBurst = 32u;
 
 // Settings that change what the game computes: the joiner plays with the host's. Its own controls stay.
@@ -280,30 +284,65 @@ std::uint32_t get_u32(const std::vector<std::uint8_t>& in, std::size_t& at) {
     return value;
 }
 
-// Bundle: u32 file count, per file (u32 path length, path in UTF-8 relative to the save directory, u32 size,
-// bytes), then u32 settings length and the host's game settings lines.
+// Whole contents of a file or of a named stream (a directory's too), through CreateFileW.
+bool read_all(const std::filesystem::path& path, std::vector<std::uint8_t>& out) {
+    out.clear();
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    std::uint8_t buffer[65536];
+    DWORD n = 0u;
+    while (ReadFile(file, buffer, sizeof(buffer), &n, nullptr) && n != 0u) out.insert(out.end(), buffer, buffer + n);
+    CloseHandle(file);
+    return true;
+}
+
+bool write_all(const std::filesystem::path& path, const std::uint8_t* data, std::size_t size) {
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0u;
+    const bool ok = size == 0u || (WriteFile(file, data, static_cast<DWORD>(size), &written, nullptr) && written == size);
+    CloseHandle(file);
+    return ok;
+}
+
+// Bundle: u32 entry count, per entry (u32 kind: 0 directory, 1 file; u32 path length, path in UTF-8 relative to the
+// save directory, "" for the directory itself; a file: u32 size and its bytes; u32 metadata size and the entry's
+// NAND metadata stream), then u32 settings length and the host's game settings lines. Directories come before
+// what they hold. The emulated NAND keeps each entry's owner, permissions and a check in that stream; without it
+// the joiner's NAND layer would rebuild the save as damaged.
 std::vector<std::uint8_t> build_bundle() {
     std::vector<std::uint8_t> out;
     const std::filesystem::path root = nand_root();
-    std::vector<std::filesystem::path> files;
+    std::vector<std::pair<bool, std::filesystem::path>> entries{{false, root}};
     std::error_code error;
     for (auto it = std::filesystem::recursive_directory_iterator(root, error);
          !error && it != std::filesystem::recursive_directory_iterator(); it.increment(error)) {
-        if (it->is_regular_file(error)) files.push_back(it->path());
-    }
-    put_u32(out, static_cast<std::uint32_t>(files.size()));
-    for (const auto& file : files) {
-        std::string relative = to_utf8(std::filesystem::relative(file, root, error));
-        std::replace(relative.begin(), relative.end(), '\\', '/');
-        std::vector<std::uint8_t> bytes;
-        if (std::FILE* in = open_file(file, L"rb")) {
-            std::uint8_t buffer[65536];
-            std::size_t n = 0u;
-            while ((n = std::fread(buffer, 1, sizeof(buffer), in)) > 0u) bytes.insert(bytes.end(), buffer, buffer + n);
-            std::fclose(in);
+        if (it->is_directory(error)) {
+            entries.emplace_back(false, it->path());
+        } else if (it->is_regular_file(error)) {
+            entries.emplace_back(true, it->path());
         }
+    }
+    put_u32(out, static_cast<std::uint32_t>(entries.size()));
+    std::size_t files = 0u;
+    std::vector<std::uint8_t> bytes;
+    for (const auto& [is_file, path] : entries) {
+        std::string relative = path == root ? std::string{} : to_utf8(std::filesystem::relative(path, root, error));
+        std::replace(relative.begin(), relative.end(), '\\', '/');
+        put_u32(out, is_file ? 1u : 0u);
         put_u32(out, static_cast<std::uint32_t>(relative.size()));
         out.insert(out.end(), relative.begin(), relative.end());
+        if (is_file) {
+            ++files;
+            (void)read_all(path, bytes);
+            put_u32(out, static_cast<std::uint32_t>(bytes.size()));
+            out.insert(out.end(), bytes.begin(), bytes.end());
+        }
+        std::filesystem::path stream = path;
+        stream += kNandMetaStream;
+        if (!read_all(stream, bytes)) bytes.clear();
         put_u32(out, static_cast<std::uint32_t>(bytes.size()));
         out.insert(out.end(), bytes.begin(), bytes.end());
     }
@@ -313,7 +352,7 @@ std::vector<std::uint8_t> build_bundle() {
     }
     put_u32(out, static_cast<std::uint32_t>(settings.size()));
     out.insert(out.end(), settings.begin(), settings.end());
-    std::fprintf(stderr, "[net] session bundle: %zu save files from %s, %zu bytes\n", files.size(),
+    std::fprintf(stderr, "[net] session bundle: %zu save files from %s, %zu bytes\n", files,
                  to_utf8(root).c_str(), out.size());
     return out;
 }
@@ -455,6 +494,35 @@ void receive(Session& s) {
 void join_session(Session& s, const std::string& host_label);
 std::int64_t now_qpc();
 
+std::uint32_t be32(const std::uint8_t* bytes) noexcept {
+    return (static_cast<std::uint32_t>(bytes[0]) << 24u) | (static_cast<std::uint32_t>(bytes[1]) << 16u) |
+           (static_cast<std::uint32_t>(bytes[2]) << 8u) | bytes[3];
+}
+
+float bef32(const std::uint8_t* bytes) noexcept {
+    const std::uint32_t bits = be32(bytes);
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+// The second player's controller as the co-op code reads it directly (their split-screen camera), from the
+// joiner's input of the frame just applied: the same on both PCs, never a controller of this PC's.
+bool synchronised_partner_input(coop::PartnerInput& partner) {
+    const std::uint32_t frame = netplay_frame();
+    const NetInput& input = net_input(frame == 0u ? 0u : frame - 1u, 1u);
+    const std::uint8_t* status = input.status.data();
+    partner = coop::PartnerInput{};
+    partner.connected = true;
+    partner.buttons = be32(status + coop::kpad::kHold);
+    partner.stick_x = bef32(status + coop::kpad::kFsStick);
+    partner.stick_y = bef32(status + coop::kpad::kFsStick + 4u);
+    partner.pointer_valid = status[coop::kpad::kDpdValid] != 0u;
+    partner.pointer_x = bef32(status + coop::kpad::kPos);
+    partner.pointer_y = bef32(status + coop::kpad::kPos + 4u);
+    return true;
+}
+
 void initialize(Session& s) {
     s.initialized = true;
     const std::string host_port = env("GALAXY_NET_HOST");
@@ -462,6 +530,7 @@ void initialize(Session& s) {
     if (host_port.empty() && join.empty()) return;
     s.requested = true;
     s.host = !host_port.empty();
+    coop_set_partner_input_source(&synchronised_partner_input);
     if (const std::string delay = env("GALAXY_NET_DELAY"); !delay.empty()) {
         s.delay = static_cast<std::uint32_t>(std::clamp(std::atoi(delay.c_str()), 1, 30));
     }
@@ -492,6 +561,10 @@ void initialize(Session& s) {
             return;
         }
         std::fprintf(stderr, "[net] hosting on UDP port %s, input delay %u frames\n", host_port.c_str(), s.delay);
+        // The save as this PC boots it, before the game writes to it (it does at once: the play record): the
+        // joiner, however late it connects, starts from exactly these files.
+        s.bundle = build_bundle();
+        s.bundle_built = true;
     } else {
         const auto colon = join.rfind(':');
         const std::string address = colon == std::string::npos ? join : join.substr(0, colon);
@@ -555,26 +628,39 @@ void join_session(Session& s, const std::string& host_label) {
     std::filesystem::remove_all(saves, error);
     std::filesystem::create_directories(saves, error);
     std::size_t at = 0u;
-    const std::uint32_t files = get_u32(s.bundle, at);
-    for (std::uint32_t i = 0; i < files; ++i) {
+    const std::uint32_t entries = get_u32(s.bundle, at);
+    std::uint32_t files = 0u;
+    for (std::uint32_t i = 0; i < entries; ++i) {
+        const std::uint32_t kind = get_u32(s.bundle, at);
         const std::uint32_t path_length = get_u32(s.bundle, at);
         if (at + path_length > s.bundle.size()) throw std::runtime_error("truncated session bundle");
         const std::string relative(reinterpret_cast<const char*>(s.bundle.data() + at), path_length);
         at += path_length;
-        const std::uint32_t size = get_u32(s.bundle, at);
-        if (at + size > s.bundle.size()) throw std::runtime_error("truncated session bundle");
-        const std::filesystem::path target = saves / from_utf8(relative);
+        const std::filesystem::path target = relative.empty() ? saves : saves / from_utf8(relative);
         // A path from the peer stays inside the session's save directory.
         const auto normal = target.lexically_normal().native();
-        if (normal.rfind(saves.lexically_normal().native(), 0) != 0 || relative.find("..") != std::string::npos) {
+        if (normal.rfind(saves.lexically_normal().native(), 0) != 0 || relative.find("..") != std::string::npos ||
+            relative.find(':') != std::string::npos) {
             throw std::runtime_error("session bundle names a file outside its save directory");
         }
-        std::filesystem::create_directories(target.parent_path(), error);
-        if (std::FILE* out = open_file(target, L"wb")) {
-            std::fwrite(s.bundle.data() + at, 1, size, out);
-            std::fclose(out);
+        if (kind == 1u) {
+            const std::uint32_t size = get_u32(s.bundle, at);
+            if (at + size > s.bundle.size()) throw std::runtime_error("truncated session bundle");
+            std::filesystem::create_directories(target.parent_path(), error);
+            (void)write_all(target, s.bundle.data() + at, size);
+            at += size;
+            ++files;
+        } else {
+            std::filesystem::create_directories(target, error);
         }
-        at += size;
+        const std::uint32_t meta_size = get_u32(s.bundle, at);
+        if (at + meta_size > s.bundle.size()) throw std::runtime_error("truncated session bundle");
+        if (meta_size != 0u) {
+            std::filesystem::path stream = target;
+            stream += kNandMetaStream;
+            (void)write_all(stream, s.bundle.data() + at, meta_size);
+        }
+        at += meta_size;
     }
     const std::uint32_t settings_length = get_u32(s.bundle, at);
     if (at + settings_length > s.bundle.size()) throw std::runtime_error("truncated session bundle");

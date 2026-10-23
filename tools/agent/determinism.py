@@ -291,7 +291,8 @@ def cmd_netpair(args):
         if args.dump:
             env['GALAXY_STATE_DUMP'] = '%d,%s' % (args.dump, os.path.join(out, 'mem-%s.bin' % role))
         env.update(extra)
-        inst.launch(fresh_saves=True, extra_env=env)
+        env.update(parse_env(args.host_env if role == 'host' else args.join_env))
+        inst.launch(fresh_saves=True, extra_env=env, audio=args.audio)
         copies.append(inst)
     host = copies[0]
     try:
@@ -401,6 +402,9 @@ def main(argv=None):
     net.add_argument('--scenario', choices=('opening', 'observatory'), default='opening',
                      help="the host's play: A presses through the opening, or into file 1 and around the Observatory")
     net.add_argument('--symbols', default=None)
+    net.add_argument('--audio', action='store_true', help='audio output on in both copies')
+    net.add_argument('--host-env', action='append', help='NAME=VALUE for the host only')
+    net.add_argument('--join-env', action='append', help='NAME=VALUE for the joiner only')
     args = parser.parse_args(argv)
     if args.command == 'netpair':
         return cmd_netpair(args)

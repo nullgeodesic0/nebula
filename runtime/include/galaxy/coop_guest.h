@@ -53,5 +53,9 @@ void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeService
 // The second player's controller, published by the input thread and read once a game frame.
 void coop_publish_partner_input(const coop::PartnerInput& input) noexcept;
 [[nodiscard]] coop::PartnerInput coop_partner_input();
+// Online play replaces the source (netplay_session.cpp): the second player's controller from the synchronised
+// input, the same on both PCs. Returns false to fall back to this PC's.
+using CoopPartnerInputSource = bool (*)(coop::PartnerInput& out);
+void coop_set_partner_input_source(CoopPartnerInputSource source) noexcept;
 
 }  // namespace galaxy

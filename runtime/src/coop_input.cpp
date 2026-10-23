@@ -39,7 +39,19 @@ void coop_publish_partner_input(const coop::PartnerInput& input) noexcept {
     slot.input = input;
 }
 
+namespace {
+CoopPartnerInputSource g_partner_input_source = nullptr;
+}  // namespace
+
+void coop_set_partner_input_source(CoopPartnerInputSource source) noexcept {
+    g_partner_input_source = source;
+}
+
 coop::PartnerInput coop_partner_input() {
+    if (g_partner_input_source != nullptr) {
+        coop::PartnerInput input;
+        if (g_partner_input_source(input)) return input;
+    }
     const agent::Pad pad = agent_pad(1u);
     if (pad.active) {
         // The agent has the second player's controller (agent.h).

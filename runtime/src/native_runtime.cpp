@@ -5187,6 +5187,8 @@ bool deterministic_mode() {
             (void)_putenv_s("GALAXY_RENDER_MEMORY_SNAPSHOT", "1");
             (void)_putenv_s("GALAXY_INDEPENDENT_VI_PE_COMPLETION", "0");
             (void)_putenv_s("GALAXY_NATIVE_MOUSE_POINTER_FRAME", "0");
+            // The dynamic aspect takes the window's shape into the guest's camera: two PCs' windows differ.
+            (void)_wputenv_s(L"GALAXY_EXPERIMENTAL_DYNAMIC_ASPECT", L"0");
             if (deterministic_unpaced()) {
                 // Nothing paces the run: frames are not shown (the render thread then never waits on the
                 // display) and audio is off (its output would block once real time fell behind). The renderer
