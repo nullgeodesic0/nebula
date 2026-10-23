@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
 
 namespace galaxy {
 
@@ -29,7 +30,7 @@ struct NetInput {
 
 // Session-wide actions from a player's online menu (net_lobby.cpp), carried by their input so both PCs act on
 // the same frame (agent_guest.cpp netplay_apply_command).
-enum class NetCommand : std::uint32_t { None = 0, ExitGalaxy = 1 };
+enum class NetCommand : std::uint32_t { None = 0, ExitGalaxy = 1, Join = 2 };
 
 // The next local input carries `command` (net_local_input).
 void net_request_command(NetCommand command) noexcept;
@@ -52,6 +53,27 @@ void net_local_input(std::uint32_t frame, std::uint32_t count, const std::uint8_
 
 // The input of `player` (0 host, 1 joiner) for `frame`; waits for the peer's when it has not arrived.
 [[nodiscard]] const NetInput& net_input(std::uint32_t frame, unsigned player);
+
+// Live join (docs/HOT_JOIN.md): a joinable game is deterministic from boot and runs as a session host on its own
+// (the solo phase: its player's input is its controller's at once, the second player's neutral, Luigi sitting
+// out). Accepting a joiner snapshots the game at the next frame F and keeps playing; the snapshot, then every frame's
+// input from F on, go to the joiner as one stream. The joiner (restarted once into GALAXY_NET_JOIN with
+// GALAXY_NET_HOTJOIN=1, with the host's saves) boots to its title, loads the snapshot, replays the host's inputs
+// unpaced and unrendered and says when it has caught up; the host then names the join frame J, whose input carries
+// NetCommand::Join (Luigi drops in on both PCs) and from which the session is lockstep with input delay.
+[[nodiscard]] bool net_live() noexcept;
+// Host: in the solo phase with nobody joining, so a joiner can be taken live.
+[[nodiscard]] bool net_live_can_accept() noexcept;
+// Host (the lobby's thread, its listening socket closed): the session opens on `port` and the snapshot is taken
+// at the next frame.
+void net_live_accept(unsigned port);
+// netplay.cpp, at a frame's start (the first player's KPAD read, before its input):
+[[nodiscard]] bool net_live_snapshot_due() noexcept;                                   // host: capture now
+void net_live_snapshot_taken(std::uint32_t frame, std::vector<std::uint8_t>&& image);  // host: the capture's image
+// Joiner: the snapshot's image when this frame is the one to load it at (it waits for the image there), else null.
+// The session keeps it until net_live_resumed.
+[[nodiscard]] const std::vector<std::uint8_t>* net_live_load_due(std::uint32_t frame);
+void net_live_resumed(std::uint32_t frame);  // joiner: running the host's game from its frame `frame`
 
 // EFB peeks: this PC's answer for the `sequence`-th peek of `frame`, and the answer both PCs use (the host's,
 // from `delay + 1` frames earlier, or `local` before there is one).

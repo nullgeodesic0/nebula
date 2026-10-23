@@ -6,6 +6,7 @@
 #endif
 #include <windows.h>
 #include <Psapi.h>
+#include <compressapi.h>
 #include <intrin.h>
 
 #include <algorithm>
@@ -13,6 +14,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+
+#pragma comment(lib, "Cabinet.lib")
 
 namespace galaxy::hot_join {
 namespace {
@@ -278,12 +281,16 @@ std::size_t audit_arena(const std::vector<std::pair<const void*, std::size_t>>& 
     return hits;
 }
 
-bool write_file(const std::string& path, const FileHeader& header) {
-    std::FILE* file = nullptr;
-    if (fopen_s(&file, path.c_str(), "wb") != 0 || file == nullptr) return false;
-    const auto u32 = [&](std::uint32_t v) { std::fwrite(&v, sizeof(v), 1, file); };
-    const auto u64 = [&](std::uint64_t v) { std::fwrite(&v, sizeof(v), 1, file); };
-    std::fwrite("NBJOIN1\0", 8, 1, file);
+std::vector<std::uint8_t> make_image(const FileHeader& header) {
+    std::vector<std::uint8_t> out;
+    out.reserve(g_used + 8192u);
+    const auto put = [&](const void* data, std::size_t size) {
+        const auto* bytes = static_cast<const std::uint8_t*>(data);
+        out.insert(out.end(), bytes, bytes + size);
+    };
+    const auto u32 = [&](std::uint32_t v) { put(&v, sizeof(v)); };
+    const auto u64 = [&](std::uint64_t v) { put(&v, sizeof(v)); };
+    put("NBJOIN1\0", 8);
     u32(header.frame);
     u64(header.root);
     u64(kArenaBase);
@@ -293,28 +300,33 @@ bool write_file(const std::string& path, const FileHeader& header) {
         u64(range.lo);
         u64(range.hi);
         u32(static_cast<std::uint32_t>(range.name.size()));
-        std::fwrite(range.name.data(), 1, range.name.size(), file);
+        put(range.name.data(), range.name.size());
     }
-    const bool ok = std::fwrite(g_arena, 1, g_used, file) == g_used;
-    return std::fclose(file) == 0 && ok;
+    put(g_arena, g_used);
+    return out;
 }
 
-bool read_file(const std::string& path, FileHeader& header) {
-    std::FILE* file = nullptr;
-    if (fopen_s(&file, path.c_str(), "rb") != 0 || file == nullptr) return false;
+bool adopt_image(const std::uint8_t* data, std::size_t size, FileHeader& header) {
+    std::size_t at = 0u;
     bool ok = true;
+    const auto take = [&](void* out, std::size_t n) {
+        ok = ok && at + n <= size;
+        if (ok) std::memcpy(out, data + at, n);
+        at += n;
+    };
     const auto u32 = [&] {
         std::uint32_t v = 0u;
-        ok = ok && std::fread(&v, sizeof(v), 1, file) == 1;
+        take(&v, sizeof(v));
         return v;
     };
     const auto u64 = [&] {
         std::uint64_t v = 0u;
-        ok = ok && std::fread(&v, sizeof(v), 1, file) == 1;
+        take(&v, sizeof(v));
         return v;
     };
     char magic[8]{};
-    ok = std::fread(magic, 8, 1, file) == 1 && std::memcmp(magic, "NBJOIN1\0", 8) == 0;
+    take(magic, 8);
+    ok = ok && std::memcmp(magic, "NBJOIN1\0", 8) == 0;
     header.frame = u32();
     header.root = u64();
     const std::uint64_t base = u64();
@@ -325,14 +337,84 @@ bool read_file(const std::string& path, FileHeader& header) {
         Range range;
         range.lo = u64();
         range.hi = u64();
-        range.name.resize(u32());
-        ok = ok && std::fread(range.name.data(), 1, range.name.size(), file) == range.name.size();
+        const std::uint32_t length = u32();
+        ok = ok && length < 4096u && at + length <= size;
+        if (!ok) break;
+        range.name.assign(reinterpret_cast<const char*>(data + at), length);
+        at += length;
         header.ranges.push_back(std::move(range));
     }
-    ok = ok && base == kArenaBase && used <= kArenaReserve && reserve() && commit(used) &&
-         std::fread(g_arena, 1, used, file) == used;
-    if (ok) g_used = used;
+    ok = ok && base == kArenaBase && used <= kArenaReserve && at + used == size && reserve() && commit(used);
+    if (!ok) return false;
+    std::memcpy(g_arena, data + at, used);
+    g_used = used;
+    return true;
+}
+
+bool write_file(const std::string& path, const FileHeader& header) {
+    const std::vector<std::uint8_t> image = make_image(header);
+    std::FILE* file = nullptr;
+    if (fopen_s(&file, path.c_str(), "wb") != 0 || file == nullptr) return false;
+    const bool ok = std::fwrite(image.data(), 1, image.size(), file) == image.size();
+    return std::fclose(file) == 0 && ok;
+}
+
+bool read_file(const std::string& path, FileHeader& header) {
+    std::FILE* file = nullptr;
+    if (fopen_s(&file, path.c_str(), "rb") != 0 || file == nullptr) return false;
+    std::vector<std::uint8_t> image;
+    std::uint8_t buffer[1u << 16];
+    for (std::size_t n; (n = std::fread(buffer, 1, sizeof(buffer), file)) != 0u;) image.insert(image.end(), buffer, buffer + n);
     std::fclose(file);
+    return adopt_image(image.data(), image.size(), header);
+}
+
+std::size_t relocate_arena(const std::vector<std::pair<const void*, std::size_t>>& skip, const std::vector<Range>& from,
+                           const std::vector<Range>& to) {
+    std::vector<Range> modules_from, modules_to;
+    for (const Range& r : from) {
+        if (r.name.rfind("module:", 0) == 0) modules_from.push_back(r);
+    }
+    for (const Range& r : to) {
+        if (r.name.rfind("module:", 0) == 0) modules_to.push_back(r);
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> holes;  // arena offsets [begin, end) left alone
+    for (const auto& [p, n] : skip) {
+        const std::size_t begin = static_cast<std::size_t>(address(p) - kArenaBase);
+        holes.push_back({begin & ~std::size_t{7}, begin + n});
+    }
+    std::sort(holes.begin(), holes.end());
+    std::size_t moved = 0u;
+    std::size_t at = 0u;
+    for (const auto& [begin, end] : holes) {
+        if (begin > at) moved += relocate(g_arena + at, begin - at, modules_from, modules_to);
+        at = std::max(at, (end + 7u) & ~std::size_t{7});
+    }
+    if (at < g_used) moved += relocate(g_arena + at, g_used - at, modules_from, modules_to);
+    return moved;
+}
+
+std::vector<std::uint8_t> compress(const std::uint8_t* data, std::size_t size) {
+    std::vector<std::uint8_t> out;
+    COMPRESSOR_HANDLE compressor = nullptr;
+    if (!CreateCompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &compressor)) return out;
+    SIZE_T needed = 0u;
+    (void)Compress(compressor, data, size, nullptr, 0u, &needed);
+    out.resize(needed);
+    if (!Compress(compressor, data, size, out.data(), out.size(), &needed)) needed = 0u;
+    out.resize(needed);
+    CloseCompressor(compressor);
+    return out;
+}
+
+bool decompress(const std::uint8_t* data, std::size_t size, std::vector<std::uint8_t>& out) {
+    DECOMPRESSOR_HANDLE decompressor = nullptr;
+    if (!CreateDecompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &decompressor)) return false;
+    SIZE_T needed = 0u;
+    (void)Decompress(decompressor, data, size, nullptr, 0u, &needed);
+    out.resize(needed);
+    const bool ok = Decompress(decompressor, data, size, out.data(), out.size(), &needed) && needed == out.size();
+    CloseDecompressor(decompressor);
     return ok;
 }
 

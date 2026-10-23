@@ -5171,6 +5171,9 @@ bool deterministic_unpaced() {
     return enabled;
 }
 
+// A hot-join joiner catching up with the host (hot_join_catch_up): unpaced until it reaches the host's frame.
+std::atomic<bool> g_hot_join_catch_up{false};
+
 bool deterministic_mode();
 
 // How long a frame-completion probe may block for the render thread: 0 (a probe; the guest runs on meanwhile)
@@ -18858,7 +18861,7 @@ void deterministic_advance_to(RuntimeState& state, std::uint64_t target_ticks, c
     trace_deterministic_advance(state, why, now, target_ticks);
     // Unpaced probes never wait. An online session waits here too: virtual time kept to real time is what paces
     // it (a game frame can span several VI frames, so pacing game frames would make audio faster than it plays).
-    if (deterministic_unpaced()) {
+    if (deterministic_unpaced() || g_hot_join_catch_up.load(std::memory_order_relaxed)) {
         state.virtual_idle_ticks += target_ticks - now;
         (void)runtime_time_base_ticks(state);  // publishes what is now due
         return;
@@ -30626,9 +30629,9 @@ double hot_join_ms_since(std::chrono::steady_clock::time_point started) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 }
 
-// Saves the machine into the snapshot arena and writes it to `path`. Returns false; returns true in a second process
-// that loaded the file (hot_join_load) and resumed here.
-bool hot_join_write(void* user, const char* path, std::uint32_t frame) {
+// Saves the machine into the snapshot arena and hands back its image (the header and the arena). Returns false;
+// returns true in a second process that adopted the image (hot_join_load_image) and resumed here.
+bool hot_join_capture(void* user, std::uint32_t frame, std::vector<std::uint8_t>* image) {
     auto& live = *static_cast<RollbackSnapshot*>(user);
     const auto started = std::chrono::steady_clock::now();
     RollbackSnapshot* root = nullptr;
@@ -30646,7 +30649,7 @@ bool hot_join_write(void* user, const char* path, std::uint32_t frame) {
         resumed = rollback_save(root);
     }
     if (resumed) {
-        galaxy::hot_join::trace("hot_join_write returns");
+        galaxy::hot_join::trace("hot_join_capture returns");
         return true;
     }
     {
@@ -30656,7 +30659,7 @@ bool hot_join_write(void* user, const char* path, std::uint32_t frame) {
     const double save_ms = hot_join_ms_since(started);
     std::vector<std::pair<const void*, std::size_t>> ram;
     for (const auto& copy : root->ram) ram.push_back({copy.data(), copy.size()});
-    for (const auto& image : root->scheduler.stacks) ram.push_back({image.bytes.data(), image.bytes.size()});
+    for (const auto& stack : root->scheduler.stacks) ram.push_back({stack.bytes.data(), stack.bytes.size()});
     if (galaxy::hot_join::audit_arena(ram) != 0u && !rollback_env("GALAXY_HOT_JOIN_TRACE").empty()) {
         // The root is the arena's first object: name the runtime fields by their offsets in it.
 #define GALAXY_HOT_JOIN_FIELD_OFFSET(name)                                                     \
@@ -30669,24 +30672,36 @@ bool hot_join_write(void* user, const char* path, std::uint32_t frame) {
     header.frame = frame;
     header.root = reinterpret_cast<std::uint64_t>(root);
     header.ranges = galaxy::hot_join::host_ranges(live.state, hot_join_anchors(*live.state));
-    const bool written = galaxy::hot_join::write_file(path, header);
-    std::fprintf(stderr, "[hot-join] frame %u: %s %s (%zu bytes of arena, %zu ranges): save %.1f ms, total %.1f ms\n",
-                 frame, written ? "wrote" : "FAILED to write", path, galaxy::hot_join::arena_used(),
-                 header.ranges.size(), save_ms, hot_join_ms_since(started));
+    if (image != nullptr) *image = galaxy::hot_join::make_image(header);
+    std::fprintf(stderr, "[hot-join] frame %u: snapshot of %zu bytes (%zu ranges): save %.1f ms, total %.1f ms\n", frame,
+                 galaxy::hot_join::arena_used(), header.ranges.size(), save_ms, hot_join_ms_since(started));
     return false;
 }
 
-// Loads a snapshot another process wrote and resumes it: the fiber that wrote it continues inside hot_join_write.
-// Returns only if the file cannot be used.
-void hot_join_load(void* user, const char* path) {
+// GALAXY_SNAPSHOT_WRITE: the image to a file.
+bool hot_join_write(void* user, const char* path, std::uint32_t frame) {
+    std::vector<std::uint8_t> image;
+    if (hot_join_capture(user, frame, &image)) return true;
+    std::FILE* file = nullptr;
+    bool written = fopen_s(&file, path, "wb") == 0 && file != nullptr;
+    if (written) {
+        written = std::fwrite(image.data(), 1, image.size(), file) == image.size();
+        written = std::fclose(file) == 0 && written;
+    }
+    std::fprintf(stderr, "[hot-join] frame %u: %s %s\n", frame, written ? "wrote" : "FAILED to write", path);
+    return false;
+}
+
+// Adopts an image another process captured and resumes it: the fiber that captured it continues inside
+// hot_join_capture. Returns only if the image cannot be used.
+void hot_join_load_image(void* user, const std::uint8_t* data, std::size_t size) {
     auto& live = *static_cast<RollbackSnapshot*>(user);
     const auto started = std::chrono::steady_clock::now();
     galaxy::hot_join::FileHeader header;
-    if (!galaxy::hot_join::read_file(path, header)) {
-        std::fprintf(stderr, "[hot-join] cannot load %s\n", path);
+    if (!galaxy::hot_join::adopt_image(data, size, header)) {
+        std::fprintf(stderr, "[hot-join] the snapshot image cannot be used\n");
         return;
     }
-    const double read_ms = hot_join_ms_since(started);
     auto* root = reinterpret_cast<RollbackSnapshot*>(header.root);
     root->state = live.state;
     root->context = live.context;
@@ -30694,25 +30709,60 @@ void hot_join_load(void* user, const char* path) {
     const auto here = galaxy::hot_join::host_ranges(live.state, hot_join_anchors(*live.state));
     std::vector<std::string> unmatched;
     std::size_t moved = 0u;
-    for (auto& image : root->scheduler.stacks) {
-        moved += galaxy::hot_join::relocate(image.bytes.data(), image.bytes.size(), header.ranges, here, &unmatched);
+    std::vector<std::pair<const void*, std::size_t>> skip;
+    for (const auto& copy : root->ram) skip.push_back({copy.data(), copy.size()});
+    for (auto& stack : root->scheduler.stacks) {
+        moved += galaxy::hot_join::relocate(stack.bytes.data(), stack.bytes.size(), header.ranges, here, &unmatched);
+        skip.push_back({stack.bytes.data(), stack.bytes.size()});
     }
+    // The snapshot's own objects hold a few image addresses too (shared_ptr control blocks' vtables): another PC
+    // loads the runtime and the game module elsewhere.
+    const std::size_t moved_in_arena = galaxy::hot_join::relocate_arena(skip, header.ranges, here);
     for (const auto& range : header.ranges) {
         const auto same = std::find_if(here.begin(), here.end(), [&](const auto& r) { return r.name == range.name; });
-        if (same != here.end() && same->lo != range.lo) {
+        if (same != here.end() && same->lo != range.lo && range.name.rfind("tls:", 0) != 0) {
             std::fprintf(stderr, "[hot-join]   %s moved 0x%llx -> 0x%llx\n", range.name.c_str(),
                          static_cast<unsigned long long>(range.lo), static_cast<unsigned long long>(same->lo));
         }
     }
-    for (const auto& name : unmatched) std::fprintf(stderr, "[hot-join]   %s: not in this process\n", name.c_str());
+    for (const auto& name : unmatched) {
+        if (name.rfind("module:", 0) != 0 && name.rfind("tls:", 0) != 0) {
+            std::fprintf(stderr, "[hot-join]   %s: not in this process\n", name.c_str());
+        }
+    }
     live.state->coop->adopt_stacks(root->scheduler);
     live.state->address_space->adopt_device_snapshot(*root->devices);
-    std::fprintf(stderr, "[hot-join] loaded frame %u from %s: read %.1f ms, %zu stack words relocated, %.1f ms\n",
-                 header.frame, path, read_ms, moved, hot_join_ms_since(started));
+    std::fprintf(stderr,
+                 "[hot-join] loaded frame %u: %zu stack words and %zu snapshot words relocated, %.1f ms\n",
+                 header.frame, moved, moved_in_arena, hot_join_ms_since(started));
     std::fflush(stderr);
     galaxy::hot_join::set_resuming(true);
     galaxy::hot_join::trace("restore");
     rollback_restore(root);
+}
+
+// GALAXY_SNAPSHOT_LOAD: an image from a file.
+void hot_join_load(void* user, const char* path) {
+    std::FILE* file = nullptr;
+    if (fopen_s(&file, path, "rb") != 0 || file == nullptr) {
+        std::fprintf(stderr, "[hot-join] cannot open %s\n", path);
+        return;
+    }
+    std::vector<std::uint8_t> image;
+    std::vector<std::uint8_t> buffer(1u << 20);
+    for (std::size_t n; (n = std::fread(buffer.data(), 1, buffer.size(), file)) != 0u;) {
+        image.insert(image.end(), buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(n));
+    }
+    std::fclose(file);
+    hot_join_load_image(user, image.data(), image.size());
+}
+
+// A joiner catching up with the host (netplay_session.cpp): its virtual time does not wait for real time and its
+// frames are not rendered.
+void hot_join_catch_up(void*, bool on) {
+    g_hot_join_catch_up.store(on, std::memory_order_relaxed);
+    galaxy::gx::set_render_suppressed(on);
+    std::fprintf(stderr, "[hot-join] catching up: %s\n", on ? "on" : "off");
 }
 
 void start_cooperative_scheduler(
@@ -30751,7 +30801,7 @@ void start_cooperative_scheduler(
         if (!profile_resim) return;
         g_sim_profiler.set_sampling(on);
         if (!on) g_sim_profiler.stop_and_print(std::cerr);
-    }, &hot_join_write, &hot_join_load});
+    }, &hot_join_write, &hot_join_load, &hot_join_capture, &hot_join_load_image, &hot_join_catch_up});
     if (read_env_flag("GALAXY_SIM_PROFILE_RESIM", false)) g_sim_profiler.set_sampling(false);
     galaxy::netplay_set_digest_hook(
         [](void* user) {

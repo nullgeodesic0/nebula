@@ -833,6 +833,7 @@ void rejoin_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServic
             request_stage(guest, "AstroGalaxy", 1);
             std::fprintf(stderr, "[net] exiting %s for the Observatory\n", scene.stage.c_str());
         }
+        if (command == static_cast<std::uint32_t>(NetCommand::Join)) coop_request_drop_in();
     }
     if (!r.active && !net_location_wanted()) return;
     const Guest guest(context, memory, services, guest_pc);

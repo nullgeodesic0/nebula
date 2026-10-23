@@ -59,9 +59,21 @@ struct FileHeader {
     std::uint64_t root = 0u;
     std::vector<Range> ranges;
 };
+// The image: the header, then the arena's bytes (what a file holds, and what a live join sends compressed).
+[[nodiscard]] std::vector<std::uint8_t> make_image(const FileHeader& header);
+// Reads an image's header and adopts its arena.
+bool adopt_image(const std::uint8_t* data, std::size_t size, FileHeader& header);
 bool write_file(const std::string& path, const FileHeader& header);
-// Reads the header and adopts the arena image.
 bool read_file(const std::string& path, FileHeader& header);
+
+// Another PC's image bases: words of the adopted arena (outside `skip`: the guest RAM copies and the stacks, which
+// relocate() moves with every range) that lie in a module of `from` move to that module in `to`. Returns how many.
+std::size_t relocate_arena(const std::vector<std::pair<const void*, std::size_t>>& skip, const std::vector<Range>& from,
+                           const std::vector<Range>& to);
+
+// The Windows Compression API's XPRESS with Huffman: fast, and part of every Windows since 8.
+[[nodiscard]] std::vector<std::uint8_t> compress(const std::uint8_t* data, std::size_t size);
+bool decompress(const std::uint8_t* data, std::size_t size, std::vector<std::uint8_t>& out);
 
 // Words of the arena (outside `skip`, the guest RAM copies) that point into this process's private or mapped memory
 // other than the arena, the stack pool and the flat guest view: what another process would not have. Logs the first

@@ -615,6 +615,7 @@ struct State {
     std::uint32_t join_buttons = 0u;   // his controller's buttons last frame
     unsigned leave_frames = 0u;        // frames − has been held
     bool join_seen_connected = false;  // his controller has been connected since he dropped in
+    bool drop_in_requested = false;    // online live join: NetCommand::Join came (coop_request_drop_in)
     bool second_hidden_for_start = false;
     std::uint32_t star_traced = 0u;
     bool hud_tried = false;
@@ -889,7 +890,8 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     // Hot join: made in every stage, in the game or sitting out as he was (a game starts as the boot's co-op
     // setting or the save select's Multiplayer switch says).
     if (!s.present_known) {
-        s.present = coop_enabled();
+        // A live-joinable game (net_live) plays alone until a joiner drops in.
+        s.present = coop_enabled() && !net_live();
         s.present_known = true;
     }
     coop_set_second_present(s.present);
@@ -2243,9 +2245,34 @@ void sit_out(const Guest& guest, State& s) {
 // In the second player's turn, after his move: + on his controller while he is out drops him in beside the first;
 // − held, or his controller disconnected, drops him out. Not while the first is down, a miss plays or the level
 // starts (a press then waits for the next).
+// Drops the second player in beside the first.
+void drop_in(const Guest& guest, State& s, coop::Vec3 first_position, coop::Vec3 first_side) {
+    s.present = true;
+    s.join_seen_connected = true;
+    s.leave_frames = 0u;
+    s.down[1] = {};
+    coop_set_second_present(true);
+    respawn_player(guest, s.second, first_position + first_side * 120.0f);
+    // His HUD back (sit_out killed it): the meter and the lives counter shown again, as a stage starts them.
+    if (plausible(s.second_meter)) {
+        guest.call(fn::kMeterRequests[0], s.second_meter);  // MeterLayout::requestActive
+        guest.call(fn::kShowLayout, s.second_meter);
+    }
+    if (plausible(s.second_left)) guest.call(fn::kPlayerLeftCalls[1], s.second_left);  // PlayerLeft::forceAppear
+    tint_second_meter(guest, s);
+    trace("second player drops in");
+}
+
 void update_presence(const Guest& guest, State& s, coop::Vec3 first_position, coop::Vec3 first_side) {
-    // Online the second player is the other PC's, in for the whole session.
-    if (net_session_requested()) return;
+    // Online the second player is the other PC's: in for the whole session, or (a live join) from the frame both
+    // PCs carry out NetCommand::Join on.
+    if (net_session_requested()) {
+        if (!s.present && s.drop_in_requested && !s.down[0].down && !s.game_miss && !s.level_start) {
+            s.drop_in_requested = false;
+            drop_in(guest, s, first_position, first_side);
+        }
+        return;
+    }
     const coop::PartnerInput input = coop_partner_input();
     const std::uint32_t buttons = input.connected ? input.buttons : 0u;
     const std::uint32_t pressed = buttons & ~s.join_buttons;
@@ -2253,20 +2280,7 @@ void update_presence(const Guest& guest, State& s, coop::Vec3 first_position, co
     namespace b = coop::button;
     if (!s.present) {
         if ((pressed & b::kPlus) == 0u || s.down[0].down || s.game_miss || s.level_start) return;
-        s.present = true;
-        s.join_seen_connected = true;
-        s.leave_frames = 0u;
-        s.down[1] = {};
-        coop_set_second_present(true);
-        respawn_player(guest, s.second, first_position + first_side * 120.0f);
-        // His HUD back (sit_out killed it): the meter and the lives counter shown again, as a stage starts them.
-        if (plausible(s.second_meter)) {
-            guest.call(fn::kMeterRequests[0], s.second_meter);  // MeterLayout::requestActive
-            guest.call(fn::kShowLayout, s.second_meter);
-        }
-        if (plausible(s.second_left)) guest.call(fn::kPlayerLeftCalls[1], s.second_left);  // PlayerLeft::forceAppear
-        tint_second_meter(guest, s);
-        trace("second player drops in");
+        drop_in(guest, s, first_position, first_side);
         return;
     }
     s.leave_frames = (buttons & b::kMinus) != 0u ? s.leave_frames + 1u : 0u;
@@ -3045,7 +3059,7 @@ void file_select_frame(const Guest& guest, std::uint32_t samples) {
     // Hot join: the Multiplayer switch says whether the save starts with the second player in the game.
     if (coop_hot_join()) {
         State& s = state();
-        s.present = settings.coop;
+        s.present = settings.coop && !net_live();
         s.present_known = true;
         coop_set_second_present(s.present);
     }
@@ -3622,6 +3636,10 @@ void coop_request_second_player_teleport(coop::Vec3 position) noexcept {
 
 void coop_request_second_player_mode(std::uint16_t mode) noexcept {
     state().agent_mode = mode;
+}
+
+void coop_request_drop_in() noexcept {
+    state().drop_in_requested = true;
 }
 
 int coop_second_lives() noexcept {

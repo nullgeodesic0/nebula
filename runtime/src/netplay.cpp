@@ -310,6 +310,32 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
                 std::fprintf(stderr, "[netplay] joined: resumed at frame %u from a snapshot file\n", frame);
             }
         }
+        // Live join (netplay_session.cpp): the host captures here when a joiner was accepted; the joiner loads that
+        // capture at its own early frame and wakes up in the host's capture, as the host's frame. (No local here
+        // owns heap memory across the capture: the joiner would free the host's.)
+        if (n.snapshot_hooks.capture != nullptr && net_live_snapshot_due()) {
+            const std::uint32_t frame = n.frame;
+            const std::uint32_t channel = n.channel;
+            const std::uint32_t buffer = n.buffer;
+            std::vector<std::uint8_t> image;
+            if (n.snapshot_hooks.capture(n.snapshot_hooks.user, frame, &image)) {
+                n.frame = frame;
+                n.channel = channel;
+                n.buffer = buffer;
+                n.write_frame = 0xFFFFFFFFu;
+                n.load_frame = 0xFFFFFFFFu;
+                net_live_resumed(frame);
+            } else {
+                net_live_snapshot_taken(frame, std::move(image));
+            }
+        }
+        if (n.snapshot_hooks.load_image != nullptr) {
+            if (const std::vector<std::uint8_t>* image = net_live_load_due(n.frame)) {
+                std::fprintf(stderr, "[netplay] frame %u: loading the host's game\n", n.frame);
+                std::fflush(stderr);
+                n.snapshot_hooks.load_image(n.snapshot_hooks.user, image->data(), image->size());
+            }
+        }
         if (n.snapshot_hooks.load != nullptr && n.frame == n.load_frame) {
             n.load_frame = 0xFFFFFFFFu;
             std::fprintf(stderr, "[netplay] frame %u: loading %s\n", n.frame, n.load_path.c_str());
@@ -483,6 +509,10 @@ std::uint32_t netplay_efb_peek(bool depth, std::uint32_t local_value) noexcept {
 
 void netplay_set_snapshot_hooks(const NetplaySnapshotHooks& hooks) noexcept {
     netplay().snapshot_hooks = hooks;
+}
+
+const NetplaySnapshotHooks& netplay_snapshot_hooks() noexcept {
+    return netplay().snapshot_hooks;
 }
 
 void netplay_set_digest_hook(void (*trace)(void* user), void* user) noexcept {
