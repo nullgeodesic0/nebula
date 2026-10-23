@@ -275,7 +275,8 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
     if (n.channel == 0u) {
         n.peek_sequence = 0u;
         net_frame_begin(n.frame, memory);
-        if (net_session_requested() && net_rollback_enabled() && n.snapshot_hooks.ring_save != nullptr) {
+        if (net_session_requested() && (net_rollback_frame(n.frame) || n.resim_to != kNoFrame) &&
+            n.snapshot_hooks.ring_save != nullptr) {
             rollback_frame_start(n);
         } else if (n.ring_test_depth != 0u && n.snapshot_hooks.ring_save != nullptr && n.frame >= 580u) {
             // GALAXY_ROLLBACK_RING_TEST=<n>: every frame kept; every 47 frames, back 4n frames and forward again.

@@ -88,6 +88,8 @@
 #include <Psapi.h>
 #include <iostream>
 #include <limits>
+#include <execution>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -5244,7 +5246,10 @@ void update_native_audio_output_gate(
     static const bool mute_during_fast_boot =
         read_env_flag("GALAXY_FAST_BOOT_MUTE_AUDIO", false);
     if (state.address_space != nullptr) {
-        const bool enabled = use_realtime_vi || !mute_during_fast_boot;
+        // Frames simulated again (a rollback) or caught up (a live join) were heard already, or are not this PC's
+        // to play: the host sink gets none of their samples. Only the output: the guest's audio timing is as ever.
+        const bool enabled = (use_realtime_vi || !mute_during_fast_boot) &&
+                             !g_hot_join_catch_up.load(std::memory_order_relaxed);
         if (!state.native_audio_output_gate_valid ||
             state.native_audio_output_gate_enabled != enabled) {
             state.address_space->set_native_audio_output_enabled(enabled);
@@ -30680,17 +30685,32 @@ std::pair<std::byte*, std::byte*> rollback_block(RollbackRing& r, std::uint32_t 
     return {nullptr, nullptr};
 }
 
+// The blocks written since the shadow was taken, found by comparing RAM with it, a megabyte per task in
+// parallel. The renderer's dirty record cannot say: translated stores publish to it only where the renderer needs
+// them, and device writes (audio, ARAM DMA) to other trackers or none (verify mode showed thousands unseen a frame).
 template <typename Visit>
 void rollback_for_each_dirty(RollbackRing& r, Visit&& visit) {
-    for (std::size_t word = 0; word < r.dirty.size(); ++word) {
-        std::uint64_t bits = r.dirty[word];
-        r.dirty[word] = 0u;
-        while (bits != 0u) {
-            const unsigned bit = static_cast<unsigned>(std::countr_zero(bits));
-            bits &= bits - 1u;
-            visit(static_cast<std::uint32_t>(word * 64u + bit));
+    constexpr std::uint32_t kBlock = galaxy::gx::kRollbackBlockBytes;
+    constexpr std::uint32_t kChunkBytes = 0x00100000u;
+    constexpr std::uint32_t kMem1Chunks = 0x01800000u / kChunkBytes;
+    constexpr std::uint32_t kMem2Chunks = 0x04000000u / kChunkBytes;
+    std::array<std::vector<std::uint32_t>, kMem1Chunks + kMem2Chunks> changed;
+    std::array<std::uint32_t, kMem1Chunks + kMem2Chunks> chunks{};
+    for (std::uint32_t i = 0; i < chunks.size(); ++i) chunks[i] = i;
+    std::for_each(std::execution::par, chunks.begin(), chunks.end(), [&](std::uint32_t chunk) {
+        const bool mem1 = chunk < kMem1Chunks;
+        const std::size_t first = static_cast<std::size_t>(mem1 ? chunk : chunk - kMem1Chunks) * kChunkBytes;
+        const std::byte* live = (mem1 ? r.mem1 : r.mem2) + first;
+        const std::byte* shadow = (mem1 ? r.shadow1.data() : r.shadow2.data()) + first;
+        const std::uint32_t physical = (mem1 ? 0u : 0x10000000u) + static_cast<std::uint32_t>(first);
+        for (std::uint32_t at = 0; at < kChunkBytes; at += kBlock) {
+            if (std::memcmp(live + at, shadow + at, kBlock) != 0) changed[chunk].push_back((physical + at) / kBlock);
         }
+    });
+    for (const auto& blocks : changed) {
+        for (const std::uint32_t block : blocks) visit(block);
     }
+    r.dirty.fill(0u);
 }
 
 bool rollback_ring_attach(RollbackRing& r, const galaxy::GuestMemoryV1& memory) {
@@ -30744,20 +30764,33 @@ bool rollback_ring_save(std::uint32_t frame) {
     });
     static const bool verify = read_env_flag("GALAXY_ROLLBACK_VERIFY", false);
     if (verify) {
-        std::uint32_t missed = 0u;
-        for (std::uint32_t at = 0; at < 0x01800000u; at += kBlock) {
-            if (std::memcmp(r.mem1 + at, r.shadow1.data() + at, kBlock) != 0) {
-                if (missed++ < 4u) std::fprintf(stderr, "[rollback] verify: block at %08X written unseen\n", at);
-                std::memcpy(r.shadow1.data() + at, r.mem1 + at, kBlock);
+        // Unseen writes, counted by 64 KiB area (physical), the busiest listed every 300 saves.
+        static std::map<std::uint32_t, std::uint64_t> s_unseen;
+        static std::uint64_t s_verified = 0u;
+        const auto check = [&](std::byte* live, std::byte* shadow, std::uint32_t size, std::uint32_t physical) {
+            for (std::uint32_t at = 0; at < size; at += kBlock) {
+                if (std::memcmp(live + at, shadow + at, kBlock) != 0) {
+                    ++s_unseen[(physical + at) & ~0xFFFFu];
+                    std::memcpy(shadow + at, live + at, kBlock);
+                }
             }
-        }
-        for (std::uint32_t at = 0; at < 0x04000000u; at += kBlock) {
-            if (std::memcmp(r.mem2 + at, r.shadow2.data() + at, kBlock) != 0) {
-                if (missed++ < 4u) std::fprintf(stderr, "[rollback] verify: block at %08X written unseen\n", 0x10000000u + at);
-                std::memcpy(r.shadow2.data() + at, r.mem2 + at, kBlock);
+        };
+        check(r.mem1, r.shadow1.data(), 0x01800000u, 0u);
+        check(r.mem2, r.shadow2.data(), 0x04000000u, 0x10000000u);
+        if (++s_verified % 300u == 0u && !s_unseen.empty()) {
+            std::vector<std::pair<std::uint64_t, std::uint32_t>> busiest;
+            for (const auto& [area, count] : s_unseen) busiest.emplace_back(count, area);
+            std::sort(busiest.rbegin(), busiest.rend());
+            std::string line;
+            for (std::size_t i = 0; i < busiest.size() && i < 16u; ++i) {
+                char text[32];
+                std::snprintf(text, sizeof(text), " %08X:%llu", busiest[i].second,
+                              static_cast<unsigned long long>(busiest[i].first));
+                line += text;
             }
+            std::fprintf(stderr, "[rollback] verify: blocks written unseen by 64 KiB area (%zu areas):%s\n",
+                         busiest.size(), line.c_str());
         }
-        if (missed != 0u) std::fprintf(stderr, "[rollback] verify: frame %u, %u blocks written unseen\n", frame, missed);
     }
     if (s.state->external_dispatch.active() || s.state->draw_done_submit_owed) {
         // Not a frame a snapshot can hold (rollback_save_runtime): it is skipped, and a rollback to it goes back
@@ -31049,7 +31082,13 @@ void hot_join_load(void* user, const char* path) {
 void hot_join_catch_up(void*, bool on) {
     g_hot_join_catch_up.store(on, std::memory_order_relaxed);
     galaxy::gx::set_render_suppressed(on);
-    std::fprintf(stderr, "[hot-join] catching up: %s\n", on ? "on" : "off");
+    if (RuntimeState* state = rollback_snapshot().state; state != nullptr) {
+        state->native_audio_output_gate_valid = false;  // update_native_audio_output_gate looks again
+        if (state->address_space != nullptr) state->address_space->set_native_audio_output_enabled(!on);
+    }
+    // A rollback's re-simulation switches this on and off often: logged for a live join only.
+    static std::uint64_t s_switches = 0u;
+    if (s_switches++ < 4u) std::fprintf(stderr, "[hot-join] catching up: %s\n", on ? "on" : "off");
 }
 
 void start_cooperative_scheduler(

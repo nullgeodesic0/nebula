@@ -80,6 +80,9 @@ void net_live_resumed(std::uint32_t frame);  // joiner: running the host's game 
 // PC may run). net_rollback_target, at a frame's start: the oldest frame that ran on a prediction now known wrong
 // (netplay.cpp restores it and simulates forward again), or 0xFFFFFFFF.
 [[nodiscard]] bool net_rollback_enabled() noexcept;
+// Whether `frame` may run on a prediction: rollback on, the peer connected, the session in lockstep. Only such
+// frames are kept for a rollback.
+[[nodiscard]] bool net_rollback_frame(std::uint32_t frame) noexcept;
 [[nodiscard]] std::uint32_t net_rollback_target(std::uint32_t frame);
 // Frames being simulated again: nothing of this PC (controller, peek answers) is sampled or sent anew.
 void net_set_resimulating(bool on) noexcept;

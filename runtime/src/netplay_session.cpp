@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <string>
 #include <thread>
 #include <vector>
@@ -252,8 +253,50 @@ std::uint64_t build_identity() {
     return h;
 }
 
+// GALAXY_NET_TEST_LATENCY_MS=<ms>: every datagram this PC sends leaves that much later (tests of rollback on one
+// PC, where the network is instant). Held ones go out as later sends and receives pass by.
+struct HeldDatagram {
+    std::int64_t due = 0;
+    std::vector<char> bytes;
+};
+
+std::int64_t qpc_now() {
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    return now.QuadPart;
+}
+
+std::deque<HeldDatagram>& held_datagrams() {
+    static std::deque<HeldDatagram> held;
+    return held;
+}
+
+std::int64_t test_latency_ticks(const Session& s) {
+    static const std::int64_t ticks = [&] {
+        const int ms = std::atoi(env("GALAXY_NET_TEST_LATENCY_MS").c_str());
+        return ms > 0 ? s.frequency.QuadPart * ms / 1000 : 0;
+    }();
+    return ticks;
+}
+
+void flush_held(Session& s) {
+    auto& held = held_datagrams();
+    const std::int64_t now = qpc_now();
+    while (!held.empty() && held.front().due <= now) {
+        (void)sendto(s.socket, held.front().bytes.data(), static_cast<int>(held.front().bytes.size()), 0,
+                     reinterpret_cast<const sockaddr*>(&s.peer), sizeof(s.peer));
+        held.pop_front();
+    }
+}
+
 void send_raw(Session& s, const void* data, int size) {
     if (s.socket == INVALID_SOCKET || !s.peer_known) return;
+    if (const std::int64_t latency = test_latency_ticks(s); latency > 0) {
+        const auto* bytes = static_cast<const char*>(data);
+        held_datagrams().push_back({qpc_now() + latency, std::vector<char>(bytes, bytes + size)});
+        flush_held(s);
+        return;
+    }
     (void)sendto(s.socket, static_cast<const char*>(data), size, 0, reinterpret_cast<const sockaddr*>(&s.peer),
                  sizeof(s.peer));
 }
@@ -768,6 +811,7 @@ void handle_packet(Session& s, const std::uint8_t* data, int size, const sockadd
 
 void receive(Session& s) {
     if (s.socket == INVALID_SOCKET) return;
+    if (test_latency_ticks(s) > 0 && s.peer_known) flush_held(s);
     std::uint8_t buffer[2048];
     for (;;) {
         sockaddr_in from{};
@@ -847,12 +891,14 @@ void initialize(Session& s) {
     throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
     throttling.StateMask = 0u;
     (void)SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
+    // Rollback is on unless GALAXY_NET_ROLLBACK=0; with it the input delay is 2 frames, without it 3.
+    s.rollback = env("GALAXY_NET_ROLLBACK") != "0";
+    s.delay = s.rollback ? 2u : 3u;
     if (const std::string delay = env("GALAXY_NET_DELAY"); !delay.empty()) {
         s.delay = static_cast<std::uint32_t>(std::clamp(std::atoi(delay.c_str()), 1, 30));
     }
     s.build_id = build_identity();
     for (auto& ring : s.inputs) ring.assign(kRing, Slot{});
-    s.rollback = env("GALAXY_NET_ROLLBACK") == "1";
     if (const std::string ahead = env("GALAXY_NET_ROLLBACK_FRAMES"); !ahead.empty()) {
         s.max_ahead = static_cast<std::uint32_t>(std::clamp(std::atoi(ahead.c_str()), 1, 12));
     }
@@ -1330,6 +1376,11 @@ void net_set_resimulating(bool on) noexcept {
 
 bool net_rollback_enabled() noexcept {
     return session().rollback;
+}
+
+bool net_rollback_frame(std::uint32_t frame) noexcept {
+    const Session& s = session();
+    return s.rollback && s.connected && rollback_frame(s, frame);
 }
 
 const NetInput& net_input(std::uint32_t frame, unsigned player) {
