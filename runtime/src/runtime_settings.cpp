@@ -457,6 +457,19 @@ void set_coop_session(bool enabled) noexcept {
     s_coop_session.store(enabled ? 2u : 1u, std::memory_order_release);
 }
 
+bool coop_hot_join() noexcept {
+    static const bool enabled = [] {
+        char* value = nullptr;
+        std::size_t length = 0u;
+        const bool off = _dupenv_s(&value, &length, "GALAXY_COOP_HOT_JOIN") == 0 && value != nullptr && value[0] == '0';
+        std::free(value);
+        return !off;
+    }();
+    return enabled;
+}
+
+bool coop_available() noexcept { return coop_enabled() || coop_hot_join(); }
+
 void set_file_select_options_shown(bool shown) noexcept {
     s_file_select_options_shown.store(shown, std::memory_order_release);
 }

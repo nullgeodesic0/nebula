@@ -107,6 +107,12 @@ struct RuntimeSettings {
 // it stands while that screen is up (its Multiplayer switch, coop_guest.cpp), fixed again once a save is chosen.
 [[nodiscard]] bool coop_enabled() noexcept;
 void set_coop_session(bool enabled) noexcept;
+// Local hot join: the co-op machinery (the second brother made in every stage, absent until a second controller
+// drops in) runs whatever the co-op setting, which then only says whether a save starts with two players.
+// GALAXY_COOP_HOT_JOIN=0 turns it off (co-op only with the setting, as before).
+[[nodiscard]] bool coop_hot_join() noexcept;
+// Whether the co-op machinery runs: co-op on, or hot join.
+[[nodiscard]] bool coop_available() noexcept;
 // Whether the save-select screen is up, for its Multiplayer / Odyssey moves panel (renderer_d3d12.cpp).
 void set_file_select_options_shown(bool shown) noexcept;
 [[nodiscard]] bool file_select_options_shown() noexcept;

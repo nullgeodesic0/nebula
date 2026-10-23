@@ -2,6 +2,7 @@
 
 #include "galaxy/agent.h"
 
+#include <atomic>
 #include <mutex>
 
 namespace galaxy {
@@ -32,6 +33,15 @@ AgentPadSlots& agent_pad_slots() {
 }
 
 }  // namespace
+
+namespace {
+// Whether the second player is in the game (hot join, coop_guest.cpp), for the input thread's controller routing.
+std::atomic<bool> g_second_present{false};
+}  // namespace
+
+void coop_set_second_present(bool present) noexcept { g_second_present.store(present, std::memory_order_release); }
+
+bool coop_second_present() noexcept { return g_second_present.load(std::memory_order_acquire); }
 
 void coop_publish_partner_input(const coop::PartnerInput& input) noexcept {
     PartnerInputSlot& slot = partner_input_slot();
