@@ -25,7 +25,7 @@ ZR/RT as a spin button and ZL/LT as crouch.
 | Pointer recenter | `R` | Right stick click | R |
 | Pause (Plus) | `=`, `P` | Menu | Plus |
 | Minus | `-`, `M` | View | Minus |
-| Home | `H` | - | Home |
+| Home (off: see below) | - | - | - |
 | 1 (the Odyssey moveset's cap button: dive, roll, roll boost) | `1` (and numpad) | X | Y |
 | 2 | `2` (and numpad) | - | - |
 | Shake (Nunchuk) | - | - | - |
@@ -42,12 +42,21 @@ Capture, GL, GR and C (Pro Controller 2) are unbound by default. The west
 face button (Xbox X, Switch Y, DualSense Square) is 1, the Odyssey moveset's cap
 button, and does not spin (controls version 7).
 
+The game's HOME Menu (the Wii HOME button menu) is off: no key or button is
+bound to Wii HOME (controls version 8 removed keyboard `H`, Switch Home and
+DualSense PS), and while `home_menu=off` (the default) the virtual Wii Remote
+never reports HOME at all, so a HOME binding you add yourself, a mouse button
+or a second player cannot open it either. Pressing PS or Home does nothing in
+the game. For testing, `home_menu=on` in `runtime_settings.ini` (or
+`GALAXY_HOME_MENU=1`; `0` forces it off) lets HOME through again; bind it
+under F1 > Controls > Home.
+
 DualSense: face buttons are by position like Xbox (Cross = jump/Wii A,
 Circle = jump in play and back in menus), L1 = Star Bits, L2 = crouch, spin on
 Triangle, R2 or a shake, Square = 1 (the Odyssey moveset's cap button), L3
 resets the camera, R1 recenters the pointer, the gyro points
-(the right stick turns the camera), the PS button is HOME, Options is Plus
-and Create is Minus. The touchpad click is bindable but unbound.
+(the right stick turns the camera), Options is Plus and Create is Minus.
+The PS button and the touchpad click are bindable but unbound.
 
 Pointer recenter: press R (Switch), the right stick click (Xbox) or `R`
 (keyboard) to put the pointer in the middle of the picture; it also brings a

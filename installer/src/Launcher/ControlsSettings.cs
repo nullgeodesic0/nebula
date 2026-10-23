@@ -44,7 +44,7 @@ namespace Nebula.Launcher
         public const int SchemeCount = 5, TargetCount = 25, Slots = 4;
         public const int JumpBack = 24;
         // runtime_settings.ini controls_version (input_bindings.h kControlsVersion).
-        public const int ControlsVersion = 7;
+        public const int ControlsVersion = 8;
         // Version 3 still-pointer defaults (pads), replaced in version 4.
         public const float Version3PointerHideSeconds = 4.0f, Version3PointerHideRadius = 0.03f;
         // Version 4 still-pointer time and vibration strength, replaced in version 5.
@@ -114,6 +114,8 @@ namespace Nebula.Launcher
         private static KeyValuePair<int, string> K(int vk, string name) { return new KeyValuePair<int, string>(vk, name); }
 
         public int InputMode; // ModeAuto, ModeKeyboardMouse, ModeController, ModeRealWiimote (kept, not offered)
+        // home_menu: whether Wii HOME may open the game's HOME Menu (runtime ControlsConfig::home_menu). Off by default.
+        public bool HomeMenu;
         public readonly InputSource[][][] Bindings = new InputSource[SchemeCount][][];
         public readonly SchemeTuning[] Tuning = new SchemeTuning[SchemeCount];
 
@@ -239,16 +241,8 @@ namespace Nebula.Launcher
             return t;
         }
 
-        /// <summary>
-        /// Super Mario Galaxy on Switch with the player's choices: A or B jump
-        /// (B backs out of menus), L/LB Star Bits, ZL/LT crouch, the north face
-        /// button/ZR (Xbox Y/RB/RT) or shake spin, the west face button (Xbox X,
-        /// DualSense square, Switch Y) Wii 1 (the Odyssey moveset's cap button),
-        /// left-stick click camera (Wii C), R / right-stick click recenters (held:
-        /// pinned at the centre), gyro points, right stick turns the camera
-        /// (pointer when the gyro is off; Xbox: pointer).
-        /// </summary>
-        public static InputSource[][] DefaultTable(int scheme)
+        /// <summary>The defaults of controls version 7 (Wii HOME on keyboard H, Switch Home, DualSense PS), kept for migration.</summary>
+        public static InputSource[][] Version7Table(int scheme)
         {
             var t = Version6Table(scheme);
             if (scheme == Keyboard) return t;
@@ -257,6 +251,23 @@ namespace Nebula.Launcher
             t[17] = scheme == Xbox
                 ? new[] { Button(North), Button(RightShoulder), Pos(RightTrigger) }
                 : new[] { Button(North), Pos(RightTrigger) };
+            return t;
+        }
+
+        /// <summary>
+        /// Super Mario Galaxy on Switch with the player's choices: A or B jump
+        /// (B backs out of menus), L/LB Star Bits, ZL/LT crouch, the north face
+        /// button/ZR (Xbox Y/RB/RT) or shake spin, the west face button (Xbox X,
+        /// DualSense square, Switch Y) Wii 1 (the Odyssey moveset's cap button),
+        /// left-stick click camera (Wii C), R / right-stick click recenters (held:
+        /// pinned at the centre), gyro points, right stick turns the camera
+        /// (pointer when the gyro is off; Xbox: pointer). Wii HOME is unbound:
+        /// the game's HOME Menu is off (home_menu).
+        /// </summary>
+        public static InputSource[][] DefaultTable(int scheme)
+        {
+            var t = Version7Table(scheme);
+            t[6] = new InputSource[0];
             return t;
         }
 
@@ -310,16 +321,18 @@ namespace Nebula.Launcher
                 var version3 = Version3Table(s);
                 var version5 = Version5Table(s);
                 var version6 = Version6Table(s);
+                var version7 = Version7Table(s);
                 var current = DefaultTable(s);
                 for (int t = 0; t < TargetCount; t++)
                 {
                     bool old = SameBindings(Bindings[s][t], legacy[t]) || SameBindings(Bindings[s][t], version2[t]) ||
                                SameBindings(Bindings[s][t], version3[t]) || SameBindings(Bindings[s][t], version5[t]) ||
-                               SameBindings(Bindings[s][t], version6[t]);
+                               SameBindings(Bindings[s][t], version6[t]) || SameBindings(Bindings[s][t], version7[t]);
                     if (old && !SameBindings(Bindings[s][t], current[t])) Bindings[s][t] = current[t];
                 }
                 if (version < 2 && Tuning[s].GyroPointer == LegacyTuning(s).GyroPointer) Tuning[s].GyroPointer = DefaultTuning(s).GyroPointer;
-                if (version < ControlsVersion && s != Keyboard)
+                // The still-pointer and vibration defaults changed in version 5; a later file's values are choices.
+                if (version < 5 && s != Keyboard)
                 {
                     var defaults = DefaultTuning(s);
                     bool oldSeconds = (version < 4 && Tuning[s].PointerHideSeconds == Version3PointerHideSeconds) ||
@@ -467,6 +480,13 @@ namespace Nebula.Launcher
                 else if (v.StartsWith("keyboard") || v == "kbm" || v == "mouse") InputMode = ModeKeyboardMouse;
                 return;
             }
+            if (key == "home_menu")
+            {
+                string v = value.Trim().ToLowerInvariant();
+                if (v == "1" || v == "true" || v == "on") HomeMenu = true;
+                else if (v == "0" || v == "false" || v == "off") HomeMenu = false;
+                return;
+            }
             bool bind = key.StartsWith("bind."), tune = key.StartsWith("tune.");
             if (!bind && !tune) return;
             string rest = key.Substring(5);
@@ -529,6 +549,7 @@ namespace Nebula.Launcher
                 lines.Add(new KeyValuePair<string, string>("input_mode",
                     InputMode == ModeController ? "controller" : InputMode == ModeKeyboardMouse ? "keyboard_mouse" : "auto"));
             lines.Add(new KeyValuePair<string, string>("controls_version", ControlsVersion.ToString(CultureInfo.InvariantCulture)));
+            lines.Add(new KeyValuePair<string, string>("home_menu", HomeMenu ? "on" : "off"));
             for (int s = 0; s < SchemeCount; s++)
             {
                 string p = SchemeIds[s] + ".";

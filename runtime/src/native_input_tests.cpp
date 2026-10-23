@@ -1785,8 +1785,11 @@ bool builds_core_button_report() {
     snapshot.buttons.a = true;
     snapshot.buttons.home = true;
     std::array<std::uint8_t, galaxy::input::kMaxWiimoteInputReportBytes> report{};
+    // The full core-button layout, HOME included (home_menu=on).
+    galaxy::input::set_home_button_enabled(true);
     const auto result =
         galaxy::input::build_wiimote_input_report(0x30, snapshot, report);
+    galaxy::input::set_home_button_enabled(false);
     constexpr std::array<std::uint8_t, 4> expected{
         0xa1, 0x30, 0x19, 0x8c};
     return expect(
@@ -1836,8 +1839,10 @@ bool accel_low_bits_do_not_change_core_button_semantics() {
     snapshot.accel.y = 0x0202;
     snapshot.accel.z = 0x0202;
     std::array<std::uint8_t, galaxy::input::kMaxWiimoteInputReportBytes> report{};
+    galaxy::input::set_home_button_enabled(true);
     const auto result =
         galaxy::input::build_wiimote_input_report(0x31, snapshot, report);
+    galaxy::input::set_home_button_enabled(false);
     return expect(
                result.status == galaxy::input::WiimoteReportBuildStatus::Ok,
                "0x31 combined button/accel report builds") &&
@@ -3642,8 +3647,25 @@ int main() {
         galaxy::input::WiimoteInputSnapshot all;
         all.buttons = {true,true,true,true,true,true,true,true,true,true,true};
         all.nunchuk.c = all.nunchuk.z = true;
+        ok &= expect(galaxy::input::synthetic_kpad_button_mask(all) == 0x7f1fu,
+                     "with the HOME Menu off the synthetic mask drops HOME and keeps every other button");
+        galaxy::input::set_home_button_enabled(true);
         ok &= expect(galaxy::input::synthetic_kpad_button_mask(all) == 0xff1fu,
                      "synthetic Wii and Nunchuk masks retain every mapped button");
+        galaxy::input::set_home_button_enabled(false);
+        // The virtual Wii Remote's core-button report: HOME is byte 1 bit 7.
+        galaxy::input::WiimoteInputSnapshot home;
+        home.buttons.home = true;
+        home.buttons.a = true;
+        std::array<std::uint8_t, 32> report{};
+        const auto built = galaxy::input::build_wiimote_input_report(0x30u, home, report);
+        ok &= expect(built.status == galaxy::input::WiimoteReportBuildStatus::Ok &&
+                         (report[3] & 0x80u) == 0u && (report[3] & 0x08u) != 0u,
+                     "with the HOME Menu off a report never carries HOME (A still does)");
+        galaxy::input::set_home_button_enabled(true);
+        (void)galaxy::input::build_wiimote_input_report(0x30u, home, report);
+        ok &= expect((report[3] & 0x80u) != 0u, "with home_menu=on HOME reaches the report");
+        galaxy::input::set_home_button_enabled(false);
     }
     ok &= basic_ir_decoder_preserves_low_ff_visible_coordinates();
     ok &= physical_mailbox_retains_control_replies_and_bounds_state();
