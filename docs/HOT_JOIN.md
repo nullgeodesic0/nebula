@@ -6,6 +6,55 @@ process and resumed in a second process, which then plays on bit-identically (ME
 prototype does this between two processes on one PC; the parts that differ between two PCs are listed under
 [Across two PCs](#across-two-pcs), and none of them is a wall.
 
+It is built: [live join](#live-join) takes a joiner from the lobby into the host's running game, Luigi beside
+Mario, without the host restarting.
+
+## Live join
+
+`runtime/src/netplay_session.cpp` (with `net_lobby.cpp`, `netplay.cpp`, `coop_guest.cpp`):
+
+1. **Joinable from boot.** A game whose settings have `net_joinable=on` when it starts (read from the file: the
+   settings load later) is deterministic from boot and runs as a session host on its own: its controller is the
+   first player's input at once (no delay), the second player's input is neutral, and Luigi sits out (co-op's
+   drop-in state) whatever the Multiplayer switch says. Turning Joinable on later keeps the old restart-based
+   join (both PCs restart into a session at the host's place), since that game was not deterministic from boot.
+2. **Accept.** The lobby closes its listening socket and the session opens on the same UDP port. At the next frame
+   start the host captures the snapshot (`hot_join_capture`), builds the save bundle as of that frame F and plays
+   on. A worker thread compresses the image (Windows Compression API, XPRESS with Huffman). The stream is
+   `[magic, F, compressed size][compressed image][a record per frame from F on]`, a record being the host's input
+   as that frame used it, with its EFB peek answers.
+3. **The joiner** restarts once into `GALAXY_NET_JOIN` + `GALAXY_NET_HOTJOIN=1`: it fetches the bundle at startup
+   (the existing path), boots deterministic to its own frame 30, receives the stream (chunks of 1200 bytes asked for
+   from the first missing one with a window that doubles while it fills and halves when it stalls; the host resends
+   from there after three unmoved asks), decompresses, loads (`hot_join_load_image`) and wakes up in the host's
+   capture as frame F. It replays the records unpaced and unrendered (`hot_join_catch_up`), and when it is within
+   two frames of the newest record it renders and paces again and sends Ready.
+4. **The join frame.** On Ready the host names J = its frame + 60, which every later record carries. After its read
+   of J - 1 it makes the inputs of J .. J + delay - 1 (J - 1's held, J's carrying `NetCommand::Join`); from J on its
+   reads go `delay` frames ahead and the joiner's own inputs apply from J + delay. Both PCs carry out Join at the
+   same frame: co-op's drop-in puts Luigi beside Mario (`coop_request_drop_in`). From there it is the ordinary
+   lockstep session: inputs, hash checks, the online menu.
+5. **A joiner that goes away before J** (no ask for 15 s): the host closes the session and plays on alone; the
+   lobby listens again. After J a silent peer ends the session as before.
+
+The EFB peeks of a frame come before the frame starts (the game draws frame f - 1 after both reads have moved the
+frame counter to f), which is why the join frame's inputs exist right after the host's read of J - 1.
+
+Tested with `tools/agent/live_join.py` (two hidden copies on one PC, the host mid-galaxy in Good Egg, the joiner
+asking with `GALAXY_NET_AUTOJOIN`, the host accepting with `GALAXY_NET_AUTOACCEPT`):
+
+| run | result |
+|---|---|
+| join, 1,800 frames on | MEM1 identical at all 62 samples (every 30 frames) from J; 60 fps on both |
+| `--exit-after 600`: Exit Galaxy after the join | both to the Observatory at the same frame; identical through it |
+| `--star-after 300`: a Power Star appears (its cutscene) after the join | cutscene on both; 52 samples identical |
+| both, and `--join-env GALAXY_TEST_MODULE_ELSEWHERE=1` (the joiner's game module at another address, as on another PC) | 5,835 stack words relocated; 61 samples identical; lowest 60.0 fps on both |
+
+Times in those runs: the capture 54 ms (100 ms once), compressing 101.9 MB to 40.8 MB 270 ms on the worker, the
+joiner booting and fetching the bundle about 10 s, the snapshot over localhost 0.9 s, unpacking 147 ms, loading
+23 ms, catching up ~250 frames, and Luigi in 16 s after the joiner started. Deterministic mode itself costs solo
+play no frame rate (60 fps either way) and about 20-35% more CPU per frame (16.3 vs 11.7-14.0 ms, all threads).
+
 ## Why it is not just "send the rollback snapshot"
 
 A rollback snapshot (`RollbackSnapshot` in `runtime/src/native_runtime.cpp`) is guest RAM and device state plus
@@ -104,8 +153,8 @@ reason alone; loading one file into two copies separates the two causes.
 ## Costs
 
 - **Size**: 102 MB raw (guest RAM is 92 MB of it: MEM1 24, MEM2 64, the rest small; 58% zero bytes). Compressed:
-  zlib level 1 36 MB (0.4 s), level 6 30 MB (1.2 s), lzma preset 1 26 MB (7.6 s); zstd was not available to measure
-  and should land near zlib-6's size at zlib-1's speed. Most of MEM2 is disc data the joiner's own boot loads too:
+  XPRESS-Huffman (what live join uses, built into Windows) 41 MB in 0.27 s, unpacked in 0.15 s; zlib level 1 36 MB
+  (0.4 s), level 6 30 MB (1.2 s), lzma preset 1 26 MB (7.6 s). Most of MEM2 is disc data the joiner's own boot loads too:
   sending only the 4 KB pages whose hash differs from the joiner's would cut this a lot (not measured).
 - **Time on the host**: the save into the arena 30–40 ms (a 92 MB copy plus the rest), the audit and the file write
   60–100 ms more, on the simulation thread: one hitch of about 5–8 frames, or less with the write moved to another
@@ -122,11 +171,11 @@ The prototype ran both processes on one PC from the same files. Between two PCs:
 - **Identical binaries** (NebulaRuntime.exe and RMGE01_game.dll): already required by a netplay session (the build
   identity check); a game module compiled on each PC would not do. The joiner should receive the host's module, or
   both install the same build.
-- **Image bases**: code addresses in the stacks are already relocated by module. The arena holds a few too (the
-  vtables of `shared_ptr` control blocks); with ASLR the exe's base can differ between PCs. Either link the exe and
-  game module with fixed bases (`/DYNAMICBASE:NO`) or relocate image words in the arena's non-RAM bytes as the
-  stacks are. System DLLs differ between Windows builds: only stale stack words point there today, and the audit
-  should be extended to flag any arena word that does.
+- **Image bases**: code addresses in the stacks are relocated by module, and so are the arena's own words outside
+  the guest RAM copies and the stacks (`relocate_arena`: the vtables of `shared_ptr` control blocks), so no fixed
+  bases are needed. Tested by loading the joiner's game module at another address
+  (`GALAXY_TEST_MODULE_ELSEWHERE=1`); the exe cannot be moved that way on one PC, and its words go through the same
+  code. System DLLs differ between Windows builds: only stale stack words point there.
 - **CPU and OS**: the same module runs the same instructions; MXCSR is saved per fiber. Deterministic mode already
   keeps host time out of the guest.
 - **Saves**: the snapshot carries open NAND files' contents and rebinds them to the joiner's files; the save
@@ -137,20 +186,22 @@ The prototype ran both processes on one PC from the same files. Between two PCs:
 - The arena is single-shot: a second write resets it while objects a save left there (a device container that grew
   during the save) might still be in use. A production writer should save into a fresh RollbackSnapshot and then
   copy it into the arena, or use a dedicated allocator for snapshot types only.
-- Two writer points were tested (frame 2500 and Observatory gameplay at 6000), 5,000 frames compared in all. Level loads, cutscenes,
-  movies (THP), a DVD read in flight and the home-button menu need runs of their own.
-- Joining as the second brother: the snapshot gives the joiner the host's exact game; spawning Luigi has to be a
-  deterministic event both PCs apply at the same frame (a join input), using co-op's existing respawn-beside-partner.
-- The host must already run deterministic mode (and keep its inputs) for anyone to join, so "joinable" means
-  deterministic from boot.
-- `operator new` now checks a thread-local depth on every allocation; not measurable in these runs, but it should
-  be timed in a sim profile.
+- Tested: snapshots in Observatory and Good Egg gameplay, a stage change and a Power Star cutscene after a join.
+  Not yet: a join during a level load, a movie (THP), a DVD read in flight or the home-button menu; over a real
+  internet link (the stream's window was only tuned on localhost).
+- Heap memory a resumed stack frame owns is the host's: the joiner would free a pointer it never allocated if such
+  a frame ended. None did in these runs (the capture path holds none across the save); keep it that way.
+- `operator new` checks a thread-local depth on every allocation: 0.1-0.2 ns on a 19.5 ns malloc/free pair (a
+  global flag measured 0.5 ns), so it stays.
 
 ## Files
 
 - `runtime/include/galaxy/hot_join.h`, `runtime/src/hot_join.cpp`: arena, allocation functions, host ranges,
   relocation, file format, audit, resume trace (`GALAXY_HOT_JOIN_TRACE=1`).
 - `runtime/src/coop_scheduler.cpp`: the fixed stack pool, `adopt_stacks`, the `captured` hook.
-- `runtime/src/native_runtime.cpp`: `hot_join_write` / `hot_join_load`, `rollback_write_scan`.
-- `runtime/src/netplay.cpp`: `GALAXY_SNAPSHOT_WRITE` / `GALAXY_SNAPSHOT_LOAD`.
-- `tools/agent/snapshot_scan.py`, `tools/agent/determinism.py join`.
+- `runtime/src/native_runtime.cpp`: `hot_join_capture` / `hot_join_load_image` (and the file forms
+  `hot_join_write` / `hot_join_load`), `hot_join_catch_up`, `rollback_write_scan`.
+- `runtime/src/netplay.cpp`: the capture and load points at a frame's start; `GALAXY_SNAPSHOT_WRITE` /
+  `GALAXY_SNAPSHOT_LOAD`.
+- `runtime/src/netplay_session.cpp`: live join (phases, stream, join frame); `net_lobby.cpp`: the live accept.
+- `tools/agent/live_join.py`, `tools/agent/snapshot_scan.py`, `tools/agent/determinism.py join`.

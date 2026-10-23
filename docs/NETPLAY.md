@@ -29,7 +29,11 @@ Without the scripts above, from the game itself (`runtime/src/net_lobby.cpp`):
 - The friend types that address on the **Join** row and presses Enter.
 - The host sees "<address> WANTS TO JOIN" at the top of the screen; on the Online page's status row Enter
   accepts and Backspace declines.
-- Both games restart into a session (`GALAXY_NET_HOST` / `GALAXY_NET_JOIN`, co-op on) from the host's save as it
+- **Live join** (docs/HOT_JOIN.md), when the host's game started with Joinable already on (it then runs
+  deterministic from boot): the host plays on; the friend's game restarts once, receives the host's running game
+  (a snapshot of the whole machine, then the host's inputs), catches up and drops in as the other brother beside
+  the host, everything the host did since the last save included.
+- Otherwise (Joinable turned on in a game that started without it), both games restart into a session (`GALAXY_NET_HOST` / `GALAXY_NET_JOIN`, co-op on) from the host's save as it
   was last written, and play their way back to where the host was (`GALAXY_NET_REJOIN`: the file, Mario or
   Luigi, the galaxy, the mission and the first player's position): past the logo, the file loaded, the stage
   changed, the first player put on the spot and the friend, as the other brother, beside them. Everything the host
@@ -85,4 +89,8 @@ enough to fit several frames into one, prediction and rollback replace the waits
 
 - `py -3 tools/agent/determinism.py netpair [--scenario observatory]`: a host and a joiner over localhost, the
   host's agent playing; their MEM1 hashes must agree at every sample.
-- Switches: `GALAXY_NET_HOST=<port>`, `GALAXY_NET_JOIN=<address>:<port>`, `GALAXY_NET_DELAY=<frames>`.
+- `py -3 tools/agent/live_join.py [--star-after N] [--exit-after N] [--join-env GALAXY_TEST_MODULE_ELSEWHERE=1]`:
+  a live join of a host mid-galaxy; MEM1 must agree every 30 frames from the join (docs/HOT_JOIN.md).
+- Switches: `GALAXY_NET_HOST=<port>`, `GALAXY_NET_JOIN=<address>:<port>`, `GALAXY_NET_DELAY=<frames>`,
+  `GALAXY_NET_JOINABLE=1|0` (joinable from boot regardless of the setting), `GALAXY_NET_HOTJOIN=1` (a joiner taking
+  a running game; set by the lobby).
