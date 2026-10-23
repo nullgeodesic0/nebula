@@ -292,6 +292,11 @@ public:
         return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
     }
     void reset() noexcept { *this = SplitState{}; }
+    // Online play: each PC shows its own player's camera, so the cameras are always fully apart.
+    void hold_full() noexcept {
+        split_ = true;
+        amount_ = 1.0f;
+    }
 
 private:
     bool split_ = false;

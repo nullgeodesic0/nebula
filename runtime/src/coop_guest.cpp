@@ -4,6 +4,7 @@
 
 #include "galaxy/coop.h"
 #include "galaxy/netplay.h"
+#include "galaxy/netplay_session.h"
 #include "galaxy/runtime_settings.h"
 
 #include <algorithm>
@@ -525,10 +526,26 @@ SplitClipSinkSlot& split_clip_sink() {
     static SplitClipSinkSlot slot;
     return slot;
 }
+// Online play (netplay_session.h): both PCs simulate and draw both players' views alike, and each shows only its
+// own player's, full screen. What reaches the renderer (the clip line) is not guest state, so it may differ.
+bool online_views() { return net_session_requested(); }
+bool local_view_is_second() { return !net_is_host(); }
+
 void send_split_clip(const std::array<float, 3>& plane, unsigned pass,
                      const std::array<float, 4>& separator = {0.0f, 0.0f, 0.0f, 0.0f}) {
     const SplitClipSinkSlot& slot = split_clip_sink();
-    if (slot.sink != nullptr) slot.sink(slot.user, plane.data(), pass, separator.data());
+    if (slot.sink == nullptr) return;
+    if (online_views() && pass != 0u) {
+        // This PC's player's pass whole ({0, 0, 0}: no line); the other's clipped away (a line far off screen).
+        const bool mine = (pass == 2u) == local_view_is_second();
+        const std::array<float, 3> online = mine ? std::array<float, 3>{0.0f, 0.0f, 0.0f}
+                                                 : std::array<float, 3>{1.0f, 0.0f, -1.0e6f};
+        slot.sink(slot.user, online.data(), pass, separator.data());
+        return;
+    }
+    // No line between the halves online.
+    const std::array<float, 4> none{0.0f, 0.0f, 0.0f, 0.0f};
+    slot.sink(slot.user, plane.data(), pass, online_views() ? none.data() : separator.data());
 }
 
 std::uint32_t camera_context(const Guest& guest) {
@@ -1800,6 +1817,9 @@ void move_second_player(const Guest& guest, State& s) {
         if (s.level_start) {
             // The level's intro and the first player's flight in: one screen, the game's camera.
             s.split.reset();
+        } else if (online_views()) {
+            // Online: each PC shows its own player's camera full screen (begin_split_draw), always.
+            s.split.hold_full();
         } else if (!s.event_second) {
             s.split.update(shared_extent(guest, s, first_position, second_position), distance, tuning);
         }
@@ -1907,6 +1927,7 @@ std::array<float, 16> half_lens(const State& s, bool second) {
 // The projection of a player's half: centred on the middle of their side of the line as the split eases in.
 std::array<float, 16> half_projection(const State& s, bool second) {
     std::array<float, 16> projection = half_lens(s, second);
+    if (online_views()) return projection;  // each view full screen, the same on both PCs
     const std::array<float, 2> centre = s.layout.centre(second, s.screen_width, s.screen_height);
     coop::split_projection(projection, centre[0], centre[1], s.split.eased());
     return projection;
