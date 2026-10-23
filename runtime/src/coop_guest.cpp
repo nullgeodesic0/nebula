@@ -469,6 +469,9 @@ struct State {
     // player has been in ordinary play.
     bool travelling = false;
     bool sticky_travel = false;
+    // A cutscene (or the first player's controls held) holds the second player where he stood.
+    bool held_here = false;
+    coop::Vec3 held_at{};
     bool level_start = false;
     unsigned controllable_frames = 0u;
     coop::CameraMatrices second_view;
@@ -763,6 +766,7 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     s.level_start = true;
     s.travelling = true;
     s.sticky_travel = false;
+    s.held_here = false;
     s.controllable_frames = 0u;
     s.follow.reset();
     // A new stage: both players in play (one out of lives comes back), its own HUD.
@@ -2192,7 +2196,7 @@ void move_second_player(const Guest& guest, State& s) {
                       (guest.call(fn::kIsTimeKeepDemoActive) & 0xFFu) != 0u;
     if (first_held != s.second_waiting_input || demo != s.second_waiting_demo) {
         trace("second player %s (first player's controls held %d, cutscene %d)",
-              first_held || demo ? "goes beside the first" : "is free again", first_held ? 1 : 0, demo ? 1 : 0);
+              first_held || demo ? "waits" : "is free again", first_held ? 1 : 0, demo ? 1 : 0);
         s.second_waiting_input = first_held;
         s.second_waiting_demo = demo;
     }
@@ -2211,8 +2215,12 @@ void move_second_player(const Guest& guest, State& s) {
     if (s.second_scene != 0u) --s.second_scene;
     if (s.talk.candidate_frames != 0u) --s.talk.candidate_frames;
     const bool piping = s.pipe.waiting != 0u || s.pipe.follow_pipe != 0u || s.second_scene != 0u;
-    const bool first_busy =
-        !piping && (coop::second_player_waits(first_held, demo) || first_parked || s.sticky_travel);
+    // Only the flight into a galaxy (from a dome) takes the second player along with the first. A cutscene, or
+    // the game holding the first player's controls, holds the second where he stands instead (he is not brought
+    // to the first, nor left there after it).
+    const bool first_travels = !piping && (first_parked || s.sticky_travel);
+    const bool held_in_place = !piping && !first_travels && coop::second_player_waits(first_held, demo);
+    const bool first_busy = first_travels || held_in_place;
     // A level start lasts through the mission's opening camera and any event camera of the first player's
     // arrival, not just until they look controllable.
     const bool arriving = s.level_start && ((guest.call(fn::kIsOpeningCamera) & 0xFFu) != 0u ||
@@ -2225,8 +2233,11 @@ void move_second_player(const Guest& guest, State& s) {
         land_beside = true;
         trace("level start over: the second player joins the first");
     }
-    s.travelling = !piping && coop::keep_travelling(s.travelling, s.level_start || first_busy, s.controllable_frames);
+    s.travelling = !piping && coop::keep_travelling(s.travelling, s.level_start || first_travels, s.controllable_frames);
     const bool beside_first = s.travelling;
+    const bool hold_here = held_in_place && !beside_first && !s.down[1].down;
+    if (hold_here && !s.held_here) s.held_at = guest.vec(s.second + actor::kPosition);
+    s.held_here = hold_here;
 
     const coop::Character partner = coop::partner_of(s.own);
     s.moving_second = true;
@@ -2272,6 +2283,9 @@ void move_second_player(const Guest& guest, State& s) {
                                                                        s.parked_position);
         Guest::Frame frame(guest);
         guest.call(fn::kSetPlayerPos, frame.vec(0, there));
+    } else if (hold_here) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, s.held_at));
     }
 
     const coop::Vec3 first_position = guest.vec(s.first + actor::kPosition);
@@ -2301,7 +2315,9 @@ void move_second_player(const Guest& guest, State& s) {
             s.layout.reset();
         }
         if (std::isfinite(distance)) share.offset = (second_position - first_position) * (0.5f * (1.0f - s.split.eased()));
-        too_far = !std::isfinite(distance) || distance >= tuning.split_warp;
+        // No tether while split: each brother may explore the whole level alone (only a lost position brings
+        // the second back).
+        too_far = !std::isfinite(distance);
     } else {
         share = coop::shared_camera(first_position, second_position);
         too_far = share.out_of_range;

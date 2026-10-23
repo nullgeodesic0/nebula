@@ -76,8 +76,8 @@ Each brother's pointer is his own, as the first player's is in one-player play:
 - The players bump into each other: when their bodies (50 units round, 150 tall) overlap, each is pushed
   half the overlap apart through the game's own `Mario::push`, so walls and floors still hold them.
 - The camera looks at the point between the players. When one is about to leave the picture the screen splits
-  (below).
-  More than 15000 apart for two seconds, the second player is brought back to the first.
+  (below). There is no tether: in split screen each brother may explore the whole level alone, however far
+  apart (only the one-screen mode, `GALAXY_COOP_SPLIT=0`, brings the second player back, below).
 
 ## Split screen
 
@@ -198,8 +198,10 @@ These come from a game written for one player and are what the playtest should l
   second player walks into one the first is not in, the players swap places, so the game takes them through
   (and both arrive in the next scene). Warps, launch stars and cutscenes the game starts for the first player
   move the first player only; the second rejoins them at the next level start.
-- While the game has the first player's controls (a dome's Pull Star, the flight into a galaxy) or a
-  cutscene plays, the second player travels beside the first; otherwise they are free.
+- The flight into a galaxy from a dome (and the level start after it) takes the second player along with the
+  first. While a cutscene plays or the game otherwise holds the first player's controls, the second player is
+  held where he stands, and stays there after it: he is never brought to the first for one. Otherwise they
+  are free.
 - Power-ups: a stage loads the second player's power-up archives (BeeLuigi, IceLuigi, ...) with the first
   player's, so both can take every power-up. Both cannot be Boos at once (the second's Boo parts share the
   first's Boo draw buffer): whoever becomes a Boo second keeps their form.
