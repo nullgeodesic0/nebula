@@ -56,6 +56,8 @@ struct Netplay {
     std::uint32_t buffer = 0u;
     std::uint32_t dump_frame = 0xFFFFFFFFu;
     std::string dump_path;
+    std::uint32_t rate_every = 0u;   // GALAXY_NETPLAY_RATE=<frames>: log simulated frames per second
+    std::uint64_t rate_start_qpc = 0u;
     NetplaySnapshotHooks snapshot_hooks{};
     void (*digest_trace)(void* user) = nullptr;
     void* digest_user = nullptr;
@@ -119,6 +121,9 @@ void initialize(Netplay& n) {
             std::fprintf(stderr, "[netplay] snapshot test: save at frame %u, roll back to it at frame %u\n",
                          n.snapshot_save_frame, n.snapshot_restore_frame);
         }
+    }
+    if (const std::string rate = env("GALAXY_NETPLAY_RATE"); !rate.empty()) {
+        n.rate_every = static_cast<std::uint32_t>(std::strtoul(rate.c_str(), nullptr, 10));
     }
     if (const std::string exit_at = env("GALAXY_STATE_EXIT_FRAME"); !exit_at.empty()) {
         n.exit_frame = static_cast<std::uint32_t>(std::strtoul(exit_at.c_str(), nullptr, 10));
@@ -189,6 +194,19 @@ void netplay_kpad_before(PpcContext* context, const GuestMemoryV1* memory, std::
         if (n.hashes != nullptr && n.frame >= n.hash_from && n.frame % n.hash_every == 0u) write_hash(n, memory);
         if (n.dump_frame == n.frame && !n.dump_path.empty()) write_dump(n, memory);
         if (n.digest_trace != nullptr && netplay_tracing()) n.digest_trace(n.digest_user);
+        if (n.rate_every != 0u && n.frame % n.rate_every == 0u) {
+            LARGE_INTEGER now{}, frequency{};
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&frequency);
+            const auto ticks = static_cast<std::uint64_t>(now.QuadPart);
+            if (n.rate_start_qpc != 0u) {
+                const double seconds = static_cast<double>(ticks - n.rate_start_qpc) /
+                                       static_cast<double>(frequency.QuadPart);
+                std::fprintf(stderr, "[netplay-rate] frame %u: %.1f frames/s (%.2fx real time)\n", n.frame,
+                             n.rate_every / seconds, n.rate_every / seconds / 60.0);
+            }
+            n.rate_start_qpc = ticks;
+        }
         if (n.snapshot_hooks.save != nullptr) {
             if (!n.snapshot_saved && n.frame == n.snapshot_save_frame) {
                 n.snapshot_saved = true;

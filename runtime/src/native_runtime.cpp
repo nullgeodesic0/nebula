@@ -19268,6 +19268,19 @@ bool advance_pending_vi_boundary(
                 // In deterministic mode this blocks (deterministic_pe_wait_ms): other guest threads must not run
                 // on while the render thread finishes, or the VI interrupt lands at a host-dependent guest time.
                 bool complete = false;
+                static const bool report_wait = read_env_flag("GALAXY_NETPLAY_RATE", false);
+                const auto wait_started = std::chrono::steady_clock::now();
+                const galaxy::ScopeExit account_wait([&]() noexcept {
+                    if (!report_wait) return;
+                    static double s_waited_ms = 0.0;
+                    static std::uint64_t s_waits = 0u;
+                    s_waited_ms += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - wait_started).count();
+                    if (++s_waits % 600u == 0u) {
+                        std::fprintf(stderr, "[netplay-rate] VI token waits %llu, %.0f ms in all\n",
+                                     static_cast<unsigned long long>(s_waits), s_waited_ms);
+                    }
+                });
                 try {
                     complete = galaxy::gx::wait_for_frame_pe_completion_for(
                         snapshot.token,
@@ -30298,6 +30311,11 @@ void rollback_copy_ram(RollbackSnapshot& s, bool to_snapshot) {
 
 bool rollback_save(void* user) {
     auto& s = *static_cast<RollbackSnapshot*>(user);
+    const auto save_started = std::chrono::steady_clock::now();
+    const auto log_time = [&](const char* what) {
+        std::fprintf(stderr, "[rollback] %s took %.2f ms\n", what,
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - save_started).count());
+    };
     rollback_copy_ram(s, true);
     s.registers = *s.context;
     s.callback_depth = g_branch_checkpoint_callback_depth;
@@ -30310,8 +30328,12 @@ bool rollback_save(void* user) {
     s.coop = galaxy::coop_rollback_save();
     s.odyssey = galaxy::odyssey_rollback_save();
     s.voice = galaxy::voice::save_playback();
-    if (!s.state->coop->save(s.scheduler)) return false;
+    if (!s.state->coop->save(s.scheduler)) {
+        log_time("save");
+        return false;
+    }
     // Resumed by rollback_restore: the stacks are back; now the rest.
+    const auto restore_started = std::chrono::steady_clock::now();
     galaxy::gx::restore_rollback_state(*s.gx);
     galaxy::coop_rollback_restore(*s.coop);
     galaxy::odyssey_rollback_restore(*s.odyssey);
@@ -30324,6 +30346,8 @@ bool rollback_save(void* user) {
         const galaxy::GuestMemoryRegionV1& region = s.memory->regions[r];
         if (region.host_base != nullptr) galaxy::gx::notify_guest_memory_write(region.guest_base, region.size);
     }
+    std::fprintf(stderr, "[rollback] restore took %.2f ms\n",
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - restore_started).count());
     *s.context = s.registers;
     g_branch_checkpoint_callback_depth = s.callback_depth;
     g_active_branch_checkpoint_pc = s.checkpoint_pc;
@@ -30823,6 +30847,12 @@ static bool gx_efb_peek(
             }
             if (!ok) {
                 ++state.efb_peek_failures;
+            }
+            static const bool report = read_env_flag("GALAXY_NETPLAY_RATE", false);
+            if (report && state.efb_peek_count % 600u == 0u) {
+                std::fprintf(stderr, "[netplay-rate] exact EFB peeks %llu, %.0f ms (sync %.0f, readback %.0f)\n",
+                             static_cast<unsigned long long>(state.efb_peek_count), state.efb_peek_ns / 1e6,
+                             state.efb_peek_sync_ns / 1e6, state.efb_peek_readback_ns / 1e6);
             }
         }
     } peek_accounting{*state, peek_start, {}, false, false};

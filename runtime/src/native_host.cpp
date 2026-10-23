@@ -18230,10 +18230,23 @@ void GuestAddressSpace::dsp_native_settle_for_determinism() {
         return;
     }
     const auto start = std::chrono::steady_clock::now();
+    // GALAXY_NETPLAY_RATE: how much of the simulation thread's time goes to waiting for the DSP.
+    static const bool report = read_env_flag("GALAXY_NETPLAY_RATE");
+    static double s_waited_ms = 0.0;
+    static std::uint64_t s_settles = 0u;
+    const auto account = [&] {
+        if (!report) return;
+        s_waited_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        if (++s_settles % 2000u == 0u) {
+            std::fprintf(stderr, "[netplay-rate] DSP settles %llu, %.0f ms waited in all\n",
+                         static_cast<unsigned long long>(s_settles), s_waited_ms);
+        }
+    };
     for (;;) {
         dsp_native_service_mram_transaction();
         dsp_native_throw_if_failed();
         if (dsp_native_->parked_in_idle_wait() || dsp_native_worker_->halted_and_idle()) {
+            account();
             return;
         }
         if (std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) {
