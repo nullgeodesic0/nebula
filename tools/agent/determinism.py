@@ -1,7 +1,7 @@
 """Determinism probe for netplay (docs/AGENT_TESTING.md): replay one input recording in several test copies at once
 and find where their guest memory first differs.
 
-    py -3 tools/agent/determinism.py record --out C:\\nb\\agent-mp\\det [--frames 2400] [--presses 30]
+    py -3 tools/agent/determinism.py record --out C:\\nb\\agent-mp\\det [--frames 2400] [--scenario observatory]
     py -3 tools/agent/determinism.py bisect --replay <file.rec> [--runs 2] [--frames 2400] [--every 30]
                                             [--symbols symbols.txt] [--env NAME=VALUE ...]
 
@@ -212,6 +212,22 @@ def cmd_bisect(args):
     return 1
 
 
+def play_observatory(inst):
+    """Into file 1 through the title and file select with controller input only (no game calls, so a replay of
+    the recording takes the same path), then both brothers run, turn and jump around the Comet Observatory."""
+    s = inst.boot_through_menus(timeout=240.0)
+    print('playable at frame %s in %s' % (s.get('frame'), s.get('stage')))
+    moves = [(0.9, 0.0), (0.0, 0.9), (-0.9, 0.0), (0.0, -0.9), (0.7, 0.7), (-0.7, 0.7)]
+    for lap in range(4):
+        for k, (x, y) in enumerate(moves):
+            inst.command('stick 1 %.1f %.1f 70 nowait' % (x, y), timeout=60.0)
+            inst.command('stick 2 %.1f %.1f 70 nowait' % (-y, x), timeout=60.0)
+            inst.command('wait 25', timeout=60.0)
+            inst.command('press %d A 8' % (1 + (k + lap) % 2), timeout=60.0)
+            inst.command('wait 40', timeout=60.0)
+    print('played to frame %s' % (inst.status() or {}).get('frame'))
+
+
 def cmd_record(args):
     os.makedirs(args.out, exist_ok=True)
     path = os.path.join(args.out, 'input.rec')
@@ -221,11 +237,14 @@ def cmd_record(args):
                                              'GALAXY_STATE_EXIT_FRAME': str(args.frames)})
     inst.wait_for(lambda s: s.get('frame', 0) > 0, timeout=60.0, what='the game to start')
     try:
-        for _ in range(args.presses):
-            inst.command('press 1 A 4', timeout=120.0)
-            inst.command('wait 40', timeout=120.0)
+        if args.scenario == 'opening':
+            for _ in range(args.presses):
+                inst.command('press 1 A 4', timeout=120.0)
+                inst.command('wait 40', timeout=120.0)
+        else:
+            play_observatory(inst)
     except nebula_agent.GameError as e:
-        print('stopped pressing: %s' % e)
+        print('stopped: %s' % e)
     deadline = time.time() + args.timeout
     while time.time() < deadline and inst.running():
         time.sleep(0.5)
@@ -247,7 +266,10 @@ def main(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     rec = sub.add_parser('record', help='record a run\'s input')
     rec.add_argument('--frames', type=int, default=2400)
-    rec.add_argument('--presses', type=int, default=30)
+    rec.add_argument('--presses', type=int, default=30, help='A presses (opening scenario)')
+    rec.add_argument('--scenario', choices=('opening', 'observatory'), default='opening',
+                     help='opening: A presses through the title; observatory: into file 1 by the menus, then '
+                          'both brothers run and jump')
     bis = sub.add_parser('bisect', help='replay in parallel and find the first difference')
     bis.add_argument('--replay', required=True)
     bis.add_argument('--runs', type=int, default=2)

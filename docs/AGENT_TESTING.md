@@ -96,6 +96,26 @@ scene, the dome's result and the save prompt (pointing at Yes) until the Observa
 Results are ok, no-star, not-taken (the star was not reached), stuck or crash, in `C:\nb\agent-mp\cutscenes` (`--out`), with screenshots. Leaving the dome while it plays story scenes one after another (the
 butler's report) frees what the story sequence still holds, so the sweep waits for calm before the next jump.
 
+## Determinism probe
+
+Rollback netplay needs the game to be deterministic: the same inputs from the same start give the same guest
+memory. `GALAXY_DETERMINISTIC=1` runs it that way (a virtual clock from executed checkpoints, deadlines, disc and
+NAND completions and PE events all on the simulation thread, the native DSP run in lockstep with it). On top of
+it `py -3 tools/agent/determinism.py` checks:
+
+- `record --scenario observatory --frames 9000` records a run's controller data (`input.rec` in `--out`): into
+  file 1 through the menus by input alone, then both brothers run and jump. `--scenario opening` presses A
+  through the title instead.
+- `bisect --replay <file.rec> --runs 6` replays it in six hidden copies at once and compares MEM1 hashes every
+  `--every` frames. At the first disagreement it replays the window with a hash every frame, dumps MEM1 at the
+  first differing frame in two copies and lists the differing words (`--symbols` names them from a decomp symbol
+  map). `--trace` also logs each copy's clock jumps, delivered interrupts and IPC replies
+  (`GALAXY_DETERMINISTIC_TRACE`) and shows where two diverging copies' traces part.
+
+Replays run unpaced (`GALAXY_DETERMINISTIC_UNPACED=1`: no waiting for real time, no presents, no audio): six
+copies replay 2400 frames in about ten seconds. `--paced` replays at real-time speed. Use a run folder of its own
+(`--run`), since the copies keep the executable open.
+
 ## Found with it
 
 - Space Junk mission 1 in co-op: fixed (the second player's view unclipped the arena's web coins).
