@@ -167,6 +167,18 @@ FRAMES = {'aircontrol': (9, True),'swimdashringstart': (6, False), 'slidestomach
           'pullbackland': (18, False),
           # Loops at Odyssey's own speed rather than squeezed or stretched onto the game's cycle.
           'carrywait': (59, True), 'damagewait': (120, True), 'diefall': (180, True), 'diefire': (190, True)}
+# The Odyssey moveset's animations (wt-moveset), which Luigi shares with Mario in co-op (--luigi-originals).
+MOVESET = {'rundash', 'walkbury', 'jumptwin', 'dive', 'aircontrol', 'swimdashringstart', 'slidestomachrecover',
+           'icejumpland', 'surfland', 'icejumpstopland', 'rolling', 'divewait', 'pullbackland'}
+# Galaxy's own swap table for Luigi (Petari MarioAnimatorData luigiAnimeSwapTable): name -> luigi<name>.
+LUIGI_OWN = ('run', 'jump', 'jumproll', 'jumpback', 'runend', 'spin', 'spinground', 'spaceflyshort', 'wait',
+             'waitslopel', 'waitsloper', 'waitslopeu', 'waitsloped')
+
+
+def replace_names(replace):
+    return [n[:-4] for n in replace if n.endswith('.bck')]
+
+
 # The custom model's joints without geometry (build_odyssey_model_mod.py UNSKINNED).
 UNSKINNED = ('IndexFinger', 'MiddleFinger', 'ThirdFinger', 'LittleFinger', 'Thumb')
 HIDDEN = 0.001
@@ -333,6 +345,8 @@ def main():
     ap.add_argument('--extend-game-animations', action='store_true',
                     help="give the game's own animations neutral tracks for the model's extra joints")
     ap.add_argument('--face-skeleton', help='an FBX of the face skeleton those animations are made for (its rest pose)')
+    ap.add_argument('--luigi-originals', action='store_true',
+                    help='co-op: keep Galaxy\'s clips for Luigi outside the Odyssey moveset (luigi_swap.txt)')
     args = ap.parse_args()
 
     pak = disc.Pak(os.path.join(args.content, 'game.pak'))
@@ -434,6 +448,19 @@ def main():
                 if name.endswith('.bck') and name not in replace and len(bcks[name]) > 64:
                     replace[name] = hide_extra_faces(rig, bcks[name])
         new_arc = disc.rarc_replace(arc, replace)
+        swaps = []
+        if args.luigi_originals:
+            # Co-op: Luigi keeps Galaxy's animations where Mario has converted ones, except the Odyssey
+            # moveset's. Galaxy gives Luigi his own clips through a swap table of BCK names (run -> luigirun);
+            # the clips Mario's conversions replace are added as luigi<name>, and luigi_swap.txt lists the
+            # whole table for the runtime to install for Luigi.
+            own = {name: 'luigi' + name for name in LUIGI_OWN}
+            added = {'luigi%s.bck' % name: bcks[name + '.bck'] for name in replace_names(replace)
+                     if name not in MOVESET and name not in own and 'luigi%s.bck' % name not in bcks}
+            new_arc = disc.rarc_add(new_arc, added)
+            swaps = sorted(own.items()) + sorted((n[5:-4], n[:-4]) for n in added)
+            notes += ['', 'Luigi (co-op): his own Galaxy clips for %d animations, Mario\'s converted ones for the '
+                      'moveset (%s)' % (len(swaps), ', '.join(sorted(MOVESET & set(replace_names(replace)))))]
         packed = disc.yaz0_encode(new_arc)
         if disc.yaz0_decode(packed) != new_arc:
             raise RuntimeError('Yaz0 round trip failed')
@@ -458,6 +485,14 @@ def main():
             len(packed), size, target, hashlib.sha1(packed).hexdigest())]
         with open(os.path.join(out, 'report.txt'), 'w', newline='\n') as f:
             f.write('\n'.join(report) + '\n')
+        swap_file = os.path.join(out, 'luigi_swap.txt')
+        if swaps:
+            with open(swap_file, 'w', newline='\n') as f:
+                f.write('# Luigi\'s animation swap table (BCK name -> BCK name, without .bck), built by '
+                        'build_animation_mod.py --luigi-originals\n')
+                f.writelines('%s %s\n' % s for s in swaps)
+        elif os.path.exists(swap_file):
+            os.remove(swap_file)
         print('\n'.join(notes) if not faces else '', 'wrote', out)
 
 if __name__ == '__main__':
