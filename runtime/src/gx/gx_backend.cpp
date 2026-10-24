@@ -24,6 +24,7 @@
 #include "galaxy/perf_hint.h"
 
 #include "galaxy/gx/gx_backend.h"
+#include "galaxy/gx/split_clip.h"
 #include "galaxy/gx/dependency_draw_memo.h"
 #include "galaxy/gx/dependency_range_memo.h"
 #include "galaxy/gx/fifo_cache_fingerprint.h"
@@ -3951,19 +3952,116 @@ void GxBackend::apply_scene_jitter(const GxVsConstants& cpu, GxVsConstants& uplo
         upload.projection[0][column] = cpu.projection[0][column] + jx * cpu.projection[3][column];
         upload.projection[1][column] = cpu.projection[1][column] + jy * cpu.projection[3][column];
     }
-    if (!scene_camera_captured_) {
-        scene_camera_captured_ = true;
-        // GX perspective: clip z = E z + F, w = -z; NDC z -1 at near, 0 at far.
-        const float c = xf_float(xf::kProjectionBase + 2u);
-        const float e = xf_float(xf::kProjectionBase + 4u);
-        const float f = xf_float(xf::kProjectionBase + 5u);
-        const float near_plane = f / (e - 1.0f);
-        const float far_plane = f / e;
-        const float fov_y = c != 0.0f ? 2.0f * std::atan(1.0f / std::fabs(c)) : 1.0f;
-        if (std::isfinite(near_plane) && std::isfinite(far_plane) &&
-            near_plane > 0.0f && far_plane > near_plane) {
-            renderer_.set_scene_camera(near_plane, far_plane, fov_y);
+    capture_scene_camera();
+}
+
+std::uint8_t GxBackend::classify_material() const {
+    std::uint8_t material = kMaterialWritten;
+    const GenMode gm = state_.gen_mode();
+    for (unsigned i = 0; i < gm.num_color_chans && i < 2u; ++i) {
+        // Colour and alpha control of channel i.
+        for (const unsigned ctrl : {i, 2u + i}) {
+            const XfChannelCtrl c = state_.channel_ctrl(ctrl);
+            if (!c.lighting_enable || c.light_mask == 0u) continue;
+            if (ctrl == 0u && c.diffuse_func != 0u) material |= kMaterialLit;
+            if (c.atten_func == 1u) material |= kMaterialGlossy;  // specular light
         }
+    }
+    // A texture coordinate generated from the normal through a matrix is an
+    // environment (reflection) map: SMG's metal, ice, glass and chrome.
+    for (unsigned i = 0; i < gm.num_texgens && i < 8u; ++i) {
+        const XfTexGen tg = state_.tex_gen(i);
+        if (tg.type == TexGenType::Regular && tg.source_row == 1u) {
+            material |= kMaterialGlossy;
+        }
+    }
+    if (gm.num_ind_stages != 0u) {
+        material |= kMaterialIndirect;
+    }
+    // A per-vertex position matrix index (VCD bit 0) is how the game skins its
+    // actors: Mario, enemies, NPCs. Stage geometry has none.
+    if ((state_.cp(cp::kVcdLo) & 1u) != 0u) {
+        material |= kMaterialSkinned;
+    }
+    return material;
+}
+
+void GxBackend::capture_scene_light() {
+    if (scene_light_captured_ ||
+        state_.xf(static_cast<std::uint16_t>(xf::kProjectionBase + 6u)) != 0u ||
+        state_.gen_mode().num_color_chans == 0u) {
+        return;
+    }
+    const XfChannelCtrl color0 = state_.channel_ctrl(0u);
+    if (!color0.lighting_enable || color0.diffuse_func == 0u || color0.light_mask == 0u) {
+        return;
+    }
+    // XF light layout (16 words): 3 colour RGBA8, 4-6 cos attenuation,
+    // 7-9 distance attenuation, 10-12 position, 13-15 direction.
+    int best = -1;
+    unsigned best_luma = 0u;
+    for (unsigned light = 0; light < 8u; ++light) {
+        if ((color0.light_mask & (1u << light)) == 0u) continue;
+        const std::uint32_t rgba = state_.xf(
+            static_cast<std::uint16_t>(xf::kLightsBase + light * 16u + 3u));
+        const unsigned luma = 2u * ((rgba >> 24) & 0xFFu) + 5u * ((rgba >> 16) & 0xFFu) +
+                              ((rgba >> 8) & 0xFFu);
+        if (luma > best_luma) {
+            best_luma = luma;
+            best = static_cast<int>(light);
+        }
+    }
+    if (best < 0) {
+        return;
+    }
+    scene_light_captured_ = true;
+    float position[3];
+    for (unsigned i = 0; i < 3u; ++i) {
+        position[i] = std::bit_cast<float>(state_.xf(static_cast<std::uint16_t>(
+            xf::kLightsBase + static_cast<unsigned>(best) * 16u + 10u + i)));
+    }
+    if (std::isfinite(position[0]) && std::isfinite(position[1]) && std::isfinite(position[2])) {
+        renderer_.set_scene_light(position);
+    }
+}
+
+void GxBackend::capture_scene_camera() {
+    if (scene_camera_captured_ ||
+        state_.xf(static_cast<std::uint16_t>(xf::kProjectionBase + 6u)) != 0u) {
+        return;
+    }
+    scene_camera_captured_ = true;
+    const auto xf_float = [this](unsigned offset) {
+        return std::bit_cast<float>(state_.xf(static_cast<std::uint16_t>(offset)));
+    };
+    // GX perspective: clip z = E z + F, w = -z; NDC z -1 at near, 0 at far.
+    const float a = xf_float(xf::kProjectionBase + 0u);
+    const float b = xf_float(xf::kProjectionBase + 1u);
+    const float c = xf_float(xf::kProjectionBase + 2u);
+    const float d = xf_float(xf::kProjectionBase + 3u);
+    const float e = xf_float(xf::kProjectionBase + 4u);
+    const float f = xf_float(xf::kProjectionBase + 5u);
+    const float near_plane = f / (e - 1.0f);
+    const float far_plane = f / e;
+    const float fov_y = c != 0.0f ? 2.0f * std::atan(1.0f / std::fabs(c)) : 1.0f;
+    if (std::isfinite(near_plane) && std::isfinite(far_plane) &&
+        near_plane > 0.0f && far_plane > near_plane) {
+        if (split_draw_pass_ == 1u || split_draw_pass_ == 2u) {
+            split_scene_.near_plane[split_draw_pass_ - 1u] = near_plane;
+            split_scene_.far_plane[split_draw_pass_ - 1u] = far_plane;
+        }
+        // The second half's planes are its own (split_scene_); the scene's are the first view's.
+        if (split_draw_pass_ == 2u) return;
+        renderer_.set_scene_camera(near_plane, far_plane, fov_y);
+        // XF viewport: wd, ht, zRange, xOrig, yOrig, farZ; centre = orig - 342.
+        const float wd = std::fabs(xf_float(xf::kViewportBase));
+        const float ht = std::fabs(xf_float(xf::kViewportBase + 1u));
+        const float vp[4] = {
+            xf_float(xf::kViewportBase + 3u) - 342.0f - wd,
+            xf_float(xf::kViewportBase + 4u) - 342.0f - ht,
+            2.0f * wd, 2.0f * ht};
+        const float abcd[4] = {a, b, c, d};
+        renderer_.set_scene_projection(abcd, vp);
     }
 }
 
@@ -4035,6 +4133,8 @@ void GxBackend::write_scene_vs_constants(const GxVsConstants& cpu, GxVsConstants
     record.category = identity_category_;
     record.continuity = identity_continuity_;
     record.particle = identity_continuity_particle_;
+    // Split screen draws each object once per half, through each half's camera: a half's draws only match its own.
+    if (split_draw_pass_ != 0u) record.signature = combine64(record.signature, 0x5A17u + split_draw_pass_);
     record.palette = (vs_key_.flags & 0x01u) != 0u;
     if (record.palette) {
         // PNMTX0 (XF rows 0-2) stands for the per-vertex palette's object.
@@ -4081,7 +4181,10 @@ void GxBackend::write_scene_vs_constants(const GxVsConstants& cpu, GxVsConstants
     // temporal upscaling of the replays, every presented frame is a replay
     // whose program moves what moves: a block keeps its own transform.
     const bool replays_upscaled = renderer_.temporal_interpolation();
-    const Affine34& camera = transform_history_.camera_delta();
+    // Previous transform: the matched record, else the camera delta. The scene's camera delta is the first view's;
+    // the second split-screen half's unmatched draws get none (no motion) rather than the other camera's.
+    static const Affine34 kIdentity{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    const Affine34& camera = split_draw_pass_ == 2u ? kIdentity : transform_history_.camera_delta();
     std::uint32_t mode = 1u;
     std::uint32_t previous_palette = 0u;
     Affine34 prev_pos = replays_upscaled ? affine_identity() : camera;
@@ -6414,6 +6517,47 @@ void GxBackend::trace_rt_scene() {
 void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* view, std::uint32_t sky_up,
                                bool sky_up_known, const SceneStage* stage) {
     flush_pending_draw_batch();
+    // Split screen's separator: 0.375 logical EFB pixels each side of the line (0.75 wide; about 2 pixels at
+    // 1080p).
+    constexpr float kSplitLineHalfWidth = 0.375f;
+    if (marker == FifoMarker::SplitClip) {
+        // Split screen: the following full-screen draws keep one side of the line (flush_constants).
+        split_clip_ = {0.0f, 0.0f, 0.0f};
+        unsigned pass = 0u;
+        if (view != nullptr) {
+            for (unsigned i = 0; i < 3u; ++i) split_clip_[i] = (*view)[i];
+            pass = static_cast<unsigned>((*view)[3]);
+            if (pass == 1u || pass == 2u) {
+                // A half begins: its side and, at its first draw, its camera planes (capture_scene_camera).
+                split_scene_.halves[pass - 1u] = true;
+                split_scene_.plane[pass - 1u] = split_clip_;
+                scene_camera_captured_ = false;
+            }
+            // After the second half: the black separator between the halves, faded in with the split. Inside a
+            // scene it waits for the scene's effects (SceneEnd), so they never blur across it.
+            if (pass == 0u) {
+                split_scene_.opacity = (*view)[7];
+                if ((*view)[7] > 0.0f) {
+                    split_line_ = {(*view)[4], (*view)[5], (*view)[6], (*view)[7]};
+                    if (scene_phase_) {
+                        split_line_pending_ = true;
+                    } else {
+                        renderer_.draw_split_line({(*view)[4], (*view)[5], (*view)[6]}, kSplitLineHalfWidth,
+                                                  (*view)[7]);
+                    }
+                }
+            }
+        }
+        split_draw_pass_ = pass;
+
+        // The second half's EFB copies are its own; the game's addresses point at each half's copies while it
+        // draws, and back at the first half's after.
+        for (const EfbCopyParams& params : renderer_.set_efb_copy_view(pass == 2u ? 1u : 0u, texture_cache_)) {
+            mark_texture_binding_alias_dirty(params);
+            texture_bindings_dirty_ = true;
+        }
+        return;
+    }
     if (marker == FifoMarker::SceneBegin) {
         end_side_layer();
     }
@@ -6498,12 +6642,17 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
     }
     const bool was_temporal = temporal_scene_;
     const bool was_motion = motion_scene_;
+    const bool was_history = history_scene_;
     if (marker == FifoMarker::SceneBegin) {
         temporal_scene_ = renderer_.scene_temporal_begin(
             scene_jitter_px_[0], scene_jitter_px_[1]);
-        motion_scene_ = temporal_scene_ && renderer_.begin_motion_scene();
+        // Motion blur wants the scene's motion vectors without the temporal upscaler:
+        // the same writers and transform history, with no jitter.
+        const bool blur_scene = !temporal_scene_ && renderer_.scene_motion_blur_begin();
+        motion_scene_ = (temporal_scene_ || blur_scene) && renderer_.begin_motion_scene();
         scene_camera_captured_ = false;
-        history_scene_ = temporal_scene_ || interp_recording_;
+        scene_light_captured_ = false;
+        history_scene_ = temporal_scene_ || interp_recording_ || (blur_scene && motion_scene_);
         if (interp_recording_) {
             renderer_.note_replay_scene();
             if (!std::exchange(mirror_opened_scene_, false)) {
@@ -6571,7 +6720,7 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
     }
     // Projections take (or drop) the scene jitter, and scene draws switch
     // palette addressing, from the next draw on.
-    if (was_temporal || temporal_scene_ || interp_recording_) {
+    if (was_temporal || temporal_scene_ || interp_recording_ || was_history != history_scene_) {
         frame_bindings_dirty_ = true;
     }
     // Motion keys switch on or off: resolve the pipeline again.
@@ -6583,6 +6732,35 @@ void GxBackend::on_fifo_marker(FifoMarker marker, const std::array<float, 12>* v
     bool switched = false;
     display_copy_on_output_ = false;
     if (marker == FifoMarker::SceneEnd) {
+        // Co-op split screen: per-half effects once the split is open; a camera jump restarts the motion history
+        // and this scene's motion blur is skipped (its vectors are the jump).
+        const SplitEffectPlan plan = split_tracker_.next(split_scene_);
+        static const bool trace_split = read_env_u64("GALAXY_SPLIT_EFFECTS_TRACE", 0u) != 0u;
+        static std::uint64_t s_split_scenes = 0u;
+        if (trace_split && s_split_scenes++ % 120u == 0u) {
+            std::cerr << "[split-effects] halves=" << split_scene_.halves[0] << split_scene_.halves[1]
+                      << " opacity=" << split_scene_.opacity << " plane1=" << split_scene_.plane[0][0] << ','
+                      << split_scene_.plane[0][1] << ',' << split_scene_.plane[0][2]
+                      << " planes(near/far)=" << split_scene_.near_plane[0] << '/' << split_scene_.far_plane[0]
+                      << ' ' << split_scene_.near_plane[1] << '/' << split_scene_.far_plane[1]
+                      << " per-half=" << plan.per_half << " reset=" << plan.reset_history << '\n';
+        }
+        renderer_.set_scene_split(split_scene_, plan.per_half, plan.reset_history);
+        if (plan.reset_history) transform_history_.reset();
+        // The next scene's halves: the first half's marker comes before its SceneBegin, so they are gathered from
+        // one SceneEnd to the next. The separator's opacity comes after SceneEnd and stays until the next one.
+        split_scene_.halves[0] = split_scene_.halves[1] = false;
+        split_scene_.near_plane[0] = split_scene_.near_plane[1] = 0.0f;
+        split_scene_.far_plane[0] = split_scene_.far_plane[1] = 0.0f;
+        if (renderer_.record_scene_effects()) {
+            frame_bindings_dirty_ = true;
+        }
+        if (split_line_pending_) {
+            split_line_pending_ = false;
+            renderer_.draw_split_line({split_line_[0], split_line_[1], split_line_[2]}, kSplitLineHalfWidth,
+                                      split_line_[3]);
+            frame_bindings_dirty_ = true;
+        }
         renderer_.record_scene_aa();
         switched = renderer_.begin_output_efb();
     } else if (renderer_.output_efb_active()) {
@@ -10063,6 +10241,9 @@ gpu::Pipeline* GxBackend::flush_draw_state(
     const bool vcd_dirty  = (dirty & GxState::kDirtyVcd)         != 0;
     const bool tev_c_dirty = (dirty & GxState::kDirtyTevConstants) != 0;
     const bool vs_c_dirty = (dirty & GxState::kDirtyVsConstants) != 0;
+    if (tev_dirty || xf_dirty || vcd_dirty || dirty == ~0u) {
+        current_material_ = classify_material();
+    }
 
     // sampled_texture_map_mask walks every TEV stage; only kDirtyTev can move the mask (per-object
     // matrix loads set kDirtyXfMatrices alone), so it is recomputed only then or after a reset.
@@ -10587,9 +10768,29 @@ gpu::Pipeline* GxBackend::flush_draw_state(
         ? renderer_.matrix_ring().gpu_base()
         : current_matrix_palette_;
 
+    // Split screen: draws over the whole screen keep their half (SplitClip marker); smaller viewports are
+    // effects drawing into a corner of the EFB (Mario's shadow capture) and are left whole. The vertex
+    // shader clips the other side away before rasterizing (SV_ClipDistance0), so nothing is written there:
+    // colour, depth or stencil. The line, in logical EFB pixels, goes into clip space through the viewport:
+    // split_clip[0] = its angle + 16 (0: no line), split_clip[1] = its offset.
+    std::array<std::uint32_t, 2> clip{0u, 0u};
+    if (split_clip_[0] != 0.0f || split_clip_[1] != 0.0f || split_clip_[2] != 0.0f) {
+        const auto xf_float = [this](unsigned offset) {
+            return std::bit_cast<float>(state_.xf(static_cast<std::uint16_t>(xf::kViewportBase + offset)));
+        };
+        const float half_width = std::fabs(xf_float(0u));
+        const float half_height = std::fabs(xf_float(1u));
+        const float left = xf_float(3u) - 342.0f - half_width;
+        const float top = xf_float(4u) - 342.0f - half_height;
+        if (half_width * 2.0f >= 600.0f && left <= 1.0f) {
+            clip = split_clip_vs_words(split_clip_, half_width, half_height, left, top);
+        }
+    }
+    const bool clip_changed = clip != uploaded_split_clip_;
+
     // Upload VS constants when scalar state or fixed inline matrices change.
     if (std::exchange(sky_up_dirty_, false) || vs_c_dirty || xf_dirty || vcd_dirty || inline_matrices_stale_ ||
-        frame_bindings_dirty_ || dirty == ~0u ||
+        frame_bindings_dirty_ || dirty == ~0u || clip_changed ||
         (history_scene_ && current_matrix_palette_ != temporal_vs_palette_va_)) {
         const auto constants_start = time_detail
             ? std::chrono::steady_clock::now()
@@ -10599,10 +10800,23 @@ gpu::Pipeline* GxBackend::flush_draw_state(
         UploadRing::Allocation vs_alloc =
             renderer_.constant_ring().allocate(sizeof(GxVsConstants), 256u);
         std::memcpy(vs_alloc.cpu, &vs_c, sizeof(vs_c));
+        if (scene_phase_ && !scene_camera_captured_) {
+            capture_scene_camera();
+        }
+        if (scene_phase_ && !scene_light_captured_) {
+            capture_scene_light();
+        }
         if (history_scene_) [[unlikely]] {
-            write_scene_vs_constants(vs_c, *reinterpret_cast<GxVsConstants*>(vs_alloc.cpu));
+            // The scene's record keeps the split line too: interpolated sub-frames redraw each half clipped.
+            GxVsConstants clipped = vs_c;
+            clipped.split_clip[0] = clip[0];
+            clipped.split_clip[1] = clip[1];
+            write_scene_vs_constants(clipped, *reinterpret_cast<GxVsConstants*>(vs_alloc.cpu));
         }
         apply_uber_vs_key(vs_key_, *reinterpret_cast<GxVsConstants*>(vs_alloc.cpu));
+        reinterpret_cast<GxVsConstants*>(vs_alloc.cpu)->split_clip[0] = clip[0];
+        reinterpret_cast<GxVsConstants*>(vs_alloc.cpu)->split_clip[1] = clip[1];
+        uploaded_split_clip_ = clip;
         current_vs_constants_ = vs_alloc.gpu;
         inline_matrices_stale_ = false;
         if (time_detail) {
@@ -10897,6 +11111,7 @@ bool GxBackend::draw_calls_batch_compatible(
         lhs.sampler_table.ptr != rhs.sampler_table.ptr ||
         lhs.matrix_palette != rhs.matrix_palette ||
         lhs.topology != rhs.topology ||
+        lhs.stencil_ref != rhs.stencil_ref ||
         lhs.has_viewport != rhs.has_viewport) {
         return false;
     }
@@ -11048,6 +11263,7 @@ bool GxBackend::begin_cached_draw_run(
             : renderer_.default_sampler_table();
     cached_draw_run_state_call_.matrix_palette = draw_matrix_palette_;
     cached_draw_run_state_call_.aux_target     = current_pipeline_aux_;
+    cached_draw_run_state_call_.stencil_ref    = current_material_;
     cached_draw_run_state_call_.replay_record  = current_replay_record_;
     cached_draw_run_state_call_.ps_record      = current_ps_record_;
     cached_draw_run_state_call_.topology       = topology;
@@ -11985,6 +12201,7 @@ void GxBackend::on_draw(
         : renderer_.default_sampler_table();
     state_call.matrix_palette = draw_matrix_palette_;
     state_call.aux_target     = current_pipeline_aux_;
+    state_call.stencil_ref    = current_material_;
     state_call.replay_record  = current_replay_record_;
     state_call.ps_record      = current_ps_record_;
     state_call.topology       = topology;

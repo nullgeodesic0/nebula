@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <utility>
 
 // SMAA lookup textures (third_party/smaa, MIT).
 #include "AreaTex.h"
@@ -36,9 +37,23 @@
 #include "post_fsr_rcas_scaled_ps.h"
 #include "post_resample_ps.h"
 #include "post_fxaa_ps.h"
+#include "post_bloom_down_ps.h"
+#include "post_bloom_up_ps.h"
+#include "post_enhance_ps.h"
+#include "post_ssao_ao_ps.h"
+#include "post_ssao_blur_ps.h"
+#include "post_ssao_apply_ps.h"
+#include "post_dof_focus_ps.h"
+#include "post_dof_blur_ps.h"
+#include "post_dof_apply_ps.h"
+#include "post_motion_blur_ps.h"
+#include "post_ssr_ps.h"
 
 namespace galaxy::gx {
 namespace {
+
+// A float's bits, for the passes' uint constants.
+std::uint32_t bits(float value) noexcept { return std::bit_cast<std::uint32_t>(value); }
 
 using Microsoft::WRL::ComPtr;
 
@@ -55,7 +70,27 @@ constexpr ShaderBytes bytes(const BYTE (&code)[N]) noexcept {
 constexpr DXGI_FORMAT kColorFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kEdgesFormat = DXGI_FORMAT_R8G8_UNORM;
 constexpr DXGI_FORMAT kStencilFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
-constexpr unsigned kRtvSlots = 4u;
+// Slots 0-3: SMAA/AA/scaling targets. 4: final_. 5-9: bloom down levels.
+// 10-13: bloom up levels.
+// 14-15: ambient occlusion. 16: depth of field. 17-20: the two views' depth of field focus pairs.
+constexpr unsigned kRtvSlots = 22u;
+constexpr unsigned kSsaoAoSlot = 14u;
+constexpr unsigned kSsaoBlurSlot = 15u;
+constexpr unsigned kSceneTempSlot = 16u;
+constexpr unsigned kDofFocusSlot = 17u;  // to 20: two per view
+// One float per scene: the depth of field's smoothed focus distance.
+constexpr DXGI_FORMAT kFocusFormat = DXGI_FORMAT_R32_FLOAT;
+// The scene's motion vectors (kMotionVectorFormat in renderer_d3d12.h).
+constexpr DXGI_FORMAT kVelocityFormat = DXGI_FORMAT_R16G16_FLOAT;
+// R ambient occlusion, G contact shadow visibility.
+constexpr DXGI_FORMAT kSsaoFormat = DXGI_FORMAT_R8G8_UNORM;
+constexpr DXGI_FORMAT kDepthSrvFormat = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+// The EFB stencil, which holds each pixel's material class (kMaterial*).
+constexpr DXGI_FORMAT kStencilSrvFormat = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+constexpr DXGI_FORMAT kBloomFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+constexpr unsigned kFinalSlot = 4u;
+constexpr unsigned kBloomDownSlot = 5u;
+constexpr unsigned kBloomUpSlot = 10u;
 
 D3D12_SHADER_BYTECODE code(ShaderBytes shader) noexcept {
     return {shader.data, shader.size};
@@ -97,6 +132,64 @@ bool PostProcessor::create_pipeline(D3D12_SHADER_BYTECODE vs, D3D12_SHADER_BYTEC
         ds.FrontFace = op;
         ds.BackFace = op;
     }
+    return SUCCEEDED(device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
+}
+
+// dest = dest * source for colour, alpha untouched: the ambient occlusion apply.
+bool PostProcessor::create_pipeline_multiply(D3D12_SHADER_BYTECODE vs, D3D12_SHADER_BYTECODE ps,
+                                             DXGI_FORMAT format,
+                                             ComPtr<ID3D12PipelineState>& out) {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = root_signature_.Get();
+    pd.VS = vs;
+    pd.PS = ps;
+    auto& rt = pd.BlendState.RenderTarget[0];
+    rt.BlendEnable = TRUE;
+    rt.SrcBlend = D3D12_BLEND_ZERO;
+    rt.DestBlend = D3D12_BLEND_SRC_COLOR;
+    rt.BlendOp = D3D12_BLEND_OP_ADD;
+    rt.SrcBlendAlpha = D3D12_BLEND_ZERO;
+    rt.DestBlendAlpha = D3D12_BLEND_ONE;
+    rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.SampleMask = UINT_MAX;
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = format;
+    pd.SampleDesc.Count = 1;
+    return SUCCEEDED(device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
+}
+
+// dest.rgb = lerp(dest.rgb, source.rgb, source.a), alpha untouched: the depth
+// of field apply.
+bool PostProcessor::create_pipeline_over(D3D12_SHADER_BYTECODE vs, D3D12_SHADER_BYTECODE ps,
+                                         DXGI_FORMAT format,
+                                         ComPtr<ID3D12PipelineState>& out) {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = root_signature_.Get();
+    pd.VS = vs;
+    pd.PS = ps;
+    auto& rt = pd.BlendState.RenderTarget[0];
+    rt.BlendEnable = TRUE;
+    rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    rt.BlendOp = D3D12_BLEND_OP_ADD;
+    rt.SrcBlendAlpha = D3D12_BLEND_ZERO;
+    rt.DestBlendAlpha = D3D12_BLEND_ONE;
+    rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN |
+                               D3D12_COLOR_WRITE_ENABLE_BLUE;
+    pd.SampleMask = UINT_MAX;
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = format;
+    pd.SampleDesc.Count = 1;
     return SUCCEEDED(device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
 }
 
@@ -232,6 +325,40 @@ bool PostProcessor::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
         shutdown();
         return false;
     }
+    // The look pass is optional: when any of its pipelines fails the chain
+    // presents without it.
+    if (!(create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_bloom_down_ps)), kBloomFormat, 0, bloom_down_) &&
+          create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_bloom_up_ps)), kBloomFormat, 0, bloom_up_) &&
+          create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_enhance_ps)), kColorFormat, 0, enhance_))) {
+        std::cerr << "[post-process] look pass pipelines failed; presenting without it\n";
+        bloom_down_.Reset();
+        bloom_up_.Reset();
+        enhance_.Reset();
+    }
+    if (!(create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_ssao_ao_ps)), kSsaoFormat, 0, ssao_ao_pipeline_) &&
+          create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_ssao_blur_ps)), kSsaoFormat, 0, ssao_blur_pipeline_) &&
+          create_pipeline_multiply(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_ssao_apply_ps)), kColorFormat, ssao_apply_pipeline_))) {
+        std::cerr << "[post-process] ambient occlusion pipelines failed; it stays off\n";
+        ssao_ao_pipeline_.Reset();
+        ssao_blur_pipeline_.Reset();
+        ssao_apply_pipeline_.Reset();
+    }
+    if (!(create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_dof_focus_ps)), kFocusFormat, 0, dof_focus_pipeline_) &&
+          create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_dof_blur_ps)), kColorFormat, 0, dof_blur_pipeline_) &&
+          create_pipeline_over(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_dof_apply_ps)), kColorFormat, dof_apply_pipeline_))) {
+        std::cerr << "[post-process] depth of field pipelines failed; it stays off\n";
+        dof_focus_pipeline_.Reset();
+        dof_blur_pipeline_.Reset();
+        dof_apply_pipeline_.Reset();
+    }
+    if (!create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_motion_blur_ps)), kColorFormat, 0, motion_blur_pipeline_)) {
+        std::cerr << "[post-process] motion blur pipeline failed; it stays off\n";
+        motion_blur_pipeline_.Reset();
+    }
+    if (!create_pipeline(code(bytes(g_post_fullscreen_vs)), code(bytes(g_post_ssr_ps)), kColorFormat, 0, ssr_pipeline_)) {
+        std::cerr << "[post-process] reflection pipeline failed; it stays off\n";
+        ssr_pipeline_.Reset();
+    }
     fault_selftest_ = test_fault("selftest");
     fault_targets_ = test_fault("targets");
     constexpr UINT8 kRgb = D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN |
@@ -310,6 +437,28 @@ void PostProcessor::shutdown() noexcept {
     rcas_.Reset();
     rcas_scaled_.Reset();
     resample_.Reset();
+    bloom_down_.Reset();
+    bloom_up_.Reset();
+    enhance_.Reset();
+    ssao_ao_pipeline_.Reset();
+    ssao_blur_pipeline_.Reset();
+    ssao_apply_pipeline_.Reset();
+    ssao_ao_ = {};
+    ssao_blur_ = {};
+    dof_focus_pipeline_.Reset();
+    dof_blur_pipeline_.Reset();
+    dof_apply_pipeline_.Reset();
+    for (unsigned view = 0; view < 2u; ++view) {
+        dof_focus_[view][0] = {};
+        dof_focus_[view][1] = {};
+        dof_focus_valid_[view] = false;
+    }
+    motion_blur_pipeline_.Reset();
+    ssr_pipeline_.Reset();
+    scene_temp_ = {};
+    final_ = {};
+    for (auto& t : bloom_down_targets_) t = {};
+    for (auto& t : bloom_up_targets_) t = {};
     root_signature_.Reset();
     area_texture_.Reset();
     search_texture_.Reset();
@@ -477,6 +626,8 @@ void PostProcessor::draw(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ri
         sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sd.Texture2D.MipLevels = 1;
+        // The stencil of a depth-stencil resource is its second plane.
+        sd.Texture2D.PlaneSlice = sd.Format == kStencilSrvFormat ? 1u : 0u;
         device_->CreateShaderResourceView(input, &sd, slot);
         slot.ptr += increment;
         ++written;
@@ -877,12 +1028,31 @@ void PostProcessor::record(ID3D12GraphicsCommandList* list,
         }
     };
 
+    // The look pass needs the finished window-sized picture as a texture, so the
+    // chain's last step renders into final_ instead of the back buffer.
+    const bool enhance =
+        settings_.enhance_active() && enhance_ && bloom_down_ && bloom_up_ &&
+        ensure_target(final_, target_width, target_height, kColorFormat, kFinalSlot,
+                      frame_index, frames_in_flight) &&
+        ensure_enhance_targets(target_width, target_height, frame_index, frames_in_flight);
+    const auto into_out = [&](D3D12_VIEWPORT& out_viewport, Constants& constants) {
+        if (!enhance) {
+            into(true, out_viewport, constants);
+            return;
+        }
+        transition(list, final_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        list->OMSetRenderTargets(1, &final_.rtv, FALSE, nullptr);
+        out_viewport = window_sized;
+        constants.origin[0] = 0;
+        constants.origin[1] = 0;
+    };
+
     if (plan.easu) {
         Constants e = c;
         set_fsr_easu_constants(e, static_cast<float>(source_width), static_cast<float>(source_height),
                                static_cast<float>(target_width), static_cast<float>(target_height));
         D3D12_VIEWPORT vp{};
-        into(!plan.rcas, vp, e);
+        if (!plan.rcas) into_out(vp, e); else into(false, vp, e);
         draw(list, srv_ring, easu_.Get(), {image}, {kColorFormat}, vp, e);
         if (plan.rcas) {
             transition(list, scaled_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -895,7 +1065,7 @@ void PostProcessor::record(ID3D12GraphicsCommandList* list,
         r.params[2] = static_cast<float>(target_width);
         r.params[3] = static_cast<float>(target_height);
         D3D12_VIEWPORT vp{};
-        into(plan.resample_to_target, vp, r);
+        if (plan.resample_to_target) into_out(vp, r); else into(false, vp, r);
         draw(list, srv_ring, resample_.Get(), {image}, {kColorFormat}, vp, r);
         if (!plan.resample_to_target) {
             transition(list, scaled_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -909,9 +1079,327 @@ void PostProcessor::record(ID3D12GraphicsCommandList* list,
         s.params[0] = static_cast<float>(target_width);
         s.params[1] = static_cast<float>(target_height);
         D3D12_VIEWPORT vp{};
-        into(true, vp, s);
+        into_out(vp, s);
         draw(list, srv_ring, rcas_.Get(), {image}, {kColorFormat}, vp, s);
     }
+
+    if (enhance) {
+        transition(list, final_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        record_enhance(list, srv_ring, final_.resource.Get(), target_width, target_height,
+                       target_rtv, viewport);
+    }
+}
+
+bool PostProcessor::record_ssao(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                                const SsaoInputs& in, std::uint64_t frame_index,
+                                unsigned frames_in_flight) {
+    if (!ssao_ready() || in.depth == nullptr || in.width == 0u || in.height == 0u ||
+        !ensure_target(ssao_ao_, in.width, in.height, kSsaoFormat, kSsaoAoSlot,
+                       frame_index, frames_in_flight) ||
+        !ensure_target(ssao_blur_, in.width, in.height, kSsaoFormat, kSsaoBlurSlot,
+                       frame_index, frames_in_flight)) {
+        return false;
+    }
+    Constants c{};
+    c.rt_metrics[0] = 1.0f / static_cast<float>(in.width);
+    c.rt_metrics[1] = 1.0f / static_cast<float>(in.height);
+    c.rt_metrics[2] = static_cast<float>(in.width);
+    c.rt_metrics[3] = static_cast<float>(in.height);
+    for (unsigned i = 0; i < 4u; ++i) c.params[i] = in.viewport[i];
+    c.con0[0] = bits(in.camera_near);
+    c.con0[1] = bits(in.camera_far);
+    c.con0[2] = bits(in.proj[0]);
+    c.con0[3] = bits(in.proj[1]);
+    c.con1[0] = bits(in.proj[2]);
+    c.con1[1] = bits(in.proj[3]);
+    c.con1[2] = bits(in.radius);
+    c.con1[3] = bits(in.strength);
+    c.con2[0] = bits(in.bias);
+    c.con2[1] = bits(in.light[0]);
+    c.con2[2] = bits(in.light[1]);
+    c.con2[3] = bits(in.light[2]);
+    c.con3[0] = bits(in.shadow_strength);
+    c.con3[1] = bits(in.shadow_length);
+    c.con3[2] = bits(in.shadow_thickness);
+    c.con3[3] = bits(in.shadow_long_length);
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
+                            static_cast<float>(in.height), 0.0f, 1.0f};
+    list->SetGraphicsRootSignature(root_signature_.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    transition(list, ssao_ao_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    list->OMSetRenderTargets(1, &ssao_ao_.rtv, FALSE, nullptr);
+    draw(list, srv_ring, ssao_ao_pipeline_.Get(), {in.depth, in.depth, in.depth},
+         {kDepthSrvFormat, kDepthSrvFormat, kStencilSrvFormat}, vp, c);
+    transition(list, ssao_ao_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    transition(list, ssao_blur_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    list->OMSetRenderTargets(1, &ssao_blur_.rtv, FALSE, nullptr);
+    draw(list, srv_ring, ssao_blur_pipeline_.Get(), {in.depth, ssao_ao_.resource.Get()},
+         {kDepthSrvFormat, kSsaoFormat}, vp, c);
+    transition(list, ssao_blur_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE color = in.color_rtv;
+    list->OMSetRenderTargets(1, &color, FALSE, nullptr);
+    draw(list, srv_ring, ssao_apply_pipeline_.Get(), {ssao_blur_.resource.Get()}, {kSsaoFormat}, vp, c);
+    return true;
+}
+
+bool PostProcessor::record_dof(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                               const DofInputs& in, std::uint64_t frame_index,
+                               unsigned frames_in_flight) {
+    if (!dof_ready() || in.depth == nullptr || in.color == nullptr || in.width == 0u ||
+        in.height == 0u ||
+        !ensure_target(scene_temp_, in.width, in.height, kColorFormat, kSceneTempSlot,
+                       frame_index, frames_in_flight)) {
+        return false;
+    }
+    Constants c{};
+    c.rt_metrics[0] = 1.0f / static_cast<float>(in.width);
+    c.rt_metrics[1] = 1.0f / static_cast<float>(in.height);
+    c.rt_metrics[2] = static_cast<float>(in.width);
+    c.rt_metrics[3] = static_cast<float>(in.height);
+    for (unsigned i = 0; i < 4u; ++i) c.params[i] = in.viewport[i];
+    c.con0[0] = bits(in.camera_near);
+    c.con0[1] = bits(in.camera_far);
+    c.con1[0] = bits(in.max_radius);
+    c.con1[1] = bits(in.focus_start);
+    c.con1[2] = bits(in.focus_full);
+    for (unsigned i = 0; i < 4u; ++i) c.split[i] = in.split[i];
+    if (in.has_focus_point) {
+        c.focus[0] = in.focus_point[0];
+        c.focus[1] = in.focus_point[1];
+        c.focus[2] = 1.0f;
+    }
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
+                            static_cast<float>(in.height), 0.0f, 1.0f};
+
+    // The focus distance eases over scenes through two 1x1 targets per view. They start at
+    // zero ("no previous focus"); a change of camera planes (a camera cut, a new
+    // level) restarts the easing from the new candidate.
+    const unsigned view = std::min(in.view, 1u);
+    Target(&focus_pair)[2] = dof_focus_[view];
+    if (!ensure_target(focus_pair[0], 1u, 1u, kFocusFormat, kDofFocusSlot + 2u * view, frame_index,
+                       frames_in_flight) ||
+        !ensure_target(focus_pair[1], 1u, 1u, kFocusFormat, kDofFocusSlot + 2u * view + 1u, frame_index,
+                       frames_in_flight)) {
+        return false;
+    }
+    list->SetGraphicsRootSignature(root_signature_.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    if (!dof_focus_valid_[view]) {
+        const float zero[4]{};
+        for (Target& focus : focus_pair) {
+            transition(list, focus, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            list->ClearRenderTargetView(focus.rtv, zero, 0, nullptr);
+            transition(list, focus, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
+        dof_focus_valid_[view] = true;
+    }
+    const auto changed = [](float now, float before) {
+        return before <= 0.0f || std::fabs(now - before) > 0.2f * before;
+    };
+    const bool cut = changed(in.camera_near, dof_last_near_[view]) || changed(in.camera_far, dof_last_far_[view]);
+    dof_last_near_[view] = in.camera_near;
+    dof_last_far_[view] = in.camera_far;
+    Target& previous = focus_pair[dof_focus_index_[view]];
+    Target& current = focus_pair[dof_focus_index_[view] ^ 1u];
+    dof_focus_index_[view] ^= 1u;
+    Constants f = c;
+    f.con1[0] = bits(1.05f);      // at most 5% per scene toward the candidate
+    f.con1[1] = bits(0.15f);      // and 15% of the remaining distance (log space)
+    f.con1[2] = bits(cut ? 1.0f : 0.0f);
+    const D3D12_VIEWPORT one{0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+    transition(list, current, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    list->OMSetRenderTargets(1, &current.rtv, FALSE, nullptr);
+    draw(list, srv_ring, dof_focus_pipeline_.Get(), {in.depth, previous.resource.Get()},
+         {kDepthSrvFormat, kFocusFormat}, one, f);
+    transition(list, current, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    record_scene_blend(list, srv_ring, dof_blur_pipeline_.Get(), in.color, in.color_rtv,
+                       {in.depth, in.color, current.resource.Get()},
+                       {kDepthSrvFormat, kColorFormat, kFocusFormat}, vp, c);
+    return true;
+}
+
+bool PostProcessor::record_ssr(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                               ID3D12Resource* color, const SsaoInputs& in,
+                               std::uint64_t frame_index, unsigned frames_in_flight) {
+    if (!ssr_ready() || color == nullptr || in.depth == nullptr || in.width == 0u ||
+        in.height == 0u ||
+        !ensure_target(scene_temp_, in.width, in.height, kColorFormat, kSceneTempSlot,
+                       frame_index, frames_in_flight)) {
+        return false;
+    }
+    Constants c{};
+    c.rt_metrics[0] = 1.0f / static_cast<float>(in.width);
+    c.rt_metrics[1] = 1.0f / static_cast<float>(in.height);
+    c.rt_metrics[2] = static_cast<float>(in.width);
+    c.rt_metrics[3] = static_cast<float>(in.height);
+    for (unsigned i = 0; i < 4u; ++i) c.params[i] = in.viewport[i];
+    c.con0[0] = bits(in.camera_near);
+    c.con0[1] = bits(in.camera_far);
+    c.con0[2] = bits(in.proj[0]);
+    c.con0[3] = bits(in.proj[1]);
+    c.con1[0] = bits(in.proj[2]);
+    c.con1[1] = bits(in.proj[3]);
+    c.con1[2] = bits(in.radius);
+    c.con1[3] = bits(in.strength);
+    static const bool debug = [] {
+        char v[8]{};
+        std::size_t n = 0;
+        return getenv_s(&n, v, sizeof(v), "GALAXY_REFLECTION_DEBUG") == 0 && n > 1;
+    }();
+    c.con2[0] = bits(debug ? 1.0f : 0.0f);
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
+                            static_cast<float>(in.height), 0.0f, 1.0f};
+    record_scene_blend(list, srv_ring, ssr_pipeline_.Get(), color, in.color_rtv,
+                       {in.depth, color, in.depth},
+                       {kDepthSrvFormat, kColorFormat, kStencilSrvFormat}, vp, c);
+    return true;
+}
+
+bool PostProcessor::record_motion_blur(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                                       const MotionBlurInputs& in, std::uint64_t frame_index,
+                                       unsigned frames_in_flight) {
+    if (!motion_blur_ready() || in.velocity == nullptr || in.depth == nullptr ||
+        in.color == nullptr || in.width == 0u || in.height == 0u ||
+        !ensure_target(scene_temp_, in.width, in.height, kColorFormat, kSceneTempSlot,
+                       frame_index, frames_in_flight)) {
+        return false;
+    }
+    Constants c{};
+    c.rt_metrics[0] = 1.0f / static_cast<float>(in.width);
+    c.rt_metrics[1] = 1.0f / static_cast<float>(in.height);
+    c.rt_metrics[2] = static_cast<float>(in.width);
+    c.rt_metrics[3] = static_cast<float>(in.height);
+    for (unsigned i = 0; i < 4u; ++i) c.params[i] = in.viewport[i];
+    c.con0[0] = bits(in.shutter);
+    c.con0[1] = bits(in.max_length);
+    for (unsigned i = 0; i < 4u; ++i) c.split[i] = in.split[i];
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(in.width),
+                            static_cast<float>(in.height), 0.0f, 1.0f};
+    record_scene_blend(list, srv_ring, motion_blur_pipeline_.Get(), in.color, in.color_rtv,
+                       {in.velocity, in.depth, in.color},
+                       {kVelocityFormat, kDepthSrvFormat, kColorFormat}, vp, c);
+    return true;
+}
+
+void PostProcessor::record_scene_blend(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                                       ID3D12PipelineState* pipeline, ID3D12Resource* color,
+                                       D3D12_CPU_DESCRIPTOR_HANDLE color_rtv,
+                                       std::initializer_list<ID3D12Resource*> inputs,
+                                       std::initializer_list<DXGI_FORMAT> formats,
+                                       const D3D12_VIEWPORT& vp, const Constants& c) {
+    list->SetGraphicsRootSignature(root_signature_.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    D3D12_RESOURCE_BARRIER bar{};
+    bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    bar.Transition.pResource = color;
+    bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    bar.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    list->ResourceBarrier(1, &bar);
+    transition(list, scene_temp_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    list->OMSetRenderTargets(1, &scene_temp_.rtv, FALSE, nullptr);
+    draw(list, srv_ring, pipeline, inputs, formats, vp, c);
+    transition(list, scene_temp_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    std::swap(bar.Transition.StateBefore, bar.Transition.StateAfter);
+    list->ResourceBarrier(1, &bar);
+
+    list->OMSetRenderTargets(1, &color_rtv, FALSE, nullptr);
+    draw(list, srv_ring, dof_apply_pipeline_.Get(), {scene_temp_.resource.Get()}, {kColorFormat}, vp, c);
+}
+
+bool PostProcessor::ensure_enhance_targets(unsigned width, unsigned height,
+                                           std::uint64_t frame_index,
+                                           unsigned frames_in_flight) {
+    for (unsigned k = 0; k < kBloomLevels; ++k) {
+        const unsigned w = std::max(1u, width >> (k + 1u));
+        const unsigned h = std::max(1u, height >> (k + 1u));
+        if (!ensure_target(bloom_down_targets_[k], w, h, kBloomFormat, kBloomDownSlot + k,
+                           frame_index, frames_in_flight)) {
+            return false;
+        }
+        if (k + 1u < kBloomLevels &&
+            !ensure_target(bloom_up_targets_[k], w, h, kBloomFormat, kBloomUpSlot + k,
+                           frame_index, frames_in_flight)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void PostProcessor::record_enhance(ID3D12GraphicsCommandList* list, DescriptorRing& srv_ring,
+                                   ID3D12Resource* scene, unsigned width, unsigned height,
+                                   D3D12_CPU_DESCRIPTOR_HANDLE target_rtv,
+                                   const D3D12_VIEWPORT& viewport) {
+    // The pyramid is skipped at bloom 0; the look pass then reads the scene as a
+    // stand-in bloom texture, scaled by zero.
+    ID3D12Resource* bloom = scene;
+    DXGI_FORMAT bloom_format = kColorFormat;
+    ID3D12Resource* flare = scene;  // the bright pass at quarter size, or a zero-weighted stand-in
+    if (settings_.bloom > 0u) {
+        const auto pass = [&](ID3D12PipelineState* pipeline, Target& dst, float src_w, float src_h,
+                              std::initializer_list<ID3D12Resource*> inputs,
+                              std::initializer_list<DXGI_FORMAT> formats, float scalar) {
+            Constants c{};
+            c.rt_metrics[0] = 1.0f / src_w;
+            c.rt_metrics[1] = 1.0f / src_h;
+            c.rt_metrics[2] = src_w;
+            c.rt_metrics[3] = src_h;
+            c.params[0] = 1.0f / static_cast<float>(dst.width);
+            c.params[1] = 1.0f / static_cast<float>(dst.height);
+            c.params[2] = static_cast<float>(dst.width);
+            c.params[3] = static_cast<float>(dst.height);
+            c.con0[0] = bits(scalar);
+            c.con1[0] = bits(0.62f);  // brightness threshold
+            c.con1[1] = bits(0.25f);  // soft knee
+            const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(dst.width),
+                                    static_cast<float>(dst.height), 0.0f, 1.0f};
+            transition(list, dst, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            list->OMSetRenderTargets(1, &dst.rtv, FALSE, nullptr);
+            draw(list, srv_ring, pipeline, inputs, formats, vp, c);
+            transition(list, dst, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        };
+        list->SetGraphicsRootSignature(root_signature_.Get());
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (unsigned k = 0; k < kBloomLevels; ++k) {
+            ID3D12Resource* src = k == 0u ? scene : bloom_down_targets_[k - 1u].resource.Get();
+            const float sw = k == 0u ? static_cast<float>(width) : static_cast<float>(bloom_down_targets_[k - 1u].width);
+            const float sh = k == 0u ? static_cast<float>(height) : static_cast<float>(bloom_down_targets_[k - 1u].height);
+            pass(bloom_down_.Get(), bloom_down_targets_[k], sw, sh, {src},
+                 {k == 0u ? kColorFormat : kBloomFormat}, k == 0u ? 1.0f : 0.0f);
+        }
+        for (unsigned k = kBloomLevels - 1u; k-- > 0u;) {
+            Target& coarse = k + 2u == kBloomLevels ? bloom_down_targets_[kBloomLevels - 1u]
+                                                    : bloom_up_targets_[k + 1u];
+            pass(bloom_up_.Get(), bloom_up_targets_[k], static_cast<float>(coarse.width),
+                 static_cast<float>(coarse.height),
+                 {coarse.resource.Get(), bloom_down_targets_[k].resource.Get()},
+                 {kBloomFormat, kBloomFormat}, 1.0f);
+        }
+        bloom = bloom_up_targets_[0].resource.Get();
+        bloom_format = kBloomFormat;
+        flare = bloom_down_targets_[1].resource.Get();
+    }
+
+    Constants c{};
+    c.params[0] = static_cast<float>(width);
+    c.params[1] = static_cast<float>(height);
+    c.con0[0] = bits(settings_.bloom > 0u ? 0.55f * static_cast<float>(settings_.bloom) / 100.0f : 0.0f);
+    c.con0[1] = bits(static_cast<float>(settings_.saturation) / 100.0f);
+    c.con0[2] = bits(static_cast<float>(settings_.contrast) / 100.0f);
+    c.con0[3] = bits(0.7f * static_cast<float>(settings_.vignette) / 100.0f);
+    c.con1[0] = bits(settings_.bloom > 0u ? static_cast<float>(settings_.lens_flare) / 100.0f : 0.0f);
+    c.origin[0] = static_cast<std::int32_t>(viewport.TopLeftX);
+    c.origin[1] = static_cast<std::int32_t>(viewport.TopLeftY);
+    list->SetGraphicsRootSignature(root_signature_.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->OMSetRenderTargets(1, &target_rtv, FALSE, nullptr);
+    draw(list, srv_ring, enhance_.Get(), {scene, bloom, flare},
+         {kColorFormat, bloom_format, bloom_format}, viewport, c);
 }
 
 }  // namespace galaxy::gx

@@ -68,7 +68,7 @@ struct RenderConfig {
     // Fresnel on environment maps (enhanced_lighting.h). Takes precedence over per_pixel_lighting for those draws.
     bool     enhanced_lighting   = false;
     // Ambient occlusion of the 3D scene (ambient_occlusion.h); ray-traced lighting has its own.
-    bool     ambient_occlusion   = false;
+    bool     ambient_occlusion   = true;
 
     // Match Output: after a resize settles (not during an edge drag), efb_scale becomes the smallest scale whose game
     // picture covers the window; the renderer re-creates its targets once, at a frame boundary. Off by default: the
@@ -105,6 +105,34 @@ struct RenderConfig {
     unsigned spatial_quality     = 0;
     // RCAS strength 0-100; 0 skips the pass.
     unsigned sharpness           = 0;
+    // Look pass after scaling (percent): bloom 0-100 (0 = no bloom pyramid),
+    // saturation and contrast 0-200 (100 = unchanged), vignette 0-100. Keys
+    // bloom / saturation / contrast / vignette, env GALAXY_BLOOM etc.
+    unsigned bloom               = 30;
+    unsigned saturation          = 108;
+    unsigned contrast            = 104;
+    unsigned vignette            = 8;
+    // The fork's own ambient occlusion strength 0-100 on the 3D scene (0 = off; key ssao, env GALAXY_SSAO,
+    // world-unit radius GALAXY_SSAO_RADIUS). Off: upstream's AMBIENT OCCLUSION (ambient_occlusion) is the one the
+    // menu offers; this stays for comparisons only.
+    unsigned ssao                = 0;
+    // Screen-space contact shadows 0-100 from the scene's main light (0 = off);
+    // key contact_shadows, env GALAXY_CONTACT_SHADOWS, world-unit ray length
+    // GALAXY_CONTACT_SHADOW_LENGTH.
+    unsigned contact_shadows     = 50;
+    // Far-field depth of field 0-100 (0 = off); key depth_of_field, env
+    // GALAXY_DEPTH_OF_FIELD.
+    unsigned depth_of_field      = 40;
+    // Camera-rotation motion blur 0-100 (shutter, 0 = off); key motion_blur,
+    // env GALAXY_MOTION_BLUR.
+    unsigned motion_blur         = 0;
+    // Screen-space reflections 0-100 on reflective materials (0 = off); key
+    // reflections, env GALAXY_REFLECTIONS, world-unit ray length
+    // GALAXY_REFLECTION_DISTANCE.
+    unsigned reflections         = 60;
+    // Lens flare 0-100 from the bloom bright pass (0 = off, needs bloom); key
+    // lens_flare, env GALAXY_LENS_FLARE.
+    unsigned lens_flare          = 40;
 
     // Ray tracing on adapters with DXR 1.1, shader model 6.5 and dedicated video memory; ignored elsewhere.
     // rt_shadow_quality, rt_ao_enabled and rt_reflections are not implemented and clamped off.

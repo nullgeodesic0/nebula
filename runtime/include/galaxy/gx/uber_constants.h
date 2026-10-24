@@ -132,6 +132,9 @@ struct alignas(256) GxVsConstants {
     // paint and occlusion stay.
     float debake_sh[7][4];
     float debake_peak[4];
+    // Co-op split screen (GxBackend::flush_constants): [0] the line's angle + 16 as a float's bits (0: no line),
+    // [1] its offset, in clip space; every vertex shader clips the other player's side away.
+    std::uint32_t split_clip[4];
 };
 
 static_assert(offsetof(GxVsConstants, projection) == 0);
@@ -153,6 +156,7 @@ static_assert(offsetof(GxVsConstants, motion_prev_proj) == 1168);
 static_assert(offsetof(GxVsConstants, motion_ctrl) == 1264);
 static_assert(offsetof(GxVsConstants, debake_sh) == 1280);
 static_assert(offsetof(GxVsConstants, debake_peak) == 1392);
+static_assert(offsetof(GxVsConstants, split_clip) == 1408);
 static_assert(sizeof(GxVsConstants) == 1536);
 
 #if defined(_MSC_VER)

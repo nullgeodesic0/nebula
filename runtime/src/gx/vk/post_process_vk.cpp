@@ -45,7 +45,7 @@ const char* text_of(const unsigned char* bytes) {
 
 // One pass's source, composed as CMakeLists.txt's galaxy_post_shader composes the D3D12 build's fxc inputs.
 std::string compose(const char* pass, const char* preset, Library library) {
-    std::string text = std::string("#define ") + pass + " 1\n";
+    std::string text = std::string("#define NEBULA_POST_VULKAN 1\n#define ") + pass + " 1\n";
     if (preset != nullptr) {
         text += std::string("#define ") + preset + " 1\n";
     }

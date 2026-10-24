@@ -234,6 +234,18 @@ public:
         }
         producer_scene_view_valid_ = false;
     }
+    // Simulation thread: a SplitClip marker; its plane and pass ride in the marker's view slot.
+    void attach_split_clip(const float plane[3], unsigned pass, const float separator[4], std::size_t fifo_offset) noexcept {
+        if (producer_fifo_marker_count_ < producer_fifo_markers_.size()) {
+            const std::uint8_t index = producer_fifo_marker_count_++;
+            producer_fifo_markers_[index] = {fifo_offset, FifoMarker::SplitClip};
+            producer_fifo_marker_views_[index] = {};
+            for (unsigned i = 0; i < 3u; ++i) producer_fifo_marker_views_[index][i] = plane[i];
+            producer_fifo_marker_views_[index][3] = static_cast<float>(pass);
+            for (unsigned i = 0; i < 4u; ++i) producer_fifo_marker_views_[index][4u + i] = separator[i];
+            producer_fifo_marker_view_mask_ |= static_cast<std::uint8_t>(1u << index);
+        }
+    }
     [[nodiscard]] bool rt_shadow_casters_wanted() const noexcept {
         return rt_shadow_casters_wanted_.load(std::memory_order_relaxed);
     }
@@ -733,6 +745,18 @@ private:
     std::array<std::uint64_t, 5> particle_age_steps_{};
     std::uint64_t interp_game_cuts_ = 0;        // cuts from the game's camera epoch
     std::uint64_t interp_threshold_cuts_ = 0;   // cuts from the turn/move thresholds only
+    // Render thread: split screen's line from the last SplitClip marker (logical EFB pixels; zero: none),
+    // and the one in the last uploaded vertex-shader constants (split_clip_vs_words).
+    std::array<float, 3> split_clip_{};
+    // Co-op split screen and the scene effects (split_effects.h): this scene's halves as their SplitClip markers
+    // and camera planes showed them, the half being drawn (1, 2; 0 outside them), and the separator, drawn once the
+    // scene's effects are done so they never blur it.
+    SplitScene split_scene_{};
+    unsigned split_draw_pass_ = 0u;
+    SplitEffectTracker split_tracker_{};
+    bool split_line_pending_ = false;
+    std::array<float, 4> split_line_{};
+    std::array<std::uint32_t, 2> uploaded_split_clip_{};
     // Temporal upscaling for the current scene: perspective projections carry
     // this sub-pixel jitter (render pixels).
     bool temporal_scene_ = false;
@@ -1210,6 +1234,9 @@ private:
     [[nodiscard]] double interp_slot_t() const;
     static void interp_sleep_us(std::int64_t us);
     bool scene_camera_captured_ = false;
+    bool scene_light_captured_ = false;
+    // The current draw's material class for the EFB stencil (kMaterial*).
+    std::uint8_t current_material_ = kMaterialWritten;
     float scene_jitter_px_[2]{};
     bool producer_movie_content_{},render_movie_content_{};
     MovieFrameMark producer_movie_frame_{}, render_movie_frame_{};
@@ -1357,6 +1384,15 @@ private:
     // `jitter_ndc` receives the offset (zero for orthographic draws).
     void apply_scene_jitter(const GxVsConstants& cpu, GxVsConstants& upload,
                             float jitter_ndc[2]);
+    // The scene's first perspective draw supplies the camera planes, projection
+    // terms and viewport (renderer set_scene_camera / set_scene_projection).
+    void capture_scene_camera();
+    // The scene's first lit perspective draw supplies the light that casts
+    // contact shadows: the brightest light in its colour channel 0 mask
+    // (renderer set_scene_light).
+    void capture_scene_light();
+    // Material class of the current GX state (kMaterial* in shader_keys.h).
+    [[nodiscard]] std::uint8_t classify_material() const;
     void adopt_pointer_depth_fence_if_needed();
     // Asynchronous EFB fields for simulation-thread GXPeekZ/GXPeekARGB, one per channel. A channel
     // answers one peek kind at one draw-sync token (`key`, bound by the simulation thread at the

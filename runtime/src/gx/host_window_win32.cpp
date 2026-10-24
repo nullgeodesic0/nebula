@@ -2389,6 +2389,35 @@ std::vector<SettingsRow> graphics_page(const RenderConfig& render) {
                         },
                         "HIGH: MORE LIGHTS PER PIXEL, FULL-RESOLUTION WATER. APPLIES AT THE NEXT START"});
     }
+    // The scene effects and the look pass (post_process.hlsl), 0-100 % (saturation and contrast 0-200 %, 100
+    // unchanged). They run on the plain scene EFB: not with MSAA, ray tracing's HDR scene or a temporal upscaler.
+    rows.push_back({"SCENE EFFECTS", {}, nullptr, {}, true});
+    const auto percent_row = [&rows](const char* label, unsigned value, unsigned maximum,
+                                     unsigned RenderConfig::*field, int lowest, const char* help) {
+        char line[24]{};
+        std::snprintf(line, sizeof(line), "%u%%", std::min(value, maximum));
+        rows.push_back({label, line,
+                        [field, maximum, lowest](RenderConfig& draft, int delta) {
+                            draft.*field = static_cast<unsigned>(std::clamp(
+                                static_cast<int>(std::min(draft.*field, maximum)) + delta * 5, lowest,
+                                static_cast<int>(maximum)));
+                        },
+                        help});
+    };
+    percent_row("BLOOM", render.bloom, 100u, &RenderConfig::bloom, 0, "GLOW AROUND BRIGHT LIGHTS");
+    percent_row("SATURATION", render.saturation, 200u, &RenderConfig::saturation, 0,
+                "COLOUR STRENGTH. 100% IS THE GAME'S");
+    percent_row("CONTRAST", render.contrast, 200u, &RenderConfig::contrast, 50, "100% IS THE GAME'S");
+    percent_row("VIGNETTE", render.vignette, 100u, &RenderConfig::vignette, 0, "DARKER CORNERS");
+    percent_row("CONTACT SHADOWS", render.contact_shadows, 100u, &RenderConfig::contact_shadows, 0,
+                "SHORT SHADOWS WHERE THINGS TOUCH, FROM THE SCENE'S LIGHT");
+    percent_row("DEPTH OF FIELD", render.depth_of_field, 100u, &RenderConfig::depth_of_field, 0,
+                "BLURS THE FAR DISTANCE");
+    percent_row("MOTION BLUR", render.motion_blur, 100u, &RenderConfig::motion_blur, 0, "BLUR ALONG FAST MOTION");
+    percent_row("REFLECTIONS", render.reflections, 100u, &RenderConfig::reflections, 0,
+                "SCREEN-SPACE REFLECTIONS ON SHINY AND WET SURFACES");
+    percent_row("LENS FLARE", render.lens_flare, 100u, &RenderConfig::lens_flare, 0,
+                "GHOSTS AND A HALO FROM BRIGHT LIGHTS");
     // Texture packs (the enabled mods') apply with the settings above; the folders of dumped textures and movies.
     rows.push_back({"TEXTURE PACKS", {}, nullptr, {}, true});
     rows.push_back({"TEXTURE PACKS", !render.texture_packs ? "OFF" : render.texture_pack_preload ? "PRELOAD" : "ON",

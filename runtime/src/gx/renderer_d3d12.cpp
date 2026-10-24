@@ -572,7 +572,8 @@ static constexpr std::size_t cb_per_frame_bytes() {
 static constexpr std::size_t mtx_per_frame_bytes() {
     return 32u * 1024u * 1024u;
 }
-static constexpr unsigned    kSrvPerFrame = 32768u;
+// Doubled for split screen, which draws the 3D scene twice a frame.
+static constexpr unsigned    kSrvPerFrame = 65536u;
 // The descriptor ring's persistent prefix, outside the rewound frame segments: the EFB
 // conversion sources (the EFB's views, the output EFB's, the MSAA depth's, then the HDR scene
 // EFBs', live and sub-frame: 10), the ray-traced scenes' texture views and the de-light views.
@@ -1519,7 +1520,10 @@ void RendererD3D12::sync_post_process_settings() {
     const PostProcessSettings next = post_process_settings_from(get_render_config());
     const PostProcessSettings& current = post_process_.settings();
     if (next.aa != current.aa || next.smaa_quality != current.smaa_quality ||
-        next.upscaler != current.upscaler || next.sharpness != current.sharpness) {
+        next.upscaler != current.upscaler || next.sharpness != current.sharpness ||
+        next.bloom != current.bloom || next.saturation != current.saturation ||
+        next.contrast != current.contrast || next.vignette != current.vignette ||
+        next.lens_flare != current.lens_flare) {
         post_process_.apply_settings(next, frame_index_, kFramesInFlight);
     }
 }
@@ -1643,6 +1647,16 @@ detail::create_efb_conversion_source_views(
     device->CreateShaderResourceView(depth, &view, depth_cpu);
     return {table.gpu, depth_gpu};
 }
+
+// Split screen's separator: black over a band around the line a*x + b*y + c = 0 (physical pixels, a and b
+// a unit normal), line_style.x its half width, line_style.y its opacity; one pixel of antialiasing.
+static constexpr char kSplitLinePs[] =
+    "cbuffer C:register(b0){float4 line_plane;float4 line_style;};"
+    "float4 main(float4 pos:SV_Position):SV_Target{"
+    " float d=abs(dot(line_plane.xy,pos.xy)+line_plane.z);"
+    " return float4(0,0,0,saturate(line_style.x+0.5-d)*line_style.y);"
+    "}";
+
 bool RendererD3D12::create_clear_pipeline() {
     D3D12_ROOT_PARAMETER param{};
     param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -1665,7 +1679,88 @@ bool RendererD3D12::create_clear_pipeline() {
     clear_vs_ = compile_hlsl(blit_vertex_shader_source().data(), blit_vertex_shader_source().size(), "vs_5_1", "main");
     clear_ps_ =
         compile_hlsl(clear_pixel_shader_source().data(), clear_pixel_shader_source().size(), "ps_5_1", "main");
+
+    // Split screen's separator line: eight constants, blended over the colour.
+    D3D12_ROOT_PARAMETER line_param = param;
+    line_param.Constants.Num32BitValues = 8;
+    rsd.pParameters = &line_param;
+    ComPtr<ID3DBlob> line_blob;
+    d3d_check(D3D12SerializeRootSignature(
+        &rsd, D3D_ROOT_SIGNATURE_VERSION_1, &line_blob, &err),
+        "SerializeSplitLineRS");
+    d3d_check(device_->CreateRootSignature(
+        0, line_blob->GetBufferPointer(), line_blob->GetBufferSize(),
+        IID_PPV_ARGS(&split_line_root_sig_)), "CreateSplitLineRS");
+    split_line_ps_ = compile_hlsl(kSplitLinePs, sizeof(kSplitLinePs) - 1, "ps_5_1", "main");
     return clear_pipeline(true) != nullptr && clear_pipeline(false) != nullptr;
+}
+
+// The separator's pipeline for the EFB in use (its sample count and format), made at its first use.
+ID3D12PipelineState* RendererD3D12::split_line_pipeline() {
+    const std::uint8_t variant = efb_variant();
+    ComPtr<ID3D12PipelineState>& pipeline = split_line_pipelines_[variant];
+    if (pipeline) {
+        return pipeline.Get();
+    }
+    if (!split_line_root_sig_ || !split_line_ps_ || !clear_vs_) {
+        return nullptr;
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = split_line_root_sig_.Get();
+    pd.VS = {clear_vs_->GetBufferPointer(), clear_vs_->GetBufferSize()};
+    pd.PS = {split_line_ps_->GetBufferPointer(), split_line_ps_->GetBufferSize()};
+    pd.SampleMask = UINT_MAX;
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.DepthStencilState.DepthEnable = FALSE;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = (variant & kEfbVariantHdr) != 0u ? kEfbHdrColorFormat : kEfbColorFormat;
+    pd.SampleDesc.Count = 1u << (variant & kEfbVariantSamplesMask);
+    auto& blend = pd.BlendState.RenderTarget[0];
+    blend.BlendEnable = TRUE;
+    blend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ZERO;
+    blend.DestBlendAlpha = D3D12_BLEND_ONE;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTargetWriteMask =
+        D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN | D3D12_COLOR_WRITE_ENABLE_BLUE;
+    d3d_check(device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pipeline)), "CreateSplitLinePSO");
+    return pipeline.Get();
+}
+
+void RendererD3D12::draw_split_line(const std::array<float, 3>& plane, float half_width, float opacity) {
+    if (opacity <= 0.0f) return;
+    const float length = std::sqrt(plane[0] * plane[0] + plane[1] * plane[1]);
+    if (!(length > 1e-6f)) return;
+    ID3D12PipelineState* const pipeline = split_line_pipeline();
+    if (pipeline == nullptr) return;
+    // The line in logical EFB pixels to the current target's physical pixels (the output EFB after the
+    // scene, at its own scale), with a unit normal so the shader's distance is in pixels.
+    const float scale = static_cast<float>(efb_scale_);
+    const float constants[8] = {
+        plane[0] / length / scale, plane[1] / length / scale, plane[2] / length, 0.0f,
+        half_width * scale, std::clamp(opacity, 0.0f, 1.0f), 0.0f, 0.0f};
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = efb_rtv_;
+    command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    bound_rt_aux_ = 0u;
+    const LONG efb_w = static_cast<LONG>(kEfbWidth * efb_scale_);
+    const LONG efb_h = static_cast<LONG>(kEfbHeight * efb_scale_);
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(efb_w), static_cast<float>(efb_h), 0.0f, 1.0f};
+    const D3D12_RECT rect{0, 0, efb_w, efb_h};
+    command_list_->RSSetViewports(1, &vp);
+    command_list_->RSSetScissorRects(1, &rect);
+    command_list_->SetGraphicsRootSignature(split_line_root_sig_.Get());
+    command_list_->SetPipelineState(pipeline);
+    command_list_->SetGraphicsRoot32BitConstants(0, 8, constants, 0);
+    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    command_list_->DrawInstanced(3, 1, 0, 0);
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    invalidate_gx_bindings();
+    bind_efb(nullptr);
 }
 
 ID3D12PipelineState* RendererD3D12::clear_pipeline(bool color) {
@@ -2204,14 +2299,23 @@ bool RendererD3D12::initialize(int window_width, int window_height, unsigned efb
         // Each ring reserves its largest segmentation (interpolation, temporal), so a frame-rate or
         // upscaler change only re-segments it: no 300-400 MB of upload memory created mid-game.
         constexpr unsigned kMostSegments = std::max({kFramesInFlight, kInterpSegments, kRingSegments});
-        if (!vertex_ring_  .initialize(device_.Get(), "vertex",   vb_per_frame_bytes(),  kFramesInFlight,
-                                       vb_per_frame_bytes() * std::max(kFramesInFlight, kInterpSegments))) return false;
-        if (!index_ring_   .initialize(device_.Get(), "index",    ib_per_frame_bytes(),  kFramesInFlight,
-                                       ib_per_frame_bytes() * std::max(kFramesInFlight, kInterpSegments))) return false;
-        if (!constant_ring_.initialize(device_.Get(), "constant", cb_per_frame_bytes(),  kFramesInFlight,
-                                       cb_per_frame_bytes() * 4u * kInterpSegments)) return false;
-        if (!matrix_ring_  .initialize(device_.Get(), "matrix",   mtx_per_frame_bytes(), kFramesInFlight,
-                                       mtx_per_frame_bytes() * kMostSegments)) return false;
+        vertex_ring_bytes_ = vb_per_frame_bytes();
+        index_ring_bytes_ = ib_per_frame_bytes();
+        constant_ring_bytes_ = cb_per_frame_bytes();
+        matrix_ring_bytes_ = mtx_per_frame_bytes();
+        // Each segment has as much again as headroom (the reservations double, untouched pages are never
+        // backed): a frame over budget (split screen draws the scene twice) goes on and the ring grows.
+        if (!vertex_ring_  .initialize(device_.Get(), "vertex",   vertex_ring_bytes_,  kFramesInFlight,
+                                       2u * vertex_ring_bytes_ * std::max(kFramesInFlight, kInterpSegments),
+                                       vertex_ring_bytes_)) return false;
+        if (!index_ring_   .initialize(device_.Get(), "index",    index_ring_bytes_,  kFramesInFlight,
+                                       2u * index_ring_bytes_ * std::max(kFramesInFlight, kInterpSegments),
+                                       index_ring_bytes_)) return false;
+        if (!constant_ring_.initialize(device_.Get(), "constant", constant_ring_bytes_,  kFramesInFlight,
+                                       2u * constant_ring_bytes_ * 4u * kInterpSegments,
+                                       constant_ring_bytes_)) return false;
+        if (!matrix_ring_  .initialize(device_.Get(), "matrix",   matrix_ring_bytes_, kFramesInFlight,
+                                       2u * matrix_ring_bytes_ * kMostSegments, matrix_ring_bytes_)) return false;
         if (!srv_ring_.initialize(device_.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvPerFrame, kInterpSegments, kPersistentSrvDescriptors)) return false;
         {
             const DescriptorRing::Table views = srv_ring_.allocate_persistent(kRtTextureViews);
@@ -2230,8 +2334,9 @@ bool RendererD3D12::initialize(int window_width, int window_height, unsigned efb
         // commits pages only for the ranges written, so residency follows each ring's per-frame peak,
         // not this reservation.
         {
+            // Budget plus as much again of headroom, per frame in flight.
             const auto ring_reserved_mb = [](std::size_t bytes) {
-                return (bytes * kFramesInFlight) / (1024u * 1024u);
+                return (bytes * 2u * kFramesInFlight) / (1024u * 1024u);
             };
             std::cerr << "[gpu-rings]"
                       << " vertex-reserved-mb=" << ring_reserved_mb(vb_per_frame_bytes())
@@ -3089,6 +3194,7 @@ bool RendererD3D12::quit_requested() const noexcept {
 
 void RendererD3D12::invalidate_gx_bindings() {
     bound_pipeline_ = nullptr;
+    bound_stencil_ref_ = 0xFFFFu;
     bound_vs_constants_ = 0;
     bound_ps_constants_ = 0;
     bound_texture_table_ = {};
@@ -3135,27 +3241,48 @@ void RendererD3D12::begin_frame(bool present_swap_chain) {
             temporal_interp_suspended_ = false;
             host_window::temporal_interp_suspended.store(false, std::memory_order_relaxed);
         }
+        // Motion blur needs the matrix history the temporal ring keeps (skinned
+        // meshes' previous palettes), so it selects that ring when nothing else does.
+        const bool blur_history = get_render_config().motion_blur != 0u;
         const RingMode mode = interpolation_mode() ? RingMode::Interp
-            : temporal_mode() ? RingMode::Temporal : RingMode::Normal;
-        if (mode != ring_mode_) {
+            : (temporal_mode() || blur_history) ? RingMode::Temporal : RingMode::Normal;
+        // A frame that ran into a ring's headroom (split screen draws the scene twice) grows that ring
+        // here, between frames, so the next frames have their budget again.
+        bool grow = false;
+        const auto grown = [&grow](const UploadRing& ring, std::size_t& bytes, std::size_t multiplier) {
+            if (!ring.growth_requested()) return;
+            const std::size_t next = std::min(UploadRing::kMaxBytesPerFrame,
+                std::max(bytes * 2u, ring.grown_bytes_per_frame() / multiplier));
+            if (next <= bytes) return;
+            std::cerr << "[ring] growing per-frame budget: " << (bytes >> 20u) << " -> " << (next >> 20u)
+                      << " MiB\n";
+            bytes = next;
+            grow = true;
+        };
+        grown(vertex_ring_, vertex_ring_bytes_, 1u);
+        grown(index_ring_, index_ring_bytes_, 1u);
+        grown(constant_ring_, constant_ring_bytes_, ring_mode_ == RingMode::Interp ? 4u : 1u);
+        grown(matrix_ring_, matrix_ring_bytes_, 1u);
+        if (mode != ring_mode_ || grow) {
             wait_for_gpu();
             const unsigned segments = mode == RingMode::Interp ? kInterpSegments : kFramesInFlight;
             const unsigned matrix_segments = mode == RingMode::Normal ? kFramesInFlight
                 : mode == RingMode::Interp ? kInterpSegments : kRingSegments;
             // Interpolated sub-frames add one VS constant block per scene
             // record each; the constant segment holds a whole game frame.
-            const std::size_t constant_bytes = cb_per_frame_bytes() * (mode == RingMode::Interp ? 4u : 1u);
+            const std::size_t constant_bytes = constant_ring_bytes_ * (mode == RingMode::Interp ? 4u : 1u);
             const auto place = [&](UploadRing& ring, const char* name, std::size_t bytes, unsigned count) {
-                if (ring.resegment(bytes, count)) {
+                // In place while the grown budget and its headroom fit the reservation; else a new buffer.
+                if (ring.resegment(bytes, count) && ring.headroom_bytes_per_frame() != 0u) {
                     return true;
                 }
                 ring.reset();
-                return ring.initialize(device_.Get(), name, bytes, count);
+                return ring.initialize(device_.Get(), name, bytes, count, 2u * bytes * count, bytes);
             };
-            if (!place(vertex_ring_, "vertex", vb_per_frame_bytes(), segments) ||
-                !place(index_ring_, "index", ib_per_frame_bytes(), segments) ||
+            if (!place(vertex_ring_, "vertex", vertex_ring_bytes_, segments) ||
+                !place(index_ring_, "index", index_ring_bytes_, segments) ||
                 !place(constant_ring_, "constant", constant_bytes, segments) ||
-                !place(matrix_ring_, "matrix", mtx_per_frame_bytes(), matrix_segments)) {
+                !place(matrix_ring_, "matrix", matrix_ring_bytes_, matrix_segments)) {
                 throw std::runtime_error("ring resize failed");
             }
             matrix_segments_ = matrix_segments;
@@ -6544,12 +6671,24 @@ bool RendererD3D12::take_eval_readback(std::vector<std::uint32_t>& words, float&
 }
 
 bool RendererD3D12::begin_motion_scene() {
-    if (!scene_temporal_ || !ensure_motion_target()) {
+    if ((!scene_temporal_ && !scene_motion_only_) || !ensure_motion_target()) {
         return false;
     }
     const float zero[4]{};
     command_list_->ClearRenderTargetView(motion_rtv_, zero, 0u, nullptr);
     command_list_->ClearRenderTargetView(reactive_rtv_, zero, 0u, nullptr);
+    scene_motion_valid_ = true;
+    return true;
+}
+
+bool RendererD3D12::scene_motion_blur_begin() {
+    scene_motion_only_ = false;
+    // Our scene effects run on the plain EFB only (no MSAA, no HDR scene EFB).
+    if (scene_temporal_ || output_efb_active_ || replay_recording_ || efb_variant() != 0u || !post_process_.ready() ||
+        !post_process_.motion_blur_ready() || get_render_config().motion_blur == 0u) {
+        return false;
+    }
+    scene_motion_only_ = true;
     return true;
 }
 
@@ -6620,6 +6759,10 @@ void RendererD3D12::prepare_temporal_upscaler() {
 bool RendererD3D12::scene_temporal_begin(float& jitter_x, float& jitter_y) {
     jitter_x = 0.0f;
     jitter_y = 0.0f;
+    scene_projection_valid_ = false;
+    scene_light_valid_ = false;
+    scene_motion_only_ = false;
+    scene_motion_valid_ = false;
     scene_temporal_ = false;
     const unsigned rw = kEfbWidth * efb_scale_;
     const unsigned ow = temporal_output_w_;
@@ -6683,6 +6826,180 @@ bool RendererD3D12::temporal_inputs_match(const TemporalUpscaleInputs& in) const
         }
     }
     return match;
+}
+
+void RendererD3D12::set_scene_projection(const float abcd[4], const float viewport[4]) noexcept {
+    std::memcpy(scene_proj_, abcd, sizeof(scene_proj_));
+    std::memcpy(scene_viewport_, viewport, sizeof(scene_viewport_));
+    scene_projection_valid_ = true;
+}
+
+void RendererD3D12::set_scene_light(const float position[3]) noexcept {
+    std::memcpy(scene_light_, position, sizeof(scene_light_));
+    scene_light_valid_ = true;
+}
+
+namespace {
+float env_float(const char* name, float fallback, float minimum) {
+    char v[32]{};
+    std::size_t n = 0;
+    if (getenv_s(&n, v, sizeof(v), name) == 0 && n > 1) {
+        return std::max(minimum, static_cast<float>(std::atof(v)));
+    }
+    return fallback;
+}
+}  // namespace
+
+bool RendererD3D12::record_scene_effects() {
+    if (!scene_projection_valid_ || output_efb_active_ || replay_recording_ ||
+        !post_process_.ready() || !efb_color_ || !efb_depth_ || command_list_ == nullptr) {
+        return false;
+    }
+    const RenderConfig cfg = get_render_config();
+    const bool shadows = cfg.contact_shadows != 0u && scene_light_valid_;
+    const bool occlusion = post_process_.ssao_ready() && (cfg.ssao != 0u || shadows);
+    const bool dof = post_process_.dof_ready() && cfg.depth_of_field != 0u;
+    const bool reflections = post_process_.ssr_ready() && cfg.reflections != 0u;
+    // Motion blur reads the scene's motion vectors (written by the draws of a
+    // scene that began with them: scene_motion_valid_).
+    // A scene whose camera history just restarted (the split opened or closed, the cameras changed hands) has
+    // motion vectors from a camera jump: no motion blur for it.
+    const bool motion = post_process_.motion_blur_ready() && cfg.motion_blur != 0u &&
+                        scene_motion_valid_ && motion_target_ && !scene_split_skip_motion_;
+    if (!occlusion && !reflections && !dof && !motion) {
+        return false;
+    }
+    const float scale = static_cast<float>(efb_scale_);
+    const D3D12_RESOURCE_DESC color_desc = efb_color_->GetDesc();
+    PostProcessor::SsaoInputs in{};
+    in.depth = efb_depth_.Get();
+    in.color_rtv = efb_rtv_;
+    in.width = static_cast<unsigned>(color_desc.Width);
+    in.height = color_desc.Height;
+    for (unsigned i = 0; i < 4u; ++i) in.viewport[i] = scene_viewport_[i] * scale;
+    in.camera_near = scene_camera_[0];
+    in.camera_far = scene_camera_[1];
+    for (unsigned i = 0; i < 4u; ++i) in.proj[i] = scene_proj_[i];
+    static const float radius = env_float("GALAXY_SSAO_RADIUS", 120.0f, 1.0f);
+    in.radius = radius;
+    in.strength = static_cast<float>(std::min(cfg.ssao, 100u)) / 100.0f;
+    if (shadows) {
+        static const float shadow_length = env_float("GALAXY_CONTACT_SHADOW_LENGTH", 80.0f, 1.0f);
+        std::memcpy(in.light, scene_light_, sizeof(in.light));
+        in.shadow_strength = static_cast<float>(std::min(cfg.contact_shadows, 100u)) / 100.0f;
+        in.shadow_length = shadow_length;
+        in.shadow_thickness = shadow_length * 0.4f;
+        // The long ray's reach; GALAXY_CONTACT_SHADOW_LONG=0 keeps only the contact ray.
+        static const float shadow_long = env_float("GALAXY_CONTACT_SHADOW_LONG", 360.0f, 0.0f);
+        in.shadow_long_length = shadow_long;
+    }
+
+    D3D12_RESOURCE_BARRIER bar{};
+    bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    bar.Transition.pResource = efb_depth_.Get();
+    bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    bar.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    command_list_->ResourceBarrier(1, &bar);
+    ID3D12DescriptorHeap* heaps[] = {srv_ring_.heap(), sampler_heap_.Get()};
+    command_list_->SetDescriptorHeaps(2, heaps);
+    bool recorded = occlusion && post_process_.record_ssao(
+        command_list_.Get(), srv_ring_, in, frame_index_, kFramesInFlight);
+    if (reflections) {
+        static const float distance = env_float("GALAXY_REFLECTION_DISTANCE", 2000.0f, 10.0f);
+        PostProcessor::SsaoInputs s = in;
+        s.radius = distance;
+        s.strength = static_cast<float>(std::min(cfg.reflections, 100u)) / 100.0f;
+        recorded |= post_process_.record_ssr(
+            command_list_.Get(), srv_ring_, efb_color_.Get(), s, frame_index_, kFramesInFlight);
+    }
+    if (dof) {
+        PostProcessor::DofInputs d{};
+        d.depth = efb_depth_.Get();
+        d.color = efb_color_.Get();
+        d.color_rtv = efb_rtv_;
+        d.width = in.width;
+        d.height = in.height;
+        std::memcpy(d.viewport, in.viewport, sizeof(d.viewport));
+        d.camera_near = in.camera_near;
+        d.camera_far = in.camera_far;
+        // Full strength blurs the backdrop by 2% of the viewport height.
+        d.max_radius = in.viewport[3] * 0.02f *
+                       static_cast<float>(std::min(cfg.depth_of_field, 100u)) / 100.0f;
+        if (scene_split_per_half_) {
+            // Co-op split screen: each half with its own camera planes, focus point and focus history, inside its
+            // side of the line.
+            for (unsigned h = 0; h < 2u; ++h) {
+                PostProcessor::DofInputs half = d;
+                const std::array<float, 3> plane = split_plane_render(scene_split_.plane[h], scale);
+                half.split[0] = plane[0];
+                half.split[1] = plane[1];
+                half.split[2] = plane[2];
+                half.split[3] = 1.0f;
+                const std::array<float, 2> focus = split_focus_point(plane, in.viewport);
+                half.focus_point[0] = focus[0];
+                half.focus_point[1] = focus[1];
+                half.has_focus_point = true;
+                half.view = h;
+                if (scene_split_.near_plane[h] > 0.0f && scene_split_.far_plane[h] > scene_split_.near_plane[h]) {
+                    half.camera_near = scene_split_.near_plane[h];
+                    half.camera_far = scene_split_.far_plane[h];
+                }
+                recorded |= post_process_.record_dof(
+                    command_list_.Get(), srv_ring_, half, frame_index_, kFramesInFlight);
+            }
+        } else {
+            recorded |= post_process_.record_dof(
+                command_list_.Get(), srv_ring_, d, frame_index_, kFramesInFlight);
+        }
+    }
+    if (motion) {
+        PostProcessor::MotionBlurInputs m{};
+        m.velocity = motion_target_.Get();
+        m.depth = efb_depth_.Get();
+        m.color = efb_color_.Get();
+        m.color_rtv = efb_rtv_;
+        m.width = in.width;
+        m.height = in.height;
+        std::memcpy(m.viewport, in.viewport, sizeof(m.viewport));
+        // 100% is a full-frame (360 degree) shutter; the default 50 is the film 180.
+        m.shutter = static_cast<float>(std::min(cfg.motion_blur, 100u)) / 100.0f;
+        m.max_length = in.viewport[3] * 0.05f;
+        // The motion target rests in RENDER_TARGET; the pass samples it.
+        D3D12_RESOURCE_BARRIER velocity_bar{};
+        velocity_bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        velocity_bar.Transition.pResource = motion_target_.Get();
+        velocity_bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        velocity_bar.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        velocity_bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        command_list_->ResourceBarrier(1, &velocity_bar);
+        if (scene_split_per_half_) {
+            // Each half inside its own side of the line: no tap from the other half's picture.
+            for (unsigned h = 0; h < 2u; ++h) {
+                PostProcessor::MotionBlurInputs half = m;
+                const std::array<float, 3> plane = split_plane_render(scene_split_.plane[h], scale);
+                half.split[0] = plane[0];
+                half.split[1] = plane[1];
+                half.split[2] = plane[2];
+                half.split[3] = 1.0f;
+                recorded |= post_process_.record_motion_blur(
+                    command_list_.Get(), srv_ring_, half, frame_index_, kFramesInFlight);
+            }
+        } else {
+            recorded |= post_process_.record_motion_blur(
+                command_list_.Get(), srv_ring_, m, frame_index_, kFramesInFlight);
+        }
+        std::swap(velocity_bar.Transition.StateBefore, velocity_bar.Transition.StateAfter);
+        command_list_->ResourceBarrier(1, &velocity_bar);
+    }
+    std::swap(bar.Transition.StateBefore, bar.Transition.StateAfter);
+    command_list_->ResourceBarrier(1, &bar);
+    // The upscaler and output-EFB paths do the same after their own passes.
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    invalidate_gx_bindings();
+    bound_scissor_input_scale_ = 0u;
+    bind_efb(nullptr);
+    return recorded;
 }
 
 bool RendererD3D12::record_temporal_upscale(unsigned output_scale) {
@@ -7414,8 +7731,10 @@ void RendererD3D12::clear_efb(
         // REVERSED-Z buffer: GX z24 (near=0, far=2^24) inverts into the D3D depth value.
         // GX_MAX_Z24 (0xFFFFFF = "clear to farthest") becomes about 0.0 here, which the flipped
         // GEQUAL-style funcs pass.
+        // The material stencil clears with the depth it describes.
         command_list_->ClearDepthStencilView(
-            dsv, D3D12_CLEAR_FLAG_DEPTH, clear.reversed_depth, 0, num_rects, rects);
+            dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clear.reversed_depth, 0,
+            num_rects, rects);
     }
 }
 
@@ -7435,6 +7754,10 @@ void RendererD3D12::draw(const DrawCall& call) {
     if (call.pipeline != bound_pipeline_) {
         command_list_->SetPipelineState(call.pipeline);
         bound_pipeline_ = call.pipeline;
+    }
+    if (call.stencil_ref != bound_stencil_ref_) {
+        command_list_->OMSetStencilRef(call.stencil_ref);
+        bound_stencil_ref_ = call.stencil_ref;
     }
     if (call.vs_constants &&
         call.vs_constants != bound_vs_constants_) {
@@ -7837,8 +8160,11 @@ bool RendererD3D12::copy_efb_to_texture(
     const UINT dh_unscaled = params.half_scale
         ? std::max<UINT>(1u, params.src_height / 2u)
         : params.src_height;
-    // Effect copies (is_effect_copy) are built at the game's own resolution.
-    const bool native_bloom = efb_scale_ > 1u && is_effect_copy(dw_unscaled, dh_unscaled);
+    // Effect copies (is_effect_copy) are built at the game's own resolution. Shadow silhouettes
+    // (is_galaxy_shadow_capture_copy) have no kernel that depends on it: captured at the scaled resolution, the
+    // projected shadow's edge is smooth instead of stepped.
+    const bool shadow_capture = is_galaxy_shadow_capture_copy(params, is_depth_copy, dw_unscaled, dh_unscaled);
+    const bool native_bloom = efb_scale_ > 1u && is_effect_copy(dw_unscaled, dh_unscaled) && !shadow_capture;
     const ScaledEfbCopyExtent extent = compute_scaled_efb_copy_extent(
         static_cast<std::uint16_t>(dw_unscaled),
         static_cast<std::uint16_t>(dh_unscaled),
@@ -7852,7 +8178,7 @@ bool RendererD3D12::copy_efb_to_texture(
 
     // Keyed by (addr, format, depth-source): SMG reuses one address with
     // different copy formats and each needs its own converted texture.
-    const std::uint64_t dest_key =
+    const std::uint64_t view_key =
         static_cast<std::uint64_t>(params.dest_addr) |
         (static_cast<std::uint64_t>(params.target_format) << 32) |
         (is_depth_copy ? (1ull << 40) : 0ull) |
@@ -7864,6 +8190,8 @@ bool RendererD3D12::copy_efb_to_texture(
         // textures, so a sub-frame replaying one frame's copies never
         // overwrites what the next frame's chunks already copied.
         (ring_mode_ == RingMode::Interp ? (replay_serial_ & 1ull) << 42 : 0ull);
+    // Split screen's second view copies into destinations of its own.
+    const std::uint64_t dest_key = view_key | (efb_copy_view_ != 0u ? (1ull << 43) : 0ull);
 
     // The destination map is bounded in bytes (efb_copy_dests_): the 192 MiB default holds about ten
     // full-extent copies at 4x, and most copies are much smaller masks and bloom workspaces. Least
@@ -7996,6 +8324,7 @@ bool RendererD3D12::copy_efb_to_texture(
         if (ring_mode_ == RingMode::Interp) note_copy_write(dest.texture.Get());
         ++efb_identity_copies_;
         efb_identity_payload_bytes_ += static_cast<std::uint64_t>(w) * h * 4u;
+        efb_view_copies_[efb_copy_view_][view_key] = {params, dest.texture};
         return textures.register_efb_copy(params.dest_addr, params, dest.texture);
     }
 
@@ -8057,7 +8386,22 @@ bool RendererD3D12::copy_efb_to_texture(
     // textures one address can alternate between resources, and the alias
     // must always point at the most recent copy (register_efb_copy is a
     // cheap no-op when the resource is unchanged).
+    efb_view_copies_[efb_copy_view_][view_key] = {params, dest.texture};
     return textures.register_efb_copy(params.dest_addr, params, dest.texture);
+}
+
+std::vector<EfbCopyParams> RendererD3D12::set_efb_copy_view(unsigned view, TextureCache& textures) {
+    std::vector<EfbCopyParams> changed;
+    view = view != 0u ? 1u : 0u;
+    if (view == efb_copy_view_) return changed;
+    efb_copy_view_ = view;
+    for (const auto& [key, copy] : efb_view_copies_[view]) {
+        (void)key;
+        if (copy.texture && textures.register_efb_copy(copy.params.dest_addr, copy.params, copy.texture)) {
+            changed.push_back(copy.params);
+        }
+    }
+    return changed;
 }
 
 bool RendererD3D12::ensure_peek_resources() {

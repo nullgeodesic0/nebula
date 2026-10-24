@@ -234,12 +234,14 @@ int main() {
     // Graphics page with no upscaler and the native quality mode: 0 heading, 1 upscaling, 2 quality
     // mode, 3 internal resolution, 4 sharpening, 5 anti-aliasing, 6 MSAA, 7 heading, 8 interpolation,
     // 9 frame rate limit, 10 heading, 11 texture filtering, 12 mipmaps, 13 lighting, 14 ambient occlusion,
-    // 15 heading, 16 texture packs, (17 their replacements while on), dump textures, their folder, heading, movies' folder.
+    // 15 heading, 16-24 the scene effects (bloom, saturation, contrast, vignette, contact shadows, depth of field,
+    // motion blur, reflections, lens flare), 25 heading, 26 texture packs, (27 their replacements while on), dump
+    // textures, their folder, heading, movies' folder.
     passed &= expect(key(VK_TAB), "Tab enters the graphics page");
     snapshot = galaxy::gx::native_settings_overlay_snapshot();
     const unsigned texture_rows = galaxy::gx::get_render_config().texture_packs ? 7u : 6u;
-    passed &= expect(snapshot.tab == 1u && snapshot.row == 1u && snapshot.row_count == 15u + texture_rows,
-                     "graphics page: resolution, frame rate, detail, texture pack and movie sections");
+    passed &= expect(snapshot.tab == 1u && snapshot.row == 1u && snapshot.row_count == 25u + texture_rows,
+                     "graphics page: resolution, frame rate, detail, scene effects, texture pack and movie sections");
     passed &= expect(key(VK_DOWN) && key(VK_DOWN), "down moves to the internal resolution");
     passed &= expect(key(VK_LEFT), "left lowers the internal resolution in the draft");
     passed &= expect(
@@ -295,7 +297,7 @@ int main() {
     galaxy::gx::set_render_config(render);
     passed &= expect(reopen() && page_start(), "reopening takes the new live settings");
     snapshot = galaxy::gx::native_settings_overlay_snapshot();
-    passed &= expect(snapshot.tab == 1u && snapshot.row_count == 16u + texture_rows,
+    passed &= expect(snapshot.tab == 1u && snapshot.row_count == 26u + texture_rows,
                      "with FSR 1 and SMAA the page also has the SMAA quality row");
     passed &= expect(key(VK_LEFT), "left lowers the upscaler");
     passed &= expect(key(VK_DOWN) && key(VK_RIGHT), "quality mode row is adjustable");
@@ -327,7 +329,7 @@ int main() {
     passed &= expect(!applied.enhanced_mipmaps, "mipmaps switch to the original ones");
     passed &= expect(applied.per_pixel_lighting && applied.enhanced_lighting,
                      "lighting steps from per pixel to enhanced");
-    passed &= expect(applied.ambient_occlusion, "ambient occlusion switches on");
+    passed &= expect(!applied.ambient_occlusion, "ambient occlusion (on by default) switches off");
     passed &= expect(galaxy::gx::native_settings_overlay_snapshot().pending_changes == 0u,
                      "nothing is pending after apply");
 
@@ -507,9 +509,9 @@ int main() {
 
     passed &= expect(key(VK_TAB), "Tab enters the general page");
     snapshot = galaxy::gx::native_settings_overlay_snapshot();
-    passed &= expect(snapshot.tab == 4u && snapshot.row_count == 7u,
-                     "general page has text speed, language, Discord status and Mii import (a heading, import, count, "
-                     "folder)");
+    passed &= expect(snapshot.tab == 4u && snapshot.row_count == 10u,
+                     "general page has text speed, language, Discord status, button prompts, custom voice, HOME Menu "
+                     "and Mii import (a heading, import, count, folder)");
     passed &= expect(galaxy::get_runtime_settings().text_speed == 1u, "text speed starts at the game's pace");
     passed &= expect(key(VK_RIGHT) && galaxy::get_runtime_settings().text_speed == 2u, "right raises text speed live");
     passed &= expect(key(VK_RIGHT) && key(VK_RIGHT) && galaxy::get_runtime_settings().text_speed == 4u,

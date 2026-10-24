@@ -114,6 +114,20 @@ struct ScaledEfbCopyExtent {
     const EfbCopyParams& params,
     bool is_depth_copy) noexcept;
 
+// A texture copy that holds a projected cast-shadow silhouette (Mario, the Toads,
+// enemies, other actors): an alpha-format copy (A8, the silhouette lives in the
+// alpha channel) of at most 320x228, or Mario's observed square 160x160 capture.
+// Unlike the bloom and depth-of-field sources these have no kernel that depends
+// on their low resolution, so they are captured at the scaled EFB resolution and
+// the projected shadow's edge is smooth instead of stepped. `alpha_rule` false
+// keeps only the 160x160 capture (GALAXY_SHADOW_CAPTURE_ALPHA=0).
+[[nodiscard]] bool is_galaxy_shadow_capture_copy(
+    const EfbCopyParams& params,
+    bool is_depth_copy,
+    unsigned dest_width,
+    unsigned dest_height,
+    bool alpha_rule = true) noexcept;
+
 struct EfbCopySamplingGeometry {
     float src_x = 0.0f;
     float src_y = 0.0f;

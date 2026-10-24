@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <memory>
 #include <string>
 #include <span>
 #include <vector>
@@ -65,6 +66,9 @@ enum class FifoMarker : std::uint8_t {
     SceneEnd,
     Scene2DBegin,
     Scene2DEnd,
+    // Split screen (coop_guest.cpp): from here on, full-screen draws keep only the pixels on one side of a
+    // line (attach_split_clip).
+    SplitClip,
 };
 
 enum class EfbPeekKind : std::uint8_t {
@@ -183,6 +187,11 @@ std::size_t game_world_lights(std::span<GameLight> out, std::uint64_t max_age_ms
 // strip vertices follow. The next render_frame submission carries it.
 void attach_stripe_particle(std::size_t stream_offset, std::uint32_t particle, std::uint32_t age_lifetime,
                             std::uint8_t strip);
+// Simulation thread: a SplitClip marker at `fifo_offset`. Full-screen draws after it keep the pixels where
+// plane[0] * x + plane[1] * y + plane[2] >= 0, x and y in logical EFB pixels; (0, 0, 0) keeps all. `pass` is
+// 1 or 2 for the first or second player's half (EFB copies made in pass 2 go to their own textures), 0 after;
+// a pass 0 marker draws `separator` (the line as `plane`, then its opacity) as the black line between them.
+void attach_split_clip(const float plane[3], unsigned pass, const float separator[4], std::size_t fifo_offset) noexcept;
 // Simulation thread: the THP movie frame the game draws (movie_replacement.h); every later submission carries it
 // until the movie closes (frame -1).
 void attach_movie_frame(const char* name, std::int32_t frame, float frame_rate, std::uint32_t y, std::uint32_t u,

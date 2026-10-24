@@ -215,6 +215,9 @@ struct DrawCall {
     // Render target 1 in temporal scenes: 1 the motion target (opaque
     // motion writers), 2 the reactive mask (blended draws), 0 none.
     std::uint8_t aux_target = 0;
+    // Material class written to the EFB stencil where the draw writes depth
+    // (kMaterial* in shader_keys.h; the D3D12 scene effects read it).
+    std::uint8_t stencil_ref = 0;
     // Interpolated redraw: the scene transform record whose VS constants a
     // sub-frame replaces, -1 for draws outside the 3D scene.
     std::int32_t replay_record = -1;

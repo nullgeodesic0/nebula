@@ -172,6 +172,26 @@ static void apply_kv(RenderConfig& cfg, const char* key, const char* val) {
         cfg.spatial_quality = parse_choice(val, kNames, cfg.spatial_quality);
     } else if (std::strcmp(key, "sharpness") == 0) {
         cfg.sharpness = std::min(parse_uint(val, cfg.sharpness), 100u);
+    } else if (std::strcmp(key, "bloom") == 0) {
+        cfg.bloom = std::min(parse_uint(val, cfg.bloom), 100u);
+    } else if (std::strcmp(key, "saturation") == 0) {
+        cfg.saturation = std::min(parse_uint(val, cfg.saturation), 200u);
+    } else if (std::strcmp(key, "contrast") == 0) {
+        cfg.contrast = std::min(parse_uint(val, cfg.contrast), 200u);
+    } else if (std::strcmp(key, "vignette") == 0) {
+        cfg.vignette = std::min(parse_uint(val, cfg.vignette), 100u);
+    } else if (std::strcmp(key, "ssao") == 0) {
+        cfg.ssao = std::min(parse_uint(val, cfg.ssao), 100u);
+    } else if (std::strcmp(key, "contact_shadows") == 0) {
+        cfg.contact_shadows = std::min(parse_uint(val, cfg.contact_shadows), 100u);
+    } else if (std::strcmp(key, "depth_of_field") == 0) {
+        cfg.depth_of_field = std::min(parse_uint(val, cfg.depth_of_field), 100u);
+    } else if (std::strcmp(key, "motion_blur") == 0) {
+        cfg.motion_blur = std::min(parse_uint(val, cfg.motion_blur), 100u);
+    } else if (std::strcmp(key, "reflections") == 0) {
+        cfg.reflections = std::min(parse_uint(val, cfg.reflections), 100u);
+    } else if (std::strcmp(key, "lens_flare") == 0) {
+        cfg.lens_flare = std::min(parse_uint(val, cfg.lens_flare), 100u);
     }
     else if (std::strcmp(key, "ray_tracing_enabled") == 0) cfg.ray_tracing_enabled = parse_bool(val, false);
     else if (std::strcmp(key, "rt_quality") == 0) {
@@ -266,6 +286,16 @@ static void apply_env_overrides(RenderConfig& cfg) {
     apply_env(cfg, "GALAXY_TEMPORAL_QUALITY", "temporal_quality");
     apply_env(cfg, "GALAXY_SPATIAL_QUALITY", "spatial_quality");
     apply_env(cfg, "GALAXY_SHARPNESS", "sharpness");
+    apply_env(cfg, "GALAXY_BLOOM", "bloom");
+    apply_env(cfg, "GALAXY_SATURATION", "saturation");
+    apply_env(cfg, "GALAXY_CONTRAST", "contrast");
+    apply_env(cfg, "GALAXY_VIGNETTE", "vignette");
+    apply_env(cfg, "GALAXY_SSAO", "ssao");
+    apply_env(cfg, "GALAXY_CONTACT_SHADOWS", "contact_shadows");
+    apply_env(cfg, "GALAXY_DEPTH_OF_FIELD", "depth_of_field");
+    apply_env(cfg, "GALAXY_MOTION_BLUR", "motion_blur");
+    apply_env(cfg, "GALAXY_REFLECTIONS", "reflections");
+    apply_env(cfg, "GALAXY_LENS_FLARE", "lens_flare");
     apply_env(cfg, "GALAXY_RAY_TRACING", "ray_tracing_enabled");
     apply_env(cfg, "GALAXY_RAY_TRACING_ENABLED", "ray_tracing_enabled");
     apply_env(cfg, "GALAXY_RT_SHADOW_QUALITY", "rt_shadow_quality");
@@ -302,7 +332,18 @@ static void clamp_unimplemented_features(RenderConfig& cfg) {
     cfg.temporal_quality = std::min(cfg.temporal_quality, 4u);
     cfg.spatial_quality = std::min(cfg.spatial_quality, 4u);
     cfg.sharpness = std::min(cfg.sharpness, 100u);
-    // Win32 client geometry is int while DXGI's is UINT: keep sizes representable in both.
+    cfg.bloom = std::min(cfg.bloom, 100u);
+    cfg.saturation = std::min(cfg.saturation, 200u);
+    cfg.contrast = std::min(cfg.contrast, 200u);
+    cfg.vignette = std::min(cfg.vignette, 100u);
+    cfg.ssao = std::min(cfg.ssao, 100u);
+    cfg.contact_shadows = std::min(cfg.contact_shadows, 100u);
+    cfg.depth_of_field = std::min(cfg.depth_of_field, 100u);
+    cfg.motion_blur = std::min(cfg.motion_blur, 100u);
+    cfg.reflections = std::min(cfg.reflections, 100u);
+    cfg.lens_flare = std::min(cfg.lens_flare, 100u);
+    // Win32 client geometry is signed-int based even though DXGI dimensions
+    // are UINT. Keep direct API callers inside the common representable range.
     constexpr unsigned kMaxWindowDimension =
         static_cast<unsigned>(std::numeric_limits<int>::max());
     cfg.window_width = std::clamp(cfg.window_width, 1u, kMaxWindowDimension);
@@ -586,6 +627,16 @@ bool save_render_config_to_file() {
              << "temporal_quality=" << cfg.temporal_quality << '\n'
              << "spatial_quality=" << cfg.spatial_quality << '\n'
              << "sharpness=" << cfg.sharpness << '\n'
+             << "bloom=" << cfg.bloom << '\n'
+             << "saturation=" << cfg.saturation << '\n'
+             << "contrast=" << cfg.contrast << '\n'
+             << "vignette=" << cfg.vignette << '\n'
+             << "ssao=" << cfg.ssao << '\n'
+             << "contact_shadows=" << cfg.contact_shadows << '\n'
+             << "depth_of_field=" << cfg.depth_of_field << '\n'
+             << "motion_blur=" << cfg.motion_blur << '\n'
+             << "reflections=" << cfg.reflections << '\n'
+             << "lens_flare=" << cfg.lens_flare << '\n'
              << "internal_follow_window="
              << (cfg.internal_follow_window ? 1u : 0u) << '\n'
              << "gpu_budget=" << (cfg.gpu_budget ? 1u : 0u) << '\n'
