@@ -575,6 +575,27 @@ namespace Nebula.Launcher
             Check(GeneralSettings.Load().Language == 1, "the runtime's language values read in any case");
             File.WriteAllText(path, "language=klingon\n");
             Check(GeneralSettings.Load().Language == 0, "an unknown language reads as English");
+            File.WriteAllText(path, "text_speed=2\n");
+            Check(GeneralSettings.Load().MotionStyle == 0 && GeneralSettings.MotionStyles.Length == 3,
+                  "the motion style starts as the game's, with three choices");
+            general = GeneralSettings.Load();
+            general.MotionStyle = 2;
+            general.Save();
+            saved = File.ReadAllText(path);
+            Check(saved.Contains("motion_style=modern") && saved.Contains("text_speed=2") &&
+                  GeneralSettings.Load().MotionStyle == 2, "the motion style is saved for the runtime");
+            File.WriteAllText(path, "motion_style=SMOOTH\n");
+            Check(GeneralSettings.Load().MotionStyle == 1, "the runtime's motion style values read in any case");
+            File.WriteAllText(path, "motion_style=wobbly\n");
+            Check(GeneralSettings.Load().MotionStyle == 0, "an unknown motion style reads as the game's");
+            Check(!GeneralSettings.Load().Coop, "co-op starts off");
+            general = GeneralSettings.Load();
+            general.Coop = true;
+            general.Save();
+            saved = File.ReadAllText(path);
+            Check(saved.Contains("coop=on") && GeneralSettings.Load().Coop, "co-op is saved for the runtime");
+            File.WriteAllText(path, "coop=ON\n");
+            Check(GeneralSettings.Load().Coop, "the runtime's co-op values read in any case");
             File.Delete(path);
         }
 

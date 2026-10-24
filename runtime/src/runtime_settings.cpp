@@ -61,8 +61,12 @@ RuntimeSettings sanitize_settings(RuntimeSettings settings) {
         ? std::clamp(settings.audio.wiimote_speaker, 0.0f, 4.0f)
         : 0.0f;
     settings.text_speed = std::clamp(settings.text_speed, 1u, 4u);
+    if (settings.button_prompts > ButtonPrompts::DualSense) settings.button_prompts = ButtonPrompts::Auto;
     if (settings.language != GameLanguage::French && settings.language != GameLanguage::Spanish) {
         settings.language = GameLanguage::English;
+    }
+    if (settings.motion_style != MotionStyle::Smooth && settings.motion_style != MotionStyle::Modern) {
+        settings.motion_style = MotionStyle::Original;
     }
     return settings;
 }
@@ -115,6 +119,19 @@ RuntimeInputMode parse_input_mode(
     return fallback;
 }
 
+// "on"/"true"/"1"/"yes" and "off"/"false"/"0"/"no"; anything else keeps `fallback`.
+bool parse_switch(const char* value, bool fallback) {
+    if (_stricmp(value, "on") == 0 || _stricmp(value, "true") == 0 || _stricmp(value, "yes") == 0 ||
+        std::strcmp(value, "1") == 0) {
+        return true;
+    }
+    if (_stricmp(value, "off") == 0 || _stricmp(value, "false") == 0 || _stricmp(value, "no") == 0 ||
+        std::strcmp(value, "0") == 0) {
+        return false;
+    }
+    return fallback;
+}
+
 std::string_view trim(std::string_view text) {
     const std::size_t begin = text.find_first_not_of(" \t\r\n");
     if (begin == std::string_view::npos) {
@@ -151,6 +168,51 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
         for (const GameLanguage language : {GameLanguage::English, GameLanguage::French, GameLanguage::Spanish}) {
             if (_stricmp(value, game_language_key(language)) == 0) settings.language = language;
         }
+    } else if (std::strcmp(key, "button_prompts") == 0) {
+        for (const ButtonPrompts prompts : {ButtonPrompts::Auto, ButtonPrompts::Wii, ButtonPrompts::Xbox, ButtonPrompts::DualSense}) {
+            if (_stricmp(value, button_prompts_key(prompts)) == 0) settings.button_prompts = prompts;
+        }
+    } else if (std::strcmp(key, "motion_style") == 0) {
+        for (const MotionStyle style : {MotionStyle::Original, MotionStyle::Smooth, MotionStyle::Modern}) {
+            if (_stricmp(value, motion_style_key(style)) == 0) settings.motion_style = style;
+        }
+    } else if (std::strcmp(key, "odyssey_moveset") == 0) {
+        settings.moveset.enabled = parse_switch(value, settings.moveset.enabled);
+    } else if (std::strcmp(key, "moveset_roll") == 0) {
+        settings.moveset.roll = parse_switch(value, settings.moveset.roll);
+    } else if (std::strcmp(key, "moveset_roll_jump") == 0) {
+        settings.moveset.roll_jump = parse_switch(value, settings.moveset.roll_jump);
+    } else if (std::strcmp(key, "moveset_ground_pound_jump") == 0) {
+        settings.moveset.ground_pound_jump = parse_switch(value, settings.moveset.ground_pound_jump);
+    } else if (std::strcmp(key, "moveset_dive") == 0) {
+        settings.moveset.dive = parse_switch(value, settings.moveset.dive);
+    } else if (std::strcmp(key, "moveset_turn_boost") == 0) {
+        settings.moveset.turn_boost = parse_switch(value, settings.moveset.turn_boost);
+    } else if (std::strcmp(key, "moveset_second_player") == 0) {
+        settings.moveset.second_player = parse_switch(value, settings.moveset.second_player);
+    } else if (std::strcmp(key, "coop") == 0) {
+        settings.coop = parse_switch(value, settings.coop);
+    } else if (std::strcmp(key, "net_joinable") == 0) {
+        settings.net_joinable = parse_switch(value, settings.net_joinable);
+    } else if (std::strcmp(key, "net_port") == 0) {
+        char* end = nullptr;
+        const unsigned long port = std::strtoul(value, &end, 10);
+        if (end != value && *end == '\0' && port >= 1u && port <= 65535u) settings.net_port = static_cast<unsigned>(port);
+    } else if (std::strcmp(key, "net_join_address") == 0) {
+        settings.net_join_address.fill('\0');
+        (void)strncpy_s(settings.net_join_address.data(), settings.net_join_address.size(), value, _TRUNCATE);
+    } else if (std::strcmp(key, "player_devices") == 0) {
+        settings.player_devices.fill('\0');
+        (void)strncpy_s(settings.player_devices.data(), settings.player_devices.size(), value, _TRUNCATE);
+    } else if (std::strcmp(key, "custom_animations") == 0) {
+        if (_stricmp(value, "on") == 0 || std::strcmp(value, "1") == 0) settings.custom_animations = true;
+        if (_stricmp(value, "off") == 0 || std::strcmp(value, "0") == 0) settings.custom_animations = false;
+    } else if (std::strcmp(key, "custom_voice") == 0) {
+        if (_stricmp(value, "on") == 0 || std::strcmp(value, "1") == 0) settings.custom_voice = true;
+        if (_stricmp(value, "off") == 0 || std::strcmp(value, "0") == 0) settings.custom_voice = false;
+    } else if (std::strcmp(key, "custom_model") == 0) {
+        if (_stricmp(value, "on") == 0 || std::strcmp(value, "1") == 0) settings.custom_model = true;
+        if (_stricmp(value, "off") == 0 || std::strcmp(value, "0") == 0) settings.custom_model = false;
     }
 }
 
@@ -294,6 +356,14 @@ void apply_env_overrides(RuntimeSettings& settings) {
         settings, "GALAXY_AUDIO_WIIMOTE_SPEAKER_GAIN", "audio_wiimote_speaker_gain");
     apply_env(settings, "GALAXY_TEXT_SPEED", "text_speed");
     apply_env(settings, "GALAXY_LANGUAGE", "language");
+    apply_env(settings, "GALAXY_BUTTON_PROMPTS", "button_prompts");
+    apply_env(settings, "GALAXY_MOTION_STYLE", "motion_style");
+    apply_env(settings, "GALAXY_ODYSSEY_MOVESET", "odyssey_moveset");
+    // Not GALAXY_COOP: that is the cooperative thread scheduler (native_runtime.cpp), which must stay on.
+    apply_env(settings, "GALAXY_TWO_PLAYERS", "coop");
+    apply_env(settings, "GALAXY_CUSTOM_ANIMATIONS", "custom_animations");
+    apply_env(settings, "GALAXY_CUSTOM_MODEL", "custom_model");
+    apply_env(settings, "GALAXY_CUSTOM_VOICE", "custom_voice");
 }
 
 }  // namespace
@@ -336,6 +406,98 @@ bool running_game_language(GameLanguage& language) noexcept {
     return true;
 }
 
+namespace {
+// 0 until the disc opens, then 1 (off) or 2 (on).
+std::atomic<std::uint8_t> s_running_custom_animations{0u};
+std::atomic<std::uint8_t> s_running_custom_model{0u};
+std::atomic<std::uint8_t> s_running_coop{0u};
+
+// The disc opens before the settings load, so the file is read here.
+bool mod_for_boot(std::atomic<std::uint8_t>& running_state, bool RuntimeSettings::*field) noexcept {
+    std::uint8_t running = running_state.load(std::memory_order_acquire);
+    if (running == 0u) {
+        bool enabled = RuntimeSettings{}.*field;
+        try {
+            RuntimeSettings settings{};
+            input::ControlsConfig controls = input::default_controls_config();
+            parse_settings_file(settings, controls);
+            apply_env_overrides(settings);
+            enabled = settings.*field;
+        } catch (...) {
+            // The full load reports a bad settings file; the default stands here.
+        }
+        std::uint8_t expected = 0u;
+        const std::uint8_t chosen = enabled ? 2u : 1u;
+        running = running_state.compare_exchange_strong(expected, chosen, std::memory_order_acq_rel)
+            ? chosen : expected;
+    }
+    return running == 2u;
+}
+
+bool running_mod(const std::atomic<std::uint8_t>& running_state, bool& enabled) noexcept {
+    const std::uint8_t running = running_state.load(std::memory_order_acquire);
+    if (running == 0u) return false;
+    enabled = running == 2u;
+    return true;
+}
+}  // namespace
+
+bool custom_animations_for_boot() noexcept {
+    return mod_for_boot(s_running_custom_animations, &RuntimeSettings::custom_animations);
+}
+
+bool running_custom_animations(bool& enabled) noexcept {
+    return running_mod(s_running_custom_animations, enabled);
+}
+
+bool custom_model_for_boot() noexcept {
+    return mod_for_boot(s_running_custom_model, &RuntimeSettings::custom_model);
+}
+
+bool running_custom_model(bool& enabled) noexcept {
+    return running_mod(s_running_custom_model, enabled);
+}
+
+bool coop_for_boot() noexcept {
+    return mod_for_boot(s_running_coop, &RuntimeSettings::coop);
+}
+
+namespace {
+// 0 until the save-select screen first shows, then 1 (off) or 2 (on).
+std::atomic<std::uint8_t> s_coop_session{0u};
+std::atomic<bool> s_file_select_options_shown{false};
+}  // namespace
+
+bool coop_enabled() noexcept {
+    const std::uint8_t session = s_coop_session.load(std::memory_order_acquire);
+    return session == 0u ? coop_for_boot() : session == 2u;
+}
+
+void set_coop_session(bool enabled) noexcept {
+    s_coop_session.store(enabled ? 2u : 1u, std::memory_order_release);
+}
+
+bool coop_hot_join() noexcept {
+    static const bool enabled = [] {
+        char* value = nullptr;
+        std::size_t length = 0u;
+        const bool off = _dupenv_s(&value, &length, "GALAXY_COOP_HOT_JOIN") == 0 && value != nullptr && value[0] == '0';
+        std::free(value);
+        return !off;
+    }();
+    return enabled;
+}
+
+bool coop_available() noexcept { return coop_enabled() || coop_hot_join(); }
+
+void set_file_select_options_shown(bool shown) noexcept {
+    s_file_select_options_shown.store(shown, std::memory_order_release);
+}
+
+bool file_select_options_shown() noexcept {
+    return s_file_select_options_shown.load(std::memory_order_acquire);
+}
+
 const char* game_language_key(GameLanguage language) noexcept {
     switch (language) {
     case GameLanguage::French: return "french";
@@ -343,6 +505,25 @@ const char* game_language_key(GameLanguage language) noexcept {
     case GameLanguage::English: break;
     }
     return "english";
+}
+
+const char* button_prompts_key(ButtonPrompts prompts) noexcept {
+    switch (prompts) {
+    case ButtonPrompts::Wii: return "wii";
+    case ButtonPrompts::Xbox: return "xbox";
+    case ButtonPrompts::DualSense: return "dualsense";
+    case ButtonPrompts::Auto: break;
+    }
+    return "auto";
+}
+
+const char* motion_style_key(MotionStyle style) noexcept {
+    switch (style) {
+    case MotionStyle::Smooth: return "smooth";
+    case MotionStyle::Modern: return "modern";
+    case MotionStyle::Original: break;
+    }
+    return "original";
 }
 
 RuntimeInputModeState get_runtime_input_mode_state() {
@@ -432,12 +613,27 @@ bool reload_runtime_audio_settings_if_changed() noexcept {
         input::ControlsConfig controls = input::default_controls_config();
         parse_settings_file(parsed, controls);
         const RuntimeInputMode file_mode = sanitize_settings(parsed).input_mode;
+        // Co-op as the file has it: GALAXY_TWO_PLAYERS picks the start-up value, and the save-select switch
+        // writes the file after that; re-applying the variable here would undo the switch.
+        const bool file_coop = parsed.coop;
         apply_env_overrides(parsed);
+        parsed.coop = file_coop;
         RuntimeSettings settings = get_runtime_settings();
         settings.audio = parsed.audio;
         settings.text_speed = parsed.text_speed;
         settings.language = parsed.language;
         settings.discord_status = parsed.discord_status;
+        settings.button_prompts = parsed.button_prompts;
+        settings.motion_style = parsed.motion_style;
+        settings.moveset = parsed.moveset;
+        settings.coop = parsed.coop;
+        settings.custom_animations = parsed.custom_animations;
+        settings.custom_model = parsed.custom_model;
+        settings.custom_voice = parsed.custom_voice;
+        settings.net_joinable = parsed.net_joinable;
+        settings.net_port = parsed.net_port;
+        settings.net_join_address = parsed.net_join_address;
+        settings.player_devices = parsed.player_devices;
         set_runtime_settings(settings);
         input::set_controls_config(controls);
         record_input_mode_sync(file_mode, settings.input_mode);
@@ -476,6 +672,23 @@ bool save_runtime_settings_to_file() {
                  << "text_speed=" << settings.text_speed << '\n'
                  << "language=" << game_language_key(settings.language) << '\n'
                  << "discord_status=" << (settings.discord_status ? 1 : 0) << '\n'
+                 << "button_prompts=" << button_prompts_key(settings.button_prompts) << '\n'
+                 << "motion_style=" << motion_style_key(settings.motion_style) << '\n'
+                 << "custom_animations=" << (settings.custom_animations ? "on" : "off") << '\n'
+                 << "custom_model=" << (settings.custom_model ? "on" : "off") << '\n'
+                 << "custom_voice=" << (settings.custom_voice ? "on" : "off") << '\n'
+                 << "odyssey_moveset=" << (settings.moveset.enabled ? "on" : "off") << '\n'
+                 << "moveset_roll=" << (settings.moveset.roll ? "on" : "off") << '\n'
+                 << "moveset_roll_jump=" << (settings.moveset.roll_jump ? "on" : "off") << '\n'
+                 << "moveset_ground_pound_jump=" << (settings.moveset.ground_pound_jump ? "on" : "off") << '\n'
+                 << "moveset_dive=" << (settings.moveset.dive ? "on" : "off") << '\n'
+                 << "moveset_turn_boost=" << (settings.moveset.turn_boost ? "on" : "off") << '\n'
+                 << "moveset_second_player=" << (settings.moveset.second_player ? "on" : "off") << '\n'
+                 << "coop=" << (settings.coop ? "on" : "off") << '\n'
+                 << "net_joinable=" << (settings.net_joinable ? "on" : "off") << '\n'
+                 << "net_port=" << settings.net_port << '\n'
+                 << "net_join_address=" << settings.net_join_address.data() << '\n'
+                 << "player_devices=" << settings.player_devices.data() << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;

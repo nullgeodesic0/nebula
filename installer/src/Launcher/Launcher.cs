@@ -252,7 +252,8 @@ namespace Nebula.Launcher
         private GraphicsSettings graphics = GraphicsSettings.Load();
         private AudioSettings audio = AudioSettings.Load();
         private GeneralSettings general = GeneralSettings.Load();
-        private readonly ComboBox textSpeed = new ComboBox(), languageBox = new ComboBox();
+        private readonly ComboBox textSpeed = new ComboBox(), languageBox = new ComboBox(), motionStyle = new ComboBox();
+        private readonly CheckBox coop = new CheckBox();
         private readonly ControlsSettings controls = ControlsSettings.Load();
         private bool loading;
         // The player chose the upscaler, its quality, the interpolation or the frame rate. Without that, a save
@@ -485,6 +486,30 @@ namespace Nebula.Launcher
             textSpeed.Items.AddRange(GeneralSettings.TextSpeeds);
             Row(generalPage, "Language", languageBox, ref y);
             languageBox.Items.AddRange(GeneralSettings.Languages);
+            generalPage.Controls.Add(new Label
+            {
+                Text = "The game starts in this language. While it is running, a change applies the next time it starts.",
+                Location = new Point(12, y + 3), Size = new Size(700, 26), ForeColor = SystemColors.GrayText
+            });
+            y += 36;
+            Row(generalPage, "Motion style", motionStyle, ref y);
+            motionStyle.Items.AddRange(GeneralSettings.MotionStyles);
+            generalPage.Controls.Add(new Label
+            {
+                Text = "Smooth eases animations and Mario's lean. Modern also makes Mario quicker to start, stop and turn; the spin is unchanged.",
+                Location = new Point(12, y + 3), Size = new Size(700, 26), ForeColor = SystemColors.GrayText
+            });
+            y += 44;
+            coop.Text = "Two players: Mario and Luigi";
+            coop.Location = new Point(12, y);
+            coop.Size = new Size(600, 28);
+            generalPage.Controls.Add(coop);
+            y += 30;
+            generalPage.Controls.Add(new Label
+            {
+                Text = "Luigi plays with the second controller (or the only one, with Mario on keyboard and mouse). Applies the next time the game starts.",
+                Location = new Point(12, y + 3), Size = new Size(700, 26), ForeColor = SystemColors.GrayText
+            });
 
             y = 16;
             Label(advanced, "Game content", 12, y + 3);
@@ -941,6 +966,8 @@ namespace Nebula.Launcher
             }
             textSpeed.SelectedIndex = Math.Max(0, Math.Min(general.TextSpeed - 1, GeneralSettings.TextSpeeds.Length - 1));
             languageBox.SelectedIndex = Math.Max(0, Math.Min(general.Language, GeneralSettings.Languages.Length - 1));
+            motionStyle.SelectedIndex = Math.Max(0, Math.Min(general.MotionStyle, GeneralSettings.MotionStyles.Length - 1));
+            coop.Checked = general.Coop;
             recording.SelectedIndex = (int)session.Recording;
             contentLabel.Text = session.Content;
             windowSize = new Size(graphics.WindowWidth, graphics.WindowHeight);
@@ -1180,6 +1207,8 @@ namespace Nebula.Launcher
                 audio.Save();
                 general.TextSpeed = Math.Max(0, textSpeed.SelectedIndex) + 1;
                 general.Language = Math.Max(0, languageBox.SelectedIndex);
+                general.MotionStyle = Math.Max(0, motionStyle.SelectedIndex);
+                general.Coop = coop.Checked;
                 general.Save();
                 EndCapture();
                 if (controls.InputMode != ControlsSettings.ModeRealWiimote) controls.InputMode = Math.Max(0, inputSource.SelectedIndex);
