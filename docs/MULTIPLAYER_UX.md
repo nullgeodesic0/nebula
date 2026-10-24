@@ -1,6 +1,7 @@
-# Multiplayer UX: drop-in play, player devices, in-game menus (design)
+# Multiplayer UX: drop-in play, player devices, in-game menus
 
-Status: design for review. Nothing here is built yet, except the pieces marked *exists*.
+Status: built (multi-player, October 2026). The design below is kept as written; **As built** at the end says where
+the result differs and where each piece lives.
 
 ## Goal
 
@@ -122,3 +123,46 @@ Steps 1 and 2 can run in parallel (different code). 3 and 4 need 2.
 - **Live join needs Joinable at boot:** without it, a restart is unavoidable. The card says so.
 - **Effort:** steps 1 and 2 are about a day each, 3 to 5 about a day each, and 6 about half a day. The font and
   sounds are the uncertain parts.
+
+## As built
+
+**Devices** (`runtime/include/galaxy/player_devices.h`): the router replaces the "second connected controller"
+rule. A free controller's + (its own binding of the Wii +) drops the second player in; a lone controller's + pauses.
+His controller going away leaves him in, still, for 10 s ("Press Start to rejoin"), then he sits out. Seats (Auto,
+the save's brother, the partner, Off) are saved as `player_devices=` in runtime_settings.ini; the keyboard can be
+the second player's. Device identity is the XInput or HID slot (a controller that comes back in another slot is a
+new device).
+
+**The menu kit** (`runtime/include/galaxy/gx/menu_kit.h`): the game's pill buttons, info window, MessageFont26 and
+animation keys, read from game.pak at startup (`game_disc.h`, `game_font.h`) and drawn by our renderer in one draw a
+frame. Checked against screenshots of the game's pause menu and Yes/No dialog: same pixels and colours (labels within
+one grey level). The font is drawn from distance fields (`font_sdf.h`), sharp at 1440p and 4K with the game's weight.
+The buttons follow the game's own hover, bounce and decide animations; the pointer (the game's Star Pointer) hovers
+and A chooses as in the game's menus, the D-pad moves a focus as an extra, and the Star Pointer's hand is drawn again
+over our windows (they cover the game's). A resting pointer never presses our buttons (it must have moved in the
+last 2 s).
+
+**Sounds** (`runtime/include/galaxy/menu_sounds.h`): the game's own system sounds (cursor, decide, cancel, window
+open and close, pause on and off, Yes, No) synthesised on the host from the disc's JAudio data; checked against
+captures of the game's output (6 of 15 bit-identical, the rest 65-92 dB, exact lengths and peaks). No game code runs,
+so online menus cannot desync.
+
+**Where the menus are** (`runtime/src/gx/menu_screens.cpp`, `host_menus.cpp`):
+- Join prompts at the bottom, cards at the top (joins, disconnects with the countdown, leaves; online requests,
+  asking, outcomes, "Your friend left").
+- The Players panel beside the game's pause menu (right of its buttons, 216 units wide; on a 4:3 picture it
+  overlaps their edge).
+- The save select: the game's screens fill it, so the options are one small **Options** button between Back and Play
+  This File, opening a window (Two players, Odyssey moves, Online, Back). A window there covered Play This File.
+- The Online window (from Options or the Players panel): Joinable, and Join a friend with an address box typed on the
+  keyboard. There is no list of recent hosts yet; the box keeps the last address.
+- The online menu (+ online): Resume, Exit the galaxy, Leave; on a join request, Accept and Not now.
+- F1 in the game's style; the old look remains the fallback when the game's art cannot be read.
+
+**Input while our windows are up**: a window covering the game's menu (Online, Options) takes the first player's
+buttons (`players::set_menu_capture`); typing in the address box takes the keyboard. Out of a session, a join request
+gives + to the answer rather than the pause.
+
+**Online disconnect**: a live host (Joinable since the start) plays on alone when its friend leaves or drops, and
+takes the next joiner (`netplay_session.cpp back_to_solo`). A joiner, and a session started by a restart, still
+restart on their own.
