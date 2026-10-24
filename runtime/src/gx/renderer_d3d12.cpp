@@ -2362,6 +2362,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                     std::memory_order_release);
         seed_pointer_from_client(hwnd, false);
     }
+    if (msg == WM_CHAR && host_menu_text_focus()) {
+        if (wp >= 0x20u && wp != 0x7Fu) push_host_menu_key(static_cast<char32_t>(wp));
+        return 0;
+    }
     if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
         // Alt+Space belongs to the native system menu, not the game's A key.
         if (msg == WM_SYSKEYDOWN && wp == VK_SPACE) {
@@ -2377,6 +2381,11 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
             s_handled_key_normalized = galaxy::input::normalize_native_window_key(
                 raw, shift, (static_cast<UINT>(lp) & (1u << 24u)) != 0u);
+        }
+        // The host menus' address box takes the editing keys (its characters come as WM_CHAR below).
+        if (host_menu_text_focus() && (wp == VK_BACK || wp == VK_RETURN || wp == VK_ESCAPE)) {
+            push_host_menu_key(wp == VK_BACK ? U'\b' : wp == VK_RETURN ? U'\r' : U'\x1B');
+            return 0;
         }
         if (native_settings_handle_window_key(wp, was_down)) {
             return 0;
@@ -10778,9 +10787,12 @@ void draw_native_settings_overlay(RendererD3D12& renderer) {
 // The online menu (net_lobby.h online_menu_poll): this PC's own, while the session plays on.
 std::atomic<bool> s_online_menu_open{false};
 std::atomic<int> s_online_menu_row{0};
+// It was opened on a join request: its rows are Accept and Not now.
+std::atomic<bool> s_online_menu_answering{false};
 constexpr const char* kOnlineMenuRows[] = {"RESUME", "EXIT THE GALAXY (BOTH PLAYERS)", "LEAVE THE SESSION"};
 
 void draw_online_menu(RendererD3D12& renderer) {
+    if (renderer.menu_kit_assets() != nullptr) return;  // host_menus.cpp draws it in the game's style
     if (!s_online_menu_open.load(std::memory_order_acquire) || s_bb_width < 427u || s_bb_height < 240u) return;
     const int scale = s_bb_height >= 1440u ? 4 : (s_bb_height >= 720u ? 3 : 1);
     const int row_step = scale * 7 + 10 * scale;
@@ -10808,6 +10820,7 @@ void draw_online_menu(RendererD3D12& renderer) {
 
 // While another PC asks to join and the menu is closed: one line at the top saying so.
 void draw_net_lobby_banner(RendererD3D12& renderer) {
+    if (renderer.menu_kit_assets() != nullptr) return;  // host_menus.cpp shows the request as a card
     if (s_net_lobby.view == nullptr || s_native_settings_visible.load(std::memory_order_relaxed) ||
         s_bb_width < 427u || s_bb_height < 240u) {
         return;
@@ -11837,25 +11850,72 @@ bool online_menu_poll(bool toggle, bool up, bool down, bool choose, bool back) n
     if (toggle) {
         open = !open;
         s_online_menu_row.store(0, std::memory_order_release);
+        // A request waiting: the menu answers it (Accept, Not now) rather than offering the session's rows.
+        s_online_menu_answering.store(open && net_lobby_view().asking, std::memory_order_release);
     } else if (open) {
+        const bool answering = s_online_menu_answering.load(std::memory_order_acquire);
+        const int rows = answering ? 2 : 3;
         int row = s_online_menu_row.load(std::memory_order_acquire);
-        if (up) row = (row + 2) % 3;
-        if (down) row = (row + 1) % 3;
+        if (up) row = (row + rows - 1) % rows;
+        if (down) row = (row + 1) % rows;
         s_online_menu_row.store(row, std::memory_order_release);
         if (back) open = false;
         if (choose) {
             open = false;
             NetLobbyMenuFn menu = nullptr;
+            NetLobbyAnswerFn answer = nullptr;
             {
                 const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
                 menu = s_net_lobby.menu;
+                answer = s_net_lobby.answer;
             }
             s_online_menu_open.store(false, std::memory_order_release);
-            if (menu != nullptr) menu(row);
+            if (answering) {
+                if (answer != nullptr) answer(row == 0);
+            } else if (menu != nullptr) {
+                menu(row);
+            }
         }
     }
     s_online_menu_open.store(open, std::memory_order_release);
     return open;
+}
+
+OnlineMenuState online_menu_state() noexcept {
+    return {s_online_menu_open.load(std::memory_order_acquire), s_online_menu_row.load(std::memory_order_acquire),
+            s_online_menu_answering.load(std::memory_order_acquire)};
+}
+
+NetLobbyView net_lobby_view() noexcept {
+    NetLobbyViewFn view = nullptr;
+    {
+        const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+        view = s_net_lobby.view;
+    }
+    return view != nullptr ? view() : NetLobbyView{};
+}
+
+bool net_lobby_available() noexcept {
+    const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+    return s_net_lobby.view != nullptr;
+}
+
+void net_lobby_join(const char* address) {
+    NetLobbyJoinFn join = nullptr;
+    {
+        const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+        join = s_net_lobby.join;
+    }
+    if (join != nullptr) join(address);
+}
+
+void net_lobby_cancel() {
+    NetLobbyCancelFn cancel = nullptr;
+    {
+        const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+        cancel = s_net_lobby.cancel;
+    }
+    if (cancel != nullptr) cancel();
 }
 
 void set_net_lobby_hooks(const NetLobbyHooks& hooks) noexcept {
@@ -11868,7 +11928,7 @@ bool native_settings_overlay_visible() noexcept {
 }
 
 bool native_window_input_captured() noexcept {
-    return s_native_settings_visible.load(std::memory_order_relaxed) ||
+    return s_native_settings_visible.load(std::memory_order_relaxed) || host_menu_text_focus() ||
         s_system_menu_active.load(std::memory_order_acquire) ||
         s_move_size_active.load(std::memory_order_acquire);
 }

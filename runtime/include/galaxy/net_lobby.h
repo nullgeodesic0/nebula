@@ -31,12 +31,26 @@ void net_lobby_start();
 [[nodiscard]] bool net_location_wanted() noexcept;
 void net_publish_location(const NetRejoin& location);
 
-// The menu's view and actions (renderer_d3d12.cpp, F1 > Online).
+// The menu's view and actions (renderer_d3d12.cpp, F1 > Online; host_menus.cpp, the game-style menus).
+enum class NetLobbyPhase : std::uint8_t {
+    Off,          // not joinable, not joining
+    Joinable,     // listening at `address`
+    PortInUse,    // Joinable, but the port is taken
+    Asking,       // joining: asking `address`
+    Waiting,      // joining: `address` has the request, its player is choosing
+    AskedToJoin,  // hosting: `asker` asks to join
+    InSession,
+    Outcome,      // the last outcome (`outcome`), until the next action
+};
 struct NetLobbyView {
     char status[96]{};    // one line, upper case
     bool asking = false;  // host: a PC is asking to join; accept or decline
     char asker[48]{};
     bool in_session = false;
+    NetLobbyPhase phase = NetLobbyPhase::Off;
+    char address[64]{};   // Joinable: this PC's address:port; Asking/Waiting: the host's
+    char outcome[96]{};   // upper case, as `status` shows it
+    bool host = false;    // in a session as its host
 };
 using NetLobbyViewFn = NetLobbyView (*)();
 using NetLobbyJoinFn = void (*)(const char* address);  // "address[:port]"
@@ -61,6 +75,19 @@ void set_net_lobby_hooks(const NetLobbyHooks& hooks) noexcept;
 // D-pad or stick moves, A chooses, B closes. One controller poll's edges from the input thread; returns whether it
 // is open, when this PC's player's input must stay neutral.
 bool online_menu_poll(bool toggle, bool up, bool down, bool choose, bool back) noexcept;
+// The online menu as the host menus draw it: open, its row, and whether it answers a join request (rows Accept,
+// Not now) rather than offering the session's (Resume, Exit the galaxy, Leave).
+struct OnlineMenuState {
+    bool open = false;
+    int row = 0;
+    bool answering = false;
+};
+[[nodiscard]] OnlineMenuState online_menu_state() noexcept;
+// The lobby through the renderer's hooks, for the host menus (an empty view and no-ops without a lobby).
+[[nodiscard]] NetLobbyView net_lobby_view() noexcept;
+[[nodiscard]] bool net_lobby_available() noexcept;
+void net_lobby_join(const char* address);
+void net_lobby_cancel();
 }  // namespace gx
 
 }  // namespace galaxy

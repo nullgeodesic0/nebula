@@ -1,6 +1,7 @@
 #include "galaxy/player_devices.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <mutex>
 
@@ -292,7 +293,16 @@ std::vector<std::pair<DeviceKey, Seat>> take_seat_requests() {
 
 namespace {
 MenuInput s_menu_input;
+std::atomic<bool> s_menu_capture{false};
 }  // namespace
+
+void set_menu_capture(bool capture) noexcept {
+    s_menu_capture.store(capture, std::memory_order_relaxed);
+}
+
+bool menu_capture() noexcept {
+    return s_menu_capture.load(std::memory_order_relaxed);
+}
 
 void publish_menu_input(std::uint32_t held, bool pointer_valid, float pointer_x, float pointer_y) {
     std::lock_guard lock(s_lock);

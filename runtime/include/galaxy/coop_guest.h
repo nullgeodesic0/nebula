@@ -84,6 +84,9 @@ void coop_publish_local_input(const coop::PartnerInput& input) noexcept;
 // Online play's own menu (net_lobby.h gx::online_menu_poll), reached from the input thread through this hook.
 using CoopOnlineMenuPoll = bool (*)(bool toggle, bool up, bool down, bool choose, bool back) noexcept;
 void coop_set_online_menu_poll(CoopOnlineMenuPoll poll) noexcept;
+// Another PC asks to join this one (net_lobby.cpp): the input poll lets + open the answer instead of the pause.
+void coop_set_join_request_pending(bool pending) noexcept;
+[[nodiscard]] bool coop_join_request_pending() noexcept;
 [[nodiscard]] bool coop_online_menu_poll(bool toggle, bool up, bool down, bool choose, bool back) noexcept;
 [[nodiscard]] coop::PartnerInput coop_local_input();
 

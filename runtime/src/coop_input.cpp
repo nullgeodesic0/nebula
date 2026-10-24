@@ -101,6 +101,18 @@ bool coop_online_menu_poll(bool toggle, bool up, bool down, bool choose, bool ba
     return poll != nullptr && poll(toggle, up, down, choose, back);
 }
 
+namespace {
+std::atomic<bool> g_join_request_pending{false};
+}  // namespace
+
+void coop_set_join_request_pending(bool pending) noexcept {
+    g_join_request_pending.store(pending, std::memory_order_relaxed);
+}
+
+bool coop_join_request_pending() noexcept {
+    return g_join_request_pending.load(std::memory_order_relaxed);
+}
+
 void coop_publish_local_input(const coop::PartnerInput& input) noexcept {
     PartnerInputSlot& slot = local_input_slot();
     std::lock_guard lock(slot.mutex);

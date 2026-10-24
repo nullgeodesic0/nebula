@@ -153,6 +153,10 @@ struct MenuInput {
 };
 void publish_menu_input(std::uint32_t held, bool pointer_valid, float pointer_x, float pointer_y);
 [[nodiscard]] MenuInput take_menu_input();
+// A host window that covers the game's own menu (the Online window) takes the first player's buttons: the game
+// reads none while it is up, nor those still held as it closes (the input poll blanks them).
+void set_menu_capture(bool capture) noexcept;
+[[nodiscard]] bool menu_capture() noexcept;
 
 // Joins, disconnects and leaves for the status cards (the menus take them).
 void post_events(std::vector<Event> events);

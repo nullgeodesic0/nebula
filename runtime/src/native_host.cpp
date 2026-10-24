@@ -9508,6 +9508,47 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
                 bit(snapshot.buttons.left, MenuInput::kLeft) | bit(snapshot.buttons.right, MenuInput::kRight) |
                 bit(snapshot.buttons.plus, MenuInput::kPlus) | bit(snapshot.buttons.minus, MenuInput::kMinus),
             pointer_active, s_pointer_x, s_pointer_y);
+        // A host window over the game's own menu takes the buttons; those held as it closes stay hidden until let go.
+        static galaxy::input::WiimoteButtons s_captured{};
+        if (galaxy::players::menu_capture()) {
+            s_captured = snapshot.buttons;
+            snapshot.buttons = {};
+        } else {
+            using C = galaxy::input::WiimoteButtons;
+            for (bool C::*b : {&C::a, &C::b, &C::one, &C::two, &C::plus, &C::minus, &C::up, &C::down, &C::left,
+                               &C::right, &C::home}) {
+                if (!(snapshot.buttons.*b)) s_captured.*b = false;
+                if (s_captured.*b) snapshot.buttons.*b = false;
+            }
+        }
+    }
+    if (!galaxy::net_session_requested()) {
+        // Out of a session while another PC asks to join (Joinable switched on in play): + opens the answer (the
+        // online menu's Accept / Not now) rather than the pause, and while it is open the D-pad, A and B are its, not
+        // the game's. Buttons held as it closes stay out of the game until released.
+        using B_ = galaxy::input::WiimoteButtons;
+        static bool s_answering = false;
+        static galaxy::input::WiimoteButtons s_previous_buttons{};
+        static galaxy::input::WiimoteButtons s_hidden_buttons{};
+        const galaxy::input::WiimoteButtons held_now = snapshot.buttons;
+        const auto edge = [&](bool galaxy::input::WiimoteButtons::*b) { return held_now.*b && !(s_previous_buttons.*b); };
+        if (galaxy::coop_join_request_pending() || s_answering) {
+            s_answering = galaxy::coop_online_menu_poll(edge(&B_::plus), edge(&B_::up), edge(&B_::down), edge(&B_::a),
+                                                        edge(&B_::b));
+            if (s_answering) {
+                s_hidden_buttons = held_now;
+                snapshot.buttons = {};
+                snapshot.nunchuk = galaxy::input::NunchukState{};
+            } else {
+                snapshot.buttons.plus = false;
+            }
+        }
+        // What the answer took stays hidden until let go.
+        for (bool B_::*b : {&B_::a, &B_::b, &B_::up, &B_::down, &B_::plus}) {
+            if (!(held_now.*b)) s_hidden_buttons.*b = false;
+            if (!s_answering && s_hidden_buttons.*b) snapshot.buttons.*b = false;
+        }
+        s_previous_buttons = held_now;
     }
     if (galaxy::net_session_requested()) {
         // Online: this PC's player, as the Remote and Nunchuk above have it (netplay.cpp makes its KPAD status).

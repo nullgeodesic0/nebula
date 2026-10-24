@@ -6,16 +6,60 @@
 #include "galaxy/gx/menu_screens.h"
 #include "galaxy/gx/renderer_d3d12.h"
 #include "galaxy/input_bindings.h"
+#include "galaxy/net_lobby.h"
 #include "galaxy/netplay_session.h"
 #include "galaxy/player_devices.h"
 #include "galaxy/runtime_settings.h"
 
+#include <atomic>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 
 namespace galaxy::gx {
 
 namespace {
+
+std::atomic<bool> s_text_focus{false};
+std::mutex s_keys_lock;
+std::u32string s_keys;
+
+std::u16string widen(const char* text) {
+    std::u16string out;
+    for (const char* c = text; *c != '\0'; ++c) out.push_back(static_cast<char16_t>(static_cast<unsigned char>(*c)));
+    return out;
+}
+
+menu::OnlineView online_view() {
+    menu::OnlineView o;
+    if (!net_lobby_available()) return o;
+    const NetLobbyView v = net_lobby_view();
+    switch (v.phase) {
+    case NetLobbyPhase::Off: o.phase = menu::OnlinePhase::Off; break;
+    case NetLobbyPhase::Joinable: o.phase = menu::OnlinePhase::Joinable; break;
+    case NetLobbyPhase::PortInUse: o.phase = menu::OnlinePhase::PortInUse; break;
+    case NetLobbyPhase::Asking: o.phase = menu::OnlinePhase::Asking; break;
+    case NetLobbyPhase::Waiting: o.phase = menu::OnlinePhase::Waiting; break;
+    case NetLobbyPhase::AskedToJoin: o.phase = menu::OnlinePhase::AskedToJoin; break;
+    case NetLobbyPhase::InSession: o.phase = menu::OnlinePhase::InSession; break;
+    case NetLobbyPhase::Outcome: o.phase = menu::OnlinePhase::Outcome; break;
+    }
+    o.address = widen(v.address);
+    o.asker = widen(v.asker);
+    o.outcome = widen(v.outcome);
+    o.host = v.host;
+    const RuntimeSettings settings = get_runtime_settings();
+    o.joinable = settings.net_joinable;
+    // Joinable since the start runs the game in step from boot (a live join); switched on later, a join restarts.
+    o.joinable_live = net_session_requested();
+    o.port = settings.net_port;
+    o.join_address = widen(settings.net_join_address.data());
+    const OnlineMenuState menu_state = online_menu_state();
+    o.menu_open = menu_state.open;
+    o.menu_row = menu_state.row;
+    o.menu_answering = menu_state.answering;
+    return o;
+}
 
 std::string env_value(const char* name) {
     char value[32]{};
@@ -172,6 +216,12 @@ menu::ScreensInput gather(double seconds, float extent_x, bool settings_open) {
         }
         in.events.push_back({kind, e.device});
     }
+    in.online = online_view();
+    in.online.plus_glyph = shown_glyph(prompts::Slot::Plus);
+    {
+        const std::lock_guard lock(s_keys_lock);
+        in.keys.swap(s_keys);
+    }
     const players::MenuInput input = players::take_menu_input();
     in.held = input.held;
     in.pressed = input.pressed;
@@ -182,6 +232,15 @@ menu::ScreensInput gather(double seconds, float extent_x, bool settings_open) {
 }
 
 }  // namespace
+
+bool host_menu_text_focus() noexcept {
+    return s_text_focus.load(std::memory_order_relaxed);
+}
+
+void push_host_menu_key(char32_t key) {
+    const std::lock_guard lock(s_keys_lock);
+    if (s_keys.size() < 64u) s_keys.push_back(key);
+}
 
 void draw_host_menus(RendererD3D12& renderer, const PictureRect& picture, double seconds, bool settings_open) {
     // From the first frame: the assets are prepared off the render thread and arrive a moment later.
@@ -205,6 +264,26 @@ void draw_host_menus(RendererD3D12& renderer, const PictureRect& picture, double
         set_runtime_settings(settings);
         (void)save_runtime_settings_to_file();
     }
+    s_text_focus.store(actions.text_focus, std::memory_order_relaxed);
+    players::set_menu_capture(screens.online_window_open());
+    if (actions.toggle_joinable || actions.set_join_address) {
+        // As F1 > Online does: the settings, saved (Joinable takes effect in the lobby at once, and in step
+        // with the game from the next start).
+        RuntimeSettings settings = get_runtime_settings();
+        if (actions.toggle_joinable) settings.net_joinable = !settings.net_joinable;
+        if (actions.set_join_address) {
+            settings.net_join_address.fill('\0');
+            std::size_t i = 0;
+            for (const char16_t c : actions.join_address) {
+                if (i + 1u >= settings.net_join_address.size()) break;
+                if (c < 0x80u) settings.net_join_address[i++] = static_cast<char>(c);
+            }
+        }
+        set_runtime_settings(settings);
+        (void)save_runtime_settings_to_file();
+    }
+    if (actions.stop_asking) net_lobby_cancel();
+    if (actions.join) net_lobby_join(get_runtime_settings().net_join_address.data());
     if (actions.cover_pointer) menu::pointer_hand(list, *assets, space, actions.pointer_lx, actions.pointer_ly, 1.0f);
     // actions.sounds: the game's menu sounds, once the host-side player lands (menu_sounds.h).
     renderer.draw_menu_kit(list);

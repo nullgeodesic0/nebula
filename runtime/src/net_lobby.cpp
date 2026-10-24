@@ -385,6 +385,8 @@ void run() {
             l.in_session = net_session_requested() && !net_live_can_accept();
             if (auto_accept && l.asked) l.accept = true;
             if (!l.in_session) step(l, lock);
+            // For the input poll: + answers a request (the online menu's Accept / Not now) rather than pausing.
+            coop_set_join_request_pending(l.asked && !l.in_session);
         }
         while (l.in_session && !test_menu.empty() && netplay_frame() >= test_menu.front().first) {
             const int row = test_menu.front().second;
@@ -406,25 +408,37 @@ NetLobbyView view() {
     NetLobbyView v;
     std::string status;
     const RuntimeSettings settings = get_runtime_settings();
+    std::string address;
     if (l.in_session) {
         v.in_session = true;
+        v.host = net_is_host();
+        v.phase = NetLobbyPhase::InSession;
         status = net_is_host() ? "IN A SESSION: YOU ARE THE HOST" : "IN A SESSION: YOU JOINED";
     } else if (l.role == Role::Asking) {
+        v.phase = l.host_waiting ? NetLobbyPhase::Waiting : NetLobbyPhase::Asking;
+        address = l.host_text;
         status = l.host_waiting ? "WAITING FOR " + l.host_text + " TO ACCEPT" : "ASKING " + l.host_text + "...";
     } else if (l.asked) {
         v.asking = true;
+        v.phase = NetLobbyPhase::AskedToJoin;
         (void)strncpy_s(v.asker, sizeof(v.asker), l.asker_text.c_str(), _TRUNCATE);
         status = l.asker_text + " WANTS TO JOIN";
     } else if (!l.message.empty()) {
+        v.phase = NetLobbyPhase::Outcome;
+        (void)strncpy_s(v.outcome, sizeof(v.outcome), l.message.c_str(), _TRUNCATE);
         status = l.message;
     } else if (settings.net_joinable && l.listen_failed) {
+        v.phase = NetLobbyPhase::PortInUse;
         status = "PORT " + std::to_string(settings.net_port) + " IS IN USE";
     } else if (settings.net_joinable && l.listen != INVALID_SOCKET) {
+        v.phase = NetLobbyPhase::Joinable;
+        address = (l.this_pc.empty() ? std::string("this PC") : l.this_pc) + ":" + std::to_string(l.listen_port);
         status = "JOINABLE AT " + (l.this_pc.empty() ? std::string("THIS PC") : l.this_pc) + ":" +
                  std::to_string(l.listen_port);
     } else {
         status = "NOT JOINABLE";
     }
+    (void)strncpy_s(v.address, sizeof(v.address), address.c_str(), _TRUNCATE);
     (void)strncpy_s(v.status, sizeof(v.status), status.c_str(), _TRUNCATE);
     return v;
 }
