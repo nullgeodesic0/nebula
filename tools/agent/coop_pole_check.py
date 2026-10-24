@@ -101,7 +101,16 @@ def main(argv=None):
     inst.launch(fresh_saves=True)
     try:
         inst.boot_through_menus()
+        joined = 'level start over: the second player joins the first'
+        joins = len(inst.log_tail(100000, joined))
         inst.goto('rolling green', 1)
+        # The second player joins the first a moment after the first has control (co-op's level start): until
+        # then he is kept beside him and a teleport does not hold.
+        for _ in range(60):
+            if len(inst.log_tail(100000, joined)) > joins:
+                break
+            inst.command('wait 10')
+        inst.command('wait 30')
         c = Check(inst)
         spawn = c.players()[0]  # where the mission starts, far from the pole
         pole = find_pole(c)
