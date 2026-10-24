@@ -1,4 +1,4 @@
-"""Builds Nebula's custom-animation mod from a Blender file of Mario animations.
+﻿"""Builds Nebula's custom-animation mod from a Blender file of Mario animations.
 
     py -3 tools/animations/build_animation_mod.py --blend "C:/path/file.blend" --content C:/nb/build/content
 
@@ -30,8 +30,8 @@ MAP = {
     'walk': ('Walk', 1.0),
     'walksoft': ('WalkSoft', 1.0),
     'run': ('Run', 1.0),
-    'rundash': ('DashFast corrrer turbo', 1.0),  # メタルダッシュ: the moveset's fastest run band
-    'walkbury': ('Dash', 1.0),  # 泥高速歩行 (fast walking in mud): the moveset's run band between Run and DashFast
+    'rundash': ('DashFast corrrer turbo', 1.0),  # ãƒ¡ã‚¿ãƒ«ãƒ€ãƒƒã‚·ãƒ¥: the moveset's fastest run band
+    'walkbury': ('Dash', 1.0),  # æ³¥é«˜é€Ÿæ­©è¡Œ (fast walking in mud): the moveset's run band between Run and DashFast
     'wait': ('Wait oddysey idle', 1.0),
     'jump': ('Jump', 0.6),
     'jump2': ('Jump2', 0.6),
@@ -59,8 +59,8 @@ MAP = {
     'swimflutter': ('SwimWalk', 0.6),
     'swimbreastsurface': ('SwimSurface', 0.6),
     'swimfluttersurface': ('SwimSurface', 0.6),
-    # For the Odyssey moveset (wt-moveset): the ground-pound jump plays スカイラブジャンプ (JumpTwin), the dive
-    # 飛び込みジャンプ (Dive), the ground roll 空中一回転 (AirControl). JumpRoll, the obvious high jump, is the
+    # For the Odyssey moveset (wt-moveset): the ground-pound jump plays ã‚¹ã‚«ã‚¤ãƒ©ãƒ–ã‚¸ãƒ£ãƒ³ãƒ— (JumpTwin), the dive
+    # é£›ã³è¾¼ã¿ã‚¸ãƒ£ãƒ³ãƒ— (Dive), the ground roll ç©ºä¸­ä¸€å›žè»¢ (AirControl). JumpRoll, the obvious high jump, is the
     # triple jump's.
     'jumptwin': ('JumpHipDrop', 0.6),
     'dive': ('HeadSlidingStart', 1.0),  # Odyssey's dive: the headfirst lunge (its "Dive" is into water)
@@ -74,11 +74,11 @@ MAP = {
     # Ground pound into a roll: Odyssey goes from the ground pound's landing straight into the roll's start
     # (its LandRolling is the stand-up out of a roll).
     'icejumpstopland': ('RollingStart', 1.0),
-    'rolling': ('JumpDashFast', 0.6),  # ダッシュジャンプ: the jump at full running speed
-    # The dive's belly slide (飛び込み準備: waiting at the water's edge to dive). The dive's lunge ends on the
+    'rolling': ('JumpDashFast', 0.6),  # ãƒ€ãƒƒã‚·ãƒ¥ã‚¸ãƒ£ãƒ³ãƒ—: the jump at full running speed
+    # The dive's belly slide (é£›ã³è¾¼ã¿æº–å‚™: waiting at the water's edge to dive). The dive's lunge ends on the
     # belly, so its landing goes straight into the slide.
     'divewait': ('HeadSliding', 1.0),
-    # The dive's landing without Z (引き戻し着地, the landing after a Pull Star): Odyssey's roll-out, which
+    # The dive's landing without Z (å¼•ãæˆ»ã—ç€åœ°, the landing after a Pull Star): Odyssey's roll-out, which
     # picks up from the belly slide's pose and tumbles forward onto the feet.
     'pullbackland': ('RollingStandUp', 1.0),
     # Round poles (Galaxy's trees) and square poles.
@@ -128,7 +128,7 @@ MAP = {
     'damagewait': ('DamageWait', 1.0),
     'diefall': ('DeadFall', 1.0),
     'diefire': ('DeadFire', 1.0),
-    # The hard landing (ハード着地, landstiffen: after a Launch Star and long falls) keeps Galaxy's own.
+    # The hard landing (ãƒãƒ¼ãƒ‰ç€åœ°, landstiffen: after a Launch Star and long falls) keeps Galaxy's own.
     # Getting a Power Star or Grand Star keeps Galaxy's own animations (powerstarget, grandstarget):
     # Odyssey's GetShine is a short pose that does not fit the game's long star-get sequence. So do the
     # pipes (earthenpipein, earthenpipeout): Odyssey's Dokan clips played wrong in them.
@@ -184,6 +184,10 @@ HIDDEN = 0.001
 
 ROT_TOLERANCE = 0.35   # degrees
 TRANS_TOLERANCE = 0.12  # model units (about 1 mm on Mario)
+# The custom model's face joints: small bones whose keys would otherwise fill the archive, which the game
+# loads into a fixed heap (co-op's second player leaves it less room).
+ADDED_ROT_TOLERANCE = 1.0
+ADDED_TRANS_TOLERANCE = 0.25
 ARCHIVE = 'ObjectData/MarioAnime.arc'
 MODEL = 'ObjectData/Mario.arc'
 MAIN_DOL_SHA1 = '9a71008ae1ee9010e267fa67d1f0b0d4f0e895dd'  # native_host.cpp kDiscModMainDolSha1
@@ -298,19 +302,23 @@ def convert(rig, act, original, faces=False, defaults=None, face=None, frames=No
     animated = {i for i, s in rig.map.items() if s in act[0]['bones']} | (set(face[0].joints) if face else set())
     tracks = []
     for j in range(rig.nj):
-        if j >= len(ob['joints']) and j not in animated:
-            tracks.append(defaults[j])  # a joint the game's animation does not have: the model's neutral pose
+        if j >= len(ob['joints']) and (j not in animated or rig.names[j].startswith(UNSKINNED)):
+            # A joint the game's animation does not have: the model's neutral pose. The fingers too: they have
+            # no vertices (their pose is baked into the hands), so their motion would only cost archive room.
+            tracks.append(defaults[j])
             continue
+        added = j >= len(ob['joints'])
+        rot_tol, trans_tol = (ADDED_ROT_TOLERANCE, ADDED_TRANS_TOLERANCE) if added else (ROT_TOLERANCE, TRANS_TOLERANCE)
         rot_keys = None
         if j in animated:
-            rot_keys = [j3d.reduce_track(list(eul[:, j, a]), ROT_TOLERANCE) for a in range(3)]
+            rot_keys = [j3d.reduce_track(list(eul[:, j, a]), rot_tol) for a in range(3)]
             # Each Euler angle stays within tolerance, but near a quarter-turn pitch (a flip) small angle
             # errors make large rotation errors; such a joint keeps a key on every frame.
             for f in range(dur + 1):
                 got = retarget.euler_to_mat(np.array([j3d.eval_track(
                     [(t, v, m, m) for t, v, m in rot_keys[a]], f) for a in range(3)]))
                 want = retarget.euler_to_mat(eul[f, j])
-                if np.degrees(np.arccos(np.clip((np.trace(got.T @ want) - 1) / 2, -1, 1))) > 1.5:
+                if np.degrees(np.arccos(np.clip((np.trace(got.T @ want) - 1) / 2, -1, 1))) > 3 * rot_tol + 0.45:
                     rot_keys = [j3d.reduce_track(list(eul[:, j, a]), 0.0) for a in range(3)]
                     break
         joint = []
@@ -322,7 +330,7 @@ def convert(rig, act, original, faces=False, defaults=None, face=None, frames=No
                 elif comp == 1 and j in animated:
                     keys = rot_keys[axis]
                 elif comp == 2 and j in animated:
-                    keys = j3d.reduce_track(list(tr[:, j, axis] + rig.rest_trans[j][axis]), TRANS_TOLERANCE)
+                    keys = j3d.reduce_track(list(tr[:, j, axis] + rig.rest_trans[j][axis]), trans_tol)
                 elif j >= len(ob['joints']):
                     keys = defaults[j][k]
                 else:
@@ -330,6 +338,10 @@ def convert(rig, act, original, faces=False, defaults=None, face=None, frames=No
                     keys = [(t, v, ti) for t, v, ti, _ in j3d.track_keys(ob, j, k)]
                 joint.append(keys)
         tracks.append(joint)
+    # Trailing joints that only hold the neutral pose are left out: Nebula gives any joint past an
+    # animation's table that pose (neutral_joints.txt), and each joint costs the archive 54 bytes.
+    while defaults is not None and len(tracks) > len(ob['joints']) and tracks[-1] == defaults.get(len(tracks) - 1):
+        tracks.pop()
     return j3d.write_bck(original, loop_mode, dur, tracks), dur, loop, period, sorted(set(rig.map) - animated)
 
 
