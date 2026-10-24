@@ -4,9 +4,15 @@
 #include "galaxy/native_api.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 
 namespace galaxy {
+
+// Luigi's animation swap table from the content (<content>/mods/animations-model or animations/luigi_swap.txt,
+// "<bck> <swapped bck>" a line): Luigi's XanimeResourceTable resolves with it instead of Galaxy's
+// luigiAnimeSwapTable, and each brother's table has its own groups (coop_guest.cpp, namespace anime). At boot.
+void coop_load_luigi_swap(const std::filesystem::path& content_root);
 
 // Rollback: the co-op state (players, talks, pipes, lives, the save-select menu) and the second player's input.
 struct CoopRollbackState;

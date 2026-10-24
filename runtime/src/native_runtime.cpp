@@ -34758,6 +34758,7 @@ int wmain(int argc, wchar_t** argv) {
     // Mario's replacement voice lines (voice_replacement.h), mixed by the host mixer.
     galaxy::voice::load(paths.content_root);
     load_anim_neutral_joints(state, paths.content_root);
+    galaxy::coop_load_luigi_swap(paths.content_root);
     // Split screen's line (coop_guest.cpp) goes into the GX stream where the game is, as the scene markers do.
     galaxy::coop_set_split_clip_sink(
         [](void* user, const float plane[3], unsigned pass, const float separator[4]) {
