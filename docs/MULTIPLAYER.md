@@ -109,6 +109,14 @@ Each brother's pointer is his own, as the first player's is in one-player play:
   game's own player code each frame with their own controller. He is kept out of the game's movement list
   (suspended): a galaxy's start resumes the scene's suspended objects, and the game would then move him a second
   time each frame with the first player's controller.
+- Each brother animates as himself. The game resolves its one player's animations into one static table
+  (`marioAnimeTable`, through `luigiAnimeSwapTable` when he is Luigi), so the second player gets his own copy of
+  it after his `init2` and the first player's is put back (`coop_guest.cpp`, namespace `anime`). With the custom
+  animations, Luigi resolves through the content's `mods/animations-model/luigi_swap.txt` (or
+  `mods/animations/luigi_swap.txt` without the custom model): Galaxy's own clips (`luigi<name>.bck`) where the mod
+  changed Mario's, and the Odyssey moveset's roll, dive, belly slide, ground-pound jump and dash shared with Mario.
+  Without the file Luigi keeps Galaxy's swap table. Solo Luigi saves use it too. `GALAXY_TRACE_ANIM=1` logs each
+  brother's animation as it changes (`[anim]`), and the agent's status has each player's `bck` and `motion`.
 - The players bump into each other: when their bodies (50 units round, 150 tall) overlap, each is pushed
   half the overlap apart through the game's own `Mario::push`, so walls and floors still hold them.
 - The camera looks at the point between the players. When one is about to leave the picture the screen splits

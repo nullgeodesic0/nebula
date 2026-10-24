@@ -11,13 +11,18 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cctype>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -462,6 +467,8 @@ struct State {
     std::uint32_t player_archives_is_mario = 1u;
     std::array<std::uint32_t, 8> init2_actors{};
     unsigned init2_depth = 0u;
+    // This stage's copy of Luigi's swap table (luigi_swap.txt) in guest memory, or 0 (anime_tables below).
+    std::uint32_t luigi_swap_table = 0u;
     std::array<std::uint32_t, 8> categories{};
     unsigned category_depth = 0u;
 
@@ -861,6 +868,381 @@ void on_stage_start(const Guest& guest, State& s);
 void tint_second_meter(const Guest& guest, const State& s);
 void sit_out(const Guest& guest, State& s);
 
+// ---- Each brother's own animations (docs/MULTIPLAYER.md "What happens in game") ----
+// MarioAnimator::init makes the player's XanimeResourceTable from the game's one static marioAnimeTable
+// (XanimeGroupInfo[]): XanimeResourceTable::initGroupInfo writes each group's motions (resolved through the swap
+// table, luigiAnimeSwapTable while gIsLuigi is set) into that array, and the table and its XanimePlayers point into
+// it. The second brother's init2 resolved the one array again as his character, under the first brother's feet
+// (Mario played LuigiJumpRoll). So the second brother's table gets a copy of its own: the array is saved before
+// his init2, copied after it, his table and players pointed at the copy, and the array put back as it was.
+// Luigi resolves with the content's own swap table (<mods>/luigi_swap.txt: Galaxy's clips for Luigi where the
+// animation mod changed Mario's), when there is one.
+namespace anime {
+constexpr std::uint32_t kActorAnimator = 0x234u;     // MarioActor::mMarioAnim
+constexpr std::uint32_t kAnimatorTable = 0x08u;      // MarioAnimator::mResourceTable
+constexpr std::uint32_t kAnimatorPlayer = 0x0Cu;     // MarioAnimator::mXanimePlayer
+constexpr std::uint32_t kAnimatorUpper = 0x10u;      // MarioAnimator::mXanimePlayerUpper
+constexpr std::uint32_t kTableGroups = 0x10u;        // XanimeResourceTable::mGroupInfos
+constexpr std::uint32_t kTableSingles = 0x18u;       // XanimeResourceTable::mBckTables
+constexpr std::uint32_t kTableHolder = 0x6Cu;        // XanimeResourceTable::mResourceHolder
+constexpr std::uint32_t kTableSwap = 0x74u;          // XanimeResourceTable::mSwapTable
+constexpr std::uint32_t kGroupSize = 0x4Cu;          // sizeof(XanimeGroupInfo)
+constexpr std::uint32_t kGroupMotions = 0x20u;       // XanimeGroupInfo::_20[4], the resolved J3DAnmTransforms
+// XanimePlayer's group pointers: mDefaultAnimation, mCurrentAnimation, mPrevAnimation, _68.
+constexpr std::array<std::uint32_t, 4> kPlayerGroupFields = {0x5Cu, 0x60u, 0x64u, 0x68u};
+constexpr std::uint32_t kMarioAnimatorInit = 0x802CA78Cu;  // MarioAnimator::init()
+constexpr std::uint32_t kMarioAnimatorInitSize = 0x23Cu;
+constexpr std::uint32_t kTableCtor = 0x8001CA44u;      // XanimeResourceTable::XanimeResourceTable(holder, groups, ... swap)
+constexpr unsigned kMaxGroups = 4096u;
+
+// The static tables MarioAnimator::init passes the table's constructor (r5-r10, then the stack's 8 and 0xC):
+// read once from its code, as its lis/addi pairs leave them.
+struct Tables {
+    bool searched = false;
+    bool ok = false;
+    std::uint32_t groups = 0u, aux = 0u, ofs = 0u, single = 0u, dbl = 0u, triple = 0u, quad = 0u, luigi = 0u;
+};
+Tables s_tables;
+bool s_tables_checked = false;  // re-resolving a table as it is gave it back unchanged (tables_trusted)
+
+// Luigi's swap pairs from the content (coop_load_luigi_swap), lower case as the file has them.
+std::vector<std::pair<std::string, std::string>> s_luigi_swap;
+
+const Tables& tables(const Guest& guest) {
+    if (s_tables.searched) return s_tables;
+    s_tables.searched = true;
+    std::array<std::uint32_t, 32> reg{};
+    std::array<bool, 32> known{};
+    std::uint32_t stack8 = 0u, stackC = 0u;
+    bool have8 = false, haveC = false, called = false;
+    const auto forget = [&](unsigned r) { known[r] = false; };
+    for (std::uint32_t pc = kMarioAnimatorInit; pc < kMarioAnimatorInit + kMarioAnimatorInitSize; pc += 4u) {
+        const std::uint32_t op = guest.u32(pc);
+        const unsigned primary = op >> 26u;
+        const unsigned d = (op >> 21u) & 31u;
+        const unsigned a = (op >> 16u) & 31u;
+        const unsigned b = (op >> 11u) & 31u;
+        const std::uint32_t simm = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(op & 0xFFFFu)));
+        if (primary == 14u || primary == 15u) {  // addi, addis
+            const bool base = a == 0u || known[a];
+            const std::uint32_t value = (a == 0u ? 0u : reg[a]) + (primary == 15u ? (op & 0xFFFFu) << 16u : simm);
+            reg[d] = value;
+            known[d] = base;
+        } else if (primary == 24u) {  // ori
+            reg[a] = reg[d] | (op & 0xFFFFu);
+            known[a] = known[d];
+        } else if (primary == 31u && ((op >> 1u) & 0x3FFu) == 444u && d == b) {  // mr
+            reg[a] = reg[d];
+            known[a] = known[d];
+        } else if (primary == 36u && a == 1u) {  // stw rS, d(r1)
+            if ((op & 0xFFFFu) == 8u) { stack8 = reg[d]; have8 = known[d]; }
+            if ((op & 0xFFFFu) == 0xCu) { stackC = reg[d]; haveC = known[d]; }
+        } else if (primary == 18u && (op & 1u) != 0u) {  // bl
+            std::uint32_t offset = op & 0x03FFFFFCu;
+            if ((offset & 0x02000000u) != 0u) offset |= 0xFC000000u;
+            const std::uint32_t target = ((op & 2u) != 0u ? 0u : pc) + offset;
+            if (target == kTableCtor) {
+                called = true;
+                break;
+            }
+            for (unsigned r : {0u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u}) forget(r);
+        } else if (primary == 31u) {
+            forget(d);
+            forget(a);
+        } else if ((primary >= 7u && primary <= 13u) || (primary >= 32u && primary <= 35u) ||
+                   (primary >= 40u && primary <= 43u) || primary == 46u) {
+            forget(d);  // arithmetic and loads into rD
+        } else if (primary == 20u || primary == 21u || primary == 23u || (primary >= 25u && primary <= 29u)) {
+            forget(a);  // rlwimi, rlwinm, rlwnm, oris, xori, xoris, andi., andis.
+        }
+    }
+    Tables& t = s_tables;
+    t.groups = reg[5], t.aux = reg[6], t.ofs = reg[7], t.single = reg[8], t.dbl = reg[9], t.triple = reg[10];
+    t.quad = stack8;
+    t.luigi = haveC ? stackC : 0u;
+    t.ok = called && have8 && known[5] && known[6] && known[7] && known[8] && known[9] && known[10] &&
+           plausible(t.groups) && plausible(t.aux) && plausible(t.ofs) && plausible(t.single) && plausible(t.dbl) &&
+           plausible(t.triple) && plausible(t.quad);
+    trace("animation tables: %s groups %08X aux %08X ofs %08X single %08X double %08X triple %08X quad %08X luigi %08X",
+          t.ok ? "found" : "NOT found", t.groups, t.aux, t.ofs, t.single, t.dbl, t.triple, t.quad, t.luigi);
+    return t;
+}
+
+std::uint32_t table_of(const Guest& guest, std::uint32_t actor_address) {
+    if (!plausible(actor_address)) return 0u;
+    const std::uint32_t animator = guest.u32(actor_address + kActorAnimator);
+    if (!plausible(animator)) return 0u;
+    const std::uint32_t table = guest.u32(animator + kAnimatorTable);
+    return plausible(table) ? table : 0u;
+}
+
+unsigned group_count(const Guest& guest, std::uint32_t groups) {
+    unsigned n = 0u;
+    while (n < kMaxGroups) {
+        const std::uint32_t name = guest.u32(groups + n * kGroupSize);
+        if (!plausible(name & ~3u) || guest.u8(name) == 0u) break;
+        ++n;
+    }
+    return n;
+}
+
+std::vector<std::uint32_t> read_words(const Guest& guest, std::uint32_t at, std::uint32_t bytes) {
+    std::vector<std::uint32_t> words(bytes / 4u);
+    for (std::uint32_t i = 0; i < words.size(); ++i) words[i] = guest.u32(at + i * 4u);
+    return words;
+}
+
+void write_words(const Guest& guest, std::uint32_t at, const std::vector<std::uint32_t>& words) {
+    for (std::uint32_t i = 0; i < words.size(); ++i) guest.set_u32(at + i * 4u, words[i]);
+}
+
+using SwapPairs = std::vector<std::pair<std::string, std::string>>;
+
+std::string lower(std::string text) {
+    for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return text;
+}
+
+// The bck files of each group (by its name) as the static bck tables list them, and the groups the offset table
+// gives start, loop, end and attribute: read once, they do not change.
+struct BckFiles {
+    bool read = false;
+    std::vector<std::pair<std::string, std::vector<std::string>>> by_group;  // in the tables' order: single first
+    std::vector<std::string> with_offsets;
+};
+BckFiles s_bck_files;
+
+const BckFiles& bck_files(const Guest& guest, const Tables& t) {
+    if (s_bck_files.read) return s_bck_files;
+    s_bck_files.read = true;
+    // XanimeBckTable1 {name, file, hash, hash}; XanimeBckTable2-4 {name, {file, weight}[n]}.
+    const std::array<std::tuple<std::uint32_t, std::uint32_t, unsigned>, 4> kinds = {
+        std::tuple{t.single, 0x10u, 1u}, std::tuple{t.dbl, 0x14u, 2u}, std::tuple{t.triple, 0x1Cu, 3u},
+        std::tuple{t.quad, 0x24u, 4u}};
+    for (const auto& [base, stride, files] : kinds) {
+        for (unsigned i = 0; i < kMaxGroups; ++i) {
+            const std::uint32_t at = base + i * stride;
+            const std::string name = guest.string(guest.u32(at));
+            if (name.empty()) break;
+            std::vector<std::string> list;
+            for (unsigned j = 0; j < files; ++j) list.push_back(guest.string(guest.u32(at + 4u + j * (files == 1u ? 4u : 8u))));
+            s_bck_files.by_group.emplace_back(name, std::move(list));
+        }
+    }
+    for (unsigned i = 0; i < kMaxGroups; ++i) {  // XanimeOfsInfo {name, start, end, loop, attribute}
+        const std::string name = guest.string(guest.u32(t.ofs + i * 0x14u));
+        if (name.empty()) break;
+        s_bck_files.with_offsets.push_back(name);
+    }
+    return s_bck_files;
+}
+
+// XanimeResourceTable::swapBckName with a table read from guest memory (Galaxy's, or the one a table was made with).
+SwapPairs read_swap(const Guest& guest, std::uint32_t swap) {
+    SwapPairs pairs;
+    for (unsigned i = 0; swap != 0u && i < 1024u; ++i) {
+        const std::string original = guest.string(guest.u32(swap + i * 8u));
+        if (original.empty()) break;
+        pairs.emplace_back(original, guest.string(guest.u32(swap + i * 8u + 4u)));
+    }
+    return pairs;
+}
+
+// The groups of `table` as XanimeResourceTable::initGroupInfo resolves them with `swap` (done here rather than by
+// calling the game: only the motions and what initGroupInfo takes from them depend on the swap table). Every
+// field initGroupInfo writes from the motions: _20[], and mStart, mEnd, mLoop and mAttribute where the offset
+// table has none. ResTable::getResIndex finds a motion by its lower-case name.
+std::vector<std::uint32_t> resolved_groups(const Guest& guest, const Tables& t, std::uint32_t table, const SwapPairs& swap) {
+    const std::uint32_t groups = guest.u32(table + kTableGroups);
+    const unsigned n = group_count(guest, groups);
+    std::vector<std::uint32_t> words = read_words(guest, groups, n * kGroupSize);
+    const BckFiles& files = bck_files(guest, t);
+    const std::uint32_t holder = guest.u32(table + kTableHolder);
+    const std::uint32_t motions = plausible(holder) ? guest.u32(holder + 4u) : 0u;  // ResourceHolder::mMotionResTable
+    if (!plausible(motions)) return {};
+    std::vector<std::pair<std::string, std::uint32_t>> resources;  // ResFileInfo {mResource, ..., mName +0x10}
+    const std::uint32_t infos = guest.u32(motions);
+    const std::uint32_t count = std::min(guest.u32(motions + 4u), 8192u);
+    for (std::uint32_t i = 0; plausible(infos) && i < count; ++i) {
+        resources.emplace_back(lower(guest.string(guest.u32(infos + i * 0x18u + 0x10u))), guest.u32(infos + i * 0x18u));
+    }
+    const auto motion = [&](const std::string& file) -> std::uint32_t {
+        std::string name = file;
+        for (const auto& [original, swapped] : swap) {
+            if (lower(original) == lower(file)) {
+                name = swapped;
+                break;
+            }
+        }
+        name = lower(name);
+        for (const auto& [resource_name, resource] : resources) {
+            if (resource_name == name) return resource;
+        }
+        return 0u;
+    };
+    for (unsigned i = 0; i < n; ++i) {
+        std::uint32_t* entry = words.data() + i * (kGroupSize / 4u);
+        const std::string name = guest.string(entry[0]);
+        const auto found = std::find_if(files.by_group.begin(), files.by_group.end(),
+                                        [&](const auto& group) { return group.first == name; });
+        std::array<std::uint32_t, 4> resolved{};
+        if (found != files.by_group.end()) {
+            for (std::size_t j = 0; j < found->second.size(); ++j) resolved[j] = motion(found->second[j]);
+        }
+        for (unsigned j = 0; j < 4u; ++j) entry[kGroupMotions / 4u + j] = resolved[j];
+        if (std::find(files.with_offsets.begin(), files.with_offsets.end(), name) != files.with_offsets.end()) continue;
+        entry[0x0Cu / 4u] = 0u;  // mStart
+        entry[0x14u / 4u] = 0u;  // mLoop
+        if (resolved[0] == 0u) {
+            entry[0x10u / 4u] = 0u;
+            entry[0x18u / 4u] = 0u;
+        } else {  // J3DAnmTransform: attribute (u8 +4), frame max (s16 +6)
+            const std::uint32_t head = guest.u32(resolved[0] + 4u);
+            entry[0x18u / 4u] = head >> 24u;
+            entry[0x10u / 4u] = std::bit_cast<std::uint32_t>(static_cast<float>(static_cast<std::int16_t>(head & 0xFFFFu)));
+        }
+    }
+    return words;
+}
+
+// Whether resolving here gives what the game made: the first table made, with the swap table it was made with,
+// must come out as it is (checked once; on a mismatch the per-brother animations stay off).
+bool tables_trusted(const Guest& guest, const Tables& t, std::uint32_t table) {
+    if (s_tables_checked) return true;
+    if (!t.ok || guest.u32(table + kTableGroups) != t.groups) return false;
+    const unsigned n = group_count(guest, t.groups);
+    if (n == 0u) return false;
+    const std::vector<std::uint32_t> made = read_words(guest, t.groups, n * kGroupSize);
+    const std::vector<std::uint32_t> here = resolved_groups(guest, t, table, read_swap(guest, guest.u32(table + kTableSwap)));
+    if (made != here) {
+        unsigned differ = 0u;
+        for (std::size_t i = 0; i < made.size() && i < here.size(); ++i) differ += made[i] != here[i] ? 1u : 0u;
+        trace("animation tables: resolving here differs from the game (%u words); per-brother animations off", differ);
+        s_tables.ok = false;
+        return false;
+    }
+    s_tables_checked = true;
+    trace("animation tables: %u groups, resolving here matches the game", n);
+    return true;
+}
+
+// A block on the stage's heap (MEM2's when it has room, else MEM1's), or 0.
+std::uint32_t stage_alloc(const Guest& guest, std::uint32_t size) {
+    const std::uint32_t watcher = guest.u32(kHeapMemoryWatcher);
+    if (!plausible(watcher)) return 0u;
+    for (const std::uint32_t field : {kSceneHeapGddr, kSceneHeapNapa}) {
+        const std::uint32_t heap = guest.u32(watcher + field);
+        if (heap == 0u) continue;
+        if (guest.u32(heap + kSolidHeapFreeSize) < size + 0x10000u) continue;
+        const std::uint32_t block = guest.call(fn::kNewOnHeap, size, heap, 4u);
+        if (block != 0u) return block;
+    }
+    return 0u;
+}
+
+// This stage's XanimeSwapTable { const char* original; const char* swapped; }[] from luigi_swap.txt, ended by
+// {"", nullptr}; 0 without the file.
+std::uint32_t luigi_swap_table(const Guest& guest, State& s) {
+    if (s_luigi_swap.empty()) return 0u;
+    if (s.luigi_swap_table != 0u) return s.luigi_swap_table;
+    const std::uint32_t pairs = static_cast<std::uint32_t>(s_luigi_swap.size());
+    std::uint32_t text = 1u;  // the terminator's ""
+    for (const auto& [original, swapped] : s_luigi_swap) {
+        text += static_cast<std::uint32_t>(original.size() + swapped.size() + 2u);
+    }
+    const std::uint32_t entries = (pairs + 1u) * 8u;
+    const std::uint32_t block = stage_alloc(guest, entries + ((text + 3u) & ~3u));
+    if (block == 0u) {
+        trace("Luigi's swap table: no room on the stage's heap");
+        return 0u;
+    }
+    std::uint32_t at = block + entries;
+    const auto put = [&](const std::string& value) {
+        const std::uint32_t start = at;
+        for (const char c : value) guest.set_u8(at++, static_cast<std::uint8_t>(c));
+        guest.set_u8(at++, 0u);
+        return start;
+    };
+    for (std::uint32_t i = 0; i < pairs; ++i) {
+        guest.set_u32(block + i * 8u, put(s_luigi_swap[i].first));
+        guest.set_u32(block + i * 8u + 4u, put(s_luigi_swap[i].second));
+    }
+    guest.set_u32(block + pairs * 8u, put(std::string()));
+    guest.set_u32(block + pairs * 8u + 4u, 0u);
+    s.luigi_swap_table = block;
+    trace("Luigi's swap table: %u pairs at %08X", pairs, block);
+    return block;
+}
+
+// Luigi's table resolved with the content's swap table (Galaxy's own stays without the file).
+void resolve_as_luigi(const Guest& guest, State& s, std::uint32_t actor_address) {
+    const Tables& t = tables(guest);
+    const std::uint32_t table = table_of(guest, actor_address);
+    if (!t.ok || table == 0u) return;
+    const std::uint32_t swap = luigi_swap_table(guest, s);
+    if (swap == 0u) return;
+    const std::uint32_t groups = guest.u32(table + kTableGroups);
+    // As the game made it (Galaxy's swap table): resolving here must give the same.
+    const std::vector<std::uint32_t> made = read_words(guest, groups, group_count(guest, groups) * kGroupSize);
+    if (resolved_groups(guest, t, table, read_swap(guest, guest.u32(table + kTableSwap))) != made) {
+        trace("Luigi %08X: resolving here differs from the game's table; Galaxy's swap table kept", actor_address);
+        return;
+    }
+    const std::vector<std::uint32_t> words = resolved_groups(guest, t, table, s_luigi_swap);
+    if (words.empty()) return;
+    write_words(guest, groups, words);
+    // Its later lookups (XanimeResourceTable::findResMotion: single bcks, track changes) swap with it as well.
+    guest.set_u32(table + kTableSwap, swap);
+    trace("Luigi %08X: %zu groups at %08X resolved with the content's swap table", actor_address,
+          words.size() * 4u / kGroupSize, groups);
+}
+
+// A new stage's first player made: as Luigi, his table with the content's swap table.
+void first_player_animations(const Guest& guest, State& s, std::uint32_t first) {
+    s.luigi_swap_table = 0u;
+    const std::uint32_t table = table_of(guest, first);
+    if (table == 0u) return;
+    const Tables& t = tables(guest);
+    if (!tables_trusted(guest, t, table)) return;
+    if (guest.u8(kIsLuigi) != 0u) resolve_as_luigi(guest, s, first);
+}
+
+// Before the second player's init2: the shared groups as the first player has them.
+std::vector<std::uint32_t> save_shared_groups(const Guest& guest) {
+    const Tables& t = tables(guest);
+    if (!t.ok || !s_tables_checked) return {};
+    return read_words(guest, t.groups, group_count(guest, t.groups) * kGroupSize);
+}
+
+// After it: the second player's own copy of the groups, his table and players pointed at it, and the shared groups
+// put back for the first player.
+void own_groups_for_second(const Guest& guest, State& s, std::uint32_t second, const std::vector<std::uint32_t>& saved) {
+    const Tables& t = tables(guest);
+    const std::uint32_t table = table_of(guest, second);
+    if (saved.empty() || table == 0u || guest.u32(table + kTableGroups) != t.groups) return;
+    const std::uint32_t bytes = static_cast<std::uint32_t>(saved.size() * 4u);
+    const std::uint32_t copy = stage_alloc(guest, bytes);
+    if (copy == 0u) {
+        trace("second player's animations: no room for his groups (%u bytes)", bytes);
+        return;
+    }
+    write_words(guest, copy, read_words(guest, t.groups, bytes));
+    write_words(guest, t.groups, saved);
+    guest.set_u32(table + kTableGroups, copy);
+    const std::uint32_t animator = guest.u32(second + kActorAnimator);
+    for (const std::uint32_t field : {kAnimatorPlayer, kAnimatorUpper}) {
+        const std::uint32_t player = guest.u32(animator + field);
+        if (!plausible(player)) continue;
+        for (const std::uint32_t at : kPlayerGroupFields) {
+            const std::uint32_t group = guest.u32(player + at);
+            if (group >= t.groups && group < t.groups + bytes) guest.set_u32(player + at, group - t.groups + copy);
+        }
+    }
+    trace("second player's animations: %u groups of his own at %08X", bytes / kGroupSize, copy);
+    if (guest.u8(kIsLuigi) != 0u) resolve_as_luigi(guest, s, second);
+}
+}  // namespace anime
+
 void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
     SavedContext saved(guest.context());
     s.first = first;
@@ -914,10 +1296,15 @@ void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
           free_kb(kSceneHeapGddr));
     const std::uint32_t second = guest.call(fn::kCreateMarioActor, name);
     if (plausible(second)) {
-        Guest::Frame frame(guest);
-        s.answer_partner = true;
-        guest.call(fn::kMarioActorInit2, second, frame.vec(0, beside), frame.vec(1, rotation), 1u);  // 1: 基本
-        s.answer_partner = false;
+        const std::vector<std::uint32_t> shared_groups = anime::save_shared_groups(guest);
+        {
+            Guest::Frame frame(guest);
+            s.answer_partner = true;
+            guest.call(fn::kMarioActorInit2, second, frame.vec(0, beside), frame.vec(1, rotation), 1u);  // 1: 基本
+            s.answer_partner = false;
+        }
+        // gIsLuigi is still the second player's here.
+        anime::own_groups_for_second(guest, s, second, shared_groups);
     }
     trace("stage heaps after the second player: MEM1 %u KB free, MEM2 %u KB free", free_kb(kSceneHeapNapa),
           free_kb(kSceneHeapGddr));
@@ -3507,6 +3894,13 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         rejoin_frame(context, memory, services, guest_pc);
         s_menu.kpad_buffer = context->gpr[4];
     }
+    if (id == call::kMarioActorInit2 && services != nullptr && services->call_guest != nullptr) {
+        // With or without co-op: Luigi's animations (anime::first_player_animations) as well as the second player.
+        State& s = state();
+        if (s.init2_depth < s.init2_actors.size()) s.init2_actors[s.init2_depth] = context->gpr[3];
+        ++s.init2_depth;
+        return;
+    }
     if (services == nullptr || services->call_guest == nullptr || !coop_available()) return;
     State& s = state();
     (void)memory;
@@ -3735,10 +4129,6 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         s.kpad_channel = context->gpr[3];
         s.kpad_buffer = context->gpr[4];
         return;
-    case call::kMarioActorInit2:
-        if (s.init2_depth < s.init2_actors.size()) s.init2_actors[s.init2_depth] = context->gpr[3];
-        ++s.init2_depth;
-        return;
     case call::kCategoryListExecuteMovement:
         if (s.category_depth < s.categories.size()) s.categories[s.category_depth] = context->gpr[3];
         ++s.category_depth;
@@ -3833,6 +4223,20 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
     if (id == call::kKpadRead && s_menu.kpad_buffer != 0u && services != nullptr && services->call_guest != nullptr) {
         file_select_frame(Guest(context, memory, services, guest_pc), context->gpr[3]);
         s_menu.kpad_buffer = 0u;
+    }
+    if (id == call::kMarioActorInit2 && services != nullptr && services->call_guest != nullptr) {
+        State& s = state();
+        if (s.init2_depth == 0u) return;
+        --s.init2_depth;
+        const std::uint32_t actor = s.init2_depth < s.init2_actors.size() ? s.init2_actors[s.init2_depth] : 0u;
+        if (s.creating_second || !plausible(actor)) return;
+        const Guest guest(context, memory, services, guest_pc);
+        {
+            SavedContext saved(context);
+            anime::first_player_animations(guest, s, actor);
+        }
+        if (coop_available()) create_second_player(guest, s, actor);
+        return;
     }
     if (services == nullptr || services->call_guest == nullptr || !coop_available()) return;
     State& s = state();
@@ -3990,14 +4394,6 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
             s.own = (context->gpr[3] & 0xFFu) != 0u ? coop::Character::Mario : coop::Character::Luigi;
         }
         return;
-    case call::kMarioActorInit2: {
-        if (s.init2_depth == 0u) return;
-        --s.init2_depth;
-        const std::uint32_t actor = s.init2_depth < s.init2_actors.size() ? s.init2_actors[s.init2_depth] : 0u;
-        if (s.creating_second || !plausible(actor)) return;
-        create_second_player(guest, s, actor);
-        return;
-    }
     case call::kCategoryListExecuteMovement: {
         if (s.category_depth == 0u) return;
         --s.category_depth;
@@ -4097,6 +4493,40 @@ struct CoopRollbackState {
     State state;
     FileSelectMenu menu;
 };
+
+void coop_load_luigi_swap(const std::filesystem::path& content_root) {
+    anime::s_luigi_swap.clear();
+    // The animation mod's folder, as GuestAddressSpace::load_disc_mod_overrides_from_env picks it.
+    std::filesystem::path folder;
+    std::error_code error;
+    const auto exists = [&error](const std::filesystem::path& path) { return std::filesystem::is_regular_file(path, error); };
+    wchar_t* value = nullptr;
+    std::size_t length = 0u;
+    if (_wdupenv_s(&value, &length, L"GALAXY_DISC_MOD_MANIFEST") == 0 && value != nullptr && value[0] != L'\0') {
+        folder = std::filesystem::path(value).parent_path();
+    } else if (custom_animations_for_boot()) {
+        const std::filesystem::path mods = content_root / L"mods";
+        const bool model = custom_model_for_boot() && exists(mods / L"model" / L"manifest.txt");
+        folder = model && exists(mods / L"animations-model" / L"manifest.txt") ? mods / L"animations-model"
+                                                                              : mods / L"animations";
+    }
+    std::free(value);
+    if (folder.empty()) return;
+    std::ifstream file(folder / L"luigi_swap.txt");
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream fields(line);
+        std::string original, swapped;
+        if (!(fields >> original >> swapped)) continue;
+        anime::s_luigi_swap.emplace_back(std::move(original), std::move(swapped));
+    }
+    if (!anime::s_luigi_swap.empty()) {
+        std::fprintf(stderr, "[anim] Luigi's swap table: %zu pairs from %s\n", anime::s_luigi_swap.size(),
+                     (folder / L"luigi_swap.txt").string().c_str());
+    }
+}
 
 std::shared_ptr<CoopRollbackState> coop_rollback_save() {
     auto saved = std::make_shared<CoopRollbackState>();

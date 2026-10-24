@@ -105,6 +105,8 @@ struct Player {
     std::uint32_t mode = 0u;
     std::uint32_t health = 0u;
     bool input_disabled = false;
+    std::string bck;     // the bck the animation asked for (XanimePlayer::mCurrentBckName, before Luigi's swap)
+    std::string motion;  // the motion it plays (its group's first track, by name in the player's resources)
 };
 
 struct PadTimer {
@@ -246,6 +248,31 @@ Player read_player(const Guest& guest, std::uint32_t actor_address) {
     player.health = guest.u32(actor_address + actor::kHealth);
     const std::uint32_t mario = guest.u32(actor_address + actor::kMario);
     player.input_disabled = plausible(mario) && (guest.call(fn::kIsInputDisable, mario) & 0xFFu) != 0u;
+    // MarioActor::mMarioAnim (+0x234) -> MarioAnimator::mXanimePlayer (+0xC): mCurrentBckName (+0x58),
+    // mCurrentAnimation (+0x60, a XanimeGroupInfo, whose motions are at +0x20; in MEM1 or MEM2), mResourceTable
+    // (+0x70) -> mResourceHolder (+0x6C) -> mMotionResTable (+4): ResFileInfo[mCount] of 0x18, mResource and mName.
+    const auto in_memory = [](std::uint32_t at) {
+        return plausible(at) || (at >= 0x90000000u && at < 0x94000000u && (at & 3u) == 0u);
+    };
+    const std::uint32_t animator = guest.u32(actor_address + 0x234u);
+    const std::uint32_t xanime = plausible(animator) ? guest.u32(animator + 0x0Cu) : 0u;
+    if (plausible(xanime)) {
+        player.bck = guest.string(guest.u32(xanime + 0x58u), 48u);
+        const std::uint32_t group = guest.u32(xanime + 0x60u);
+        const std::uint32_t motion = in_memory(group) ? guest.u32(group + 0x20u) : 0u;
+        const std::uint32_t table = guest.u32(xanime + 0x70u);
+        const std::uint32_t holder = plausible(table) ? guest.u32(table + 0x6Cu) : 0u;
+        const std::uint32_t motions = plausible(holder) ? guest.u32(holder + 4u) : 0u;
+        if (motion != 0u && plausible(motions)) {
+            const std::uint32_t infos = guest.u32(motions);
+            const std::uint32_t count = std::min(guest.u32(motions + 4u), 4096u);
+            for (std::uint32_t i = 0; plausible(infos) && i < count; ++i) {
+                if (guest.u32(infos + i * 0x18u) != motion) continue;
+                player.motion = guest.string(guest.u32(infos + i * 0x18u + 0x10u), 48u);
+                break;
+            }
+        }
+    }
     return player;
 }
 
@@ -263,7 +290,8 @@ std::string player_json(const Player& player, unsigned index, int lives) {
            "\",\"health\":" + std::to_string(player.health) +
            ",\"input_disabled\":" + (player.input_disabled ? "true" : "false") + ",\"lives\":" +
            std::to_string(lives) + ",\"down\":" + (down.down ? "true" : "false") + ",\"out\":" +
-           (down.out ? "true" : "false") + "}";
+           (down.out ? "true" : "false") + ",\"bck\":\"" + agent::json_escape(player.bck) + "\",\"motion\":\"" +
+           agent::json_escape(player.motion) + "\"}";
 }
 
 // Free space in one of HeapMemoryWatcher's heaps (`field`: its offset there), in KB; -1 without one.
@@ -913,6 +941,29 @@ void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeService
     if (deterministic ? netplay_frame() % 30u == 0u : now - a.last_status_ms >= 500u) {
         a.last_status_ms = now;
         write_status(a, guest);
+    }
+    // GALAXY_TRACE_ANIM: each brother's animation as it changes (the bck asked for and the motion played).
+    static const bool trace_anim = [] {
+        char* value = nullptr;
+        std::size_t length = 0u;
+        const bool on = _dupenv_s(&value, &length, "GALAXY_TRACE_ANIM") == 0 && value != nullptr &&
+                        value[0] != '\0' && value[0] != '0';
+        std::free(value);
+        return on;
+    }();
+    if (trace_anim && !deterministic && read_scene(guest).in_game) {
+        SavedContext saved(guest.context());
+        const std::uint32_t first_actor = first_player(guest);
+        static std::array<std::string, 2> last;
+        const std::array<std::uint32_t, 2> actors = {first_actor, coop_second_player(first_actor)};
+        for (unsigned i = 0; i < 2u; ++i) {
+            const Player player = read_player(guest, actors[i]);
+            const std::string now_playing = player.bck + " -> " + player.motion;
+            if (player.actor == 0u || now_playing == last[i]) continue;
+            last[i] = now_playing;
+            std::fprintf(stderr, "[anim] frame %llu player %u (%08X): %s\n", static_cast<unsigned long long>(a.frame),
+                         i + 1u, player.actor, now_playing.c_str());
+        }
     }
 }
 
