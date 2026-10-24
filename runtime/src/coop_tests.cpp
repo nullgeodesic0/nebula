@@ -503,8 +503,67 @@ bool test_agent_commands() {
     return ok;
 }
 
+// A Star Pointer in the second player's half: the world point under it comes back from its screen position and
+// EFB depth through his camera and off-centre lens, not the first player's; past reach the shot aims along his
+// pointer's ray, within the distance the game keeps.
+bool test_star_bit_aim() {
+    bool ok = true;
+    // A GameCube perspective (MTXPerspective: 45 degrees, 16:9, near 10, far 100000), moved into an angled half.
+    const float cot = 1.0f / std::tan(22.5f * 3.14159265f / 180.0f);
+    const float n = 10.0f;
+    const float f = 100000.0f;
+    std::array<float, 16> lens{cot / (16.0f / 9.0f), 0.0f, 0.0f, 0.0f, 0.0f, cot, 0.0f, 0.0f,
+                               0.0f, 0.0f, -n / (f - n), -(f * n) / (f - n), 0.0f, 0.0f, -1.0f, 0.0f};
+    std::array<float, 16> half = lens;
+    split_projection(half, 0.3f, 0.5f, 1.0f);
+    const Vec3 luigi{5000.0f, 0.0f, 2000.0f};
+    const CameraMatrices luigi_camera = look_at(luigi + Vec3{-300.0f, 400.0f, 1000.0f}, {0.0f, 1.0f, 0.0f}, luigi);
+    const CameraMatrices mario_camera = look_at({0.0f, 400.0f, 1000.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
+
+    // What the half draws at a point beside the second player: its screen position and 24-bit depth.
+    const Vec3 world = luigi + Vec3{250.0f, 60.0f, -400.0f};
+    const Vec3 view = transform_point(luigi_camera.view, world);
+    const float w = -view.z;
+    const float ndc_x = (half[0] * view.x + half[2] * view.z) / w;
+    const float ndc_y = (half[5] * view.y + half[6] * view.z) / w;
+    const float depth = 1.0f + (half[10] * view.z + half[11]) / w;
+    const float efb_depth = std::round(depth * 16777215.0f) / 16777215.0f;
+    ok &= expect(ndc_x > -1.0f && ndc_x < 1.0f && ndc_y > -1.0f && ndc_y < 1.0f, "the point is on the screen");
+
+    const Vec3 back = unproject_pointer(luigi_camera, half, ndc_x, ndc_y, depth);
+    ok &= expect(length(back - world) < 0.5f, "unprojected through his camera and half: the point drawn there");
+    const Vec3 quantized = unproject_pointer(luigi_camera, half, ndc_x, ndc_y, efb_depth);
+    ok &= expect(length(quantized - world) < 5.0f, "from the EFB's 24-bit depth: within a few units");
+    const Vec3 shared = unproject_pointer(mario_camera, lens, ndc_x, ndc_y, depth);
+    ok &= expect(length(shared - world) > 1000.0f, "through the first player's camera: somewhere else entirely");
+    const Vec3 unshifted = unproject_pointer(luigi_camera, lens, ndc_x, ndc_y, depth);
+    ok &= expect(length(unshifted - world) > 100.0f, "his camera without his half's lens shift misses too");
+    const Vec3 ranged = unproject_pointer(luigi_camera, half, ndc_x, ndc_y, 0.5f + 0.5f * depth, 0.5f, 1.0f);
+    ok &= expect(length(ranged - world) < 0.5f, "a viewport depth range (near 0.5) is read as GX writes it");
+
+    const Vec3 eye = pose_of(luigi_camera.inverse).eye;
+    const Vec3 ray = pointer_world_ray(luigi_camera, half, ndc_x, ndc_y);
+    ok &= expect(dot(ray, normalized(world - eye, {})) > 0.99999f, "the pointer's ray runs from his eye through it");
+
+    // The shot's goal (StarPieceShooter::calcShootGoalUsingPointingDepth, from the second player).
+    ok &= expect(length(star_bit_shot_goal(luigi, world, true, eye, ray) - world) < 1e-3f, "within reach: the point");
+    const Vec3 far_point = luigi + Vec3{0.0f, 0.0f, -3500.0f};
+    ok &= expect(length(star_bit_shot_goal(luigi, far_point, true, eye, ray) - (luigi + Vec3{0.0f, 0.0f, -3000.0f})) < 0.1f,
+                 "3000 to 4000 away: pulled in to 3000, as the game does");
+    const Vec3 sky = star_bit_shot_goal(luigi, {}, false, eye, ray);
+    ok &= expect(near(length(sky - luigi), kShotKept, 0.5f), "no point (the sky): on the ray, as far as the game keeps");
+    ok &= expect(dot(normalized(sky - eye, {}), ray) > 0.99999f, "and under the pointer");
+    const Vec3 beyond = star_bit_shot_goal(luigi, luigi + Vec3{0.0f, 0.0f, -9000.0f}, true, eye, ray);
+    ok &= expect(near(length(beyond - luigi), kShotKept, 0.5f) && dot(normalized(beyond - eye, {}), ray) > 0.99999f,
+                 "a point past 4000: the ray too");
+    const Vec3 away = star_bit_shot_goal(luigi, {}, false, luigi + Vec3{0.0f, 0.0f, 5000.0f}, {1.0f, 0.0f, 0.0f});
+    ok &= expect(near(length(away - luigi), kShotKept, 0.5f), "a ray passing far from him: kept within reach");
+    return ok;
+}
+
 int main() {
     bool passed = true;
+    passed &= test_star_bit_aim();
     passed &= test_characters_and_archives();
     passed &= test_kpad_layout_and_edges();
     passed &= test_shake_is_twelve_frames_per_press();

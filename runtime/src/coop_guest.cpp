@@ -242,6 +242,32 @@ constexpr std::uint32_t kPointerLayoutChannel = 0x34u;  // StarPointerLayout::mP
 // target tests use, last frame's) at kPointerPastPos.
 constexpr std::uint32_t kStarPointerControllerSize = 0x74u;
 constexpr std::uint32_t kPointerPastPos = 0x04u;
+// StarPointerController: mPastInfo's mDrawReady (the depth below came this frame) and mZDepth (the EFB depth under
+// mPastInfo.mPos), and mWorldPos (that point in the world, where Star Bits aim). StarPointerDirector +0x10:
+// StarPointerPeekZ, its viewport (GXGetViewportv: x, y, width, height, near, far) at +0x28.
+constexpr std::uint32_t kPointerPastDrawReady = 0x0Du;
+constexpr std::uint32_t kPointerPastDepth = 0x10u;
+constexpr std::uint32_t kPointerWorldPos = 0x64u;
+constexpr std::uint32_t kPointerPeekZ = 0x10u;
+constexpr std::uint32_t kPeekZViewport = 0x28u;
+// Star Bit shots (StarPieceDirector.cpp): StarPieceShooter, one per pointer (_A0 its channel), the sensor it
+// locks on to (_90, or last frame's _98), and its code: calcShootGoalUsingPointingDepth (where the shot aims,
+// mPosition) and shoot (StarPiece::throwToTarget / throwToTargetCore, hook 86).
+constexpr std::uint32_t kStarPieceShooterVtable = 0x8058F4D0u;  // __vt__16StarPieceShooter
+constexpr std::uint32_t kShooterChannel = 0xA0u;
+constexpr std::uint32_t kShooterSensor = 0x90u;
+constexpr std::uint32_t kShooterLastSensor = 0x98u;
+constexpr std::uint32_t kActorGravity = 0x3Cu;    // LiveActor::mGravity
+constexpr std::uint32_t kSensorPosition = 0x04u;  // HitSensor::mPosition
+constexpr std::uint32_t kThrowToTargetCore = 0x8023ED88u;  // StarPiece::throwToTargetCore(target, from, gravity, f32, bool)
+constexpr bool in_shoot_goal(std::uint32_t pc) { return pc >= 0x80241B5Cu && pc < 0x80241CF4u; }
+constexpr bool in_shooter_shoot(std::uint32_t pc) { return pc >= 0x802416D0u && pc < 0x802418C4u; }
+// The second player's shot leaves from his own camera as the game's does from its (StarPieceDirector::
+// calcPosCameraShoot: 300 to the side, the second pointer's to the left, 30 ahead) in split screen, and from above
+// his head on one shared screen.
+constexpr float kShotCameraSide = 300.0f;
+constexpr float kShotCameraAhead = 30.0f;
+constexpr float kShotAboveHead = 160.0f;
 
 // Pull Stars (GCapture.cpp): the one GCapture, its idle nerves, and its and GCaptureTarget's code.
 constexpr std::uint32_t kGCaptureVtable = 0x80580814u;
@@ -2011,6 +2037,141 @@ void star_piece_code_end(const Guest& guest, State& s) {
     s.piece_swapped = false;
 }
 
+// ---- Star Bit shots (docs/MULTIPLAYER.md "Star Pointers") ----
+// Each pointer has its StarPieceShooter, which the game runs with its one player and one camera: the second
+// player's shot aimed from the first player (MR::getPlayerPos, his gravity), through the shared camera (the
+// pointer's world point, StarPointerController::mWorldPos, and the ray past it) and left from that camera. Here the
+// second pointer's shot aims from the second player and leaves from his camera, and in split screen either
+// pointer aims through the camera and lens of the picture it is over (the one the depth under it was drawn with).
+
+// The StarPieceShooter making the call at hand (its `this`, kept in a saved register).
+std::uint32_t shooter_in_registers(const Guest& guest, const PpcContext* context) {
+    for (unsigned r = 31u; r >= 24u; --r) {
+        const std::uint32_t candidate = context->gpr[r];
+        if (plausible(candidate) && guest.u32(candidate) == kStarPieceShooterVtable) return candidate;
+    }
+    return 0u;
+}
+
+// The picture a pointer is over: its half of the split screen, or online its own player's (each PC shows its
+// player's view on the whole screen).
+std::size_t pointer_picture(const Guest& guest, const State& s, std::uint32_t channel) {
+    return online_views() ? channel : half_under_pointer(guest, s, channel);
+}
+
+// After MR::getPlayerPos in StarPieceShooter::calcShootGoalUsingPointingDepth (r3 the player's position): the second
+// pointer's shot aims from the second player. In split screen the pointer's world point is made again with its
+// picture's camera and lens (coop::star_bit_shot_goal), before the shooter reads it.
+void shot_goal_player_pos(const Guest& guest, const State& s, PpcContext* context) {
+    const std::uint32_t shooter = shooter_in_registers(guest, context);
+    if (shooter == 0u || !plausible(s.first) || !plausible(s.second)) return;
+    const std::uint32_t channel = guest.u32(shooter + kShooterChannel);
+    if (channel > 1u || (channel == 1u && (s.down[1].down || !plausible(s.second_mario)))) return;
+    if (channel == 1u) context->gpr[3] = s.second + actor::kPosition;
+    if (!s.pointers.split || !plausible(context->gpr[3])) return;
+    const coop::Vec3 player = guest.vec(context->gpr[3]);
+    SavedContext saved(context);
+    const std::uint32_t director = guest.call(fn::kGetStarPointerDirector);
+    const std::uint32_t controllers = plausible(director) ? guest.u32(director + 4u) : 0u;
+    if (!plausible(controllers)) return;
+    const std::uint32_t controller = controllers + kStarPointerControllerSize * channel;
+    if (guest.u8(controller + kPointerPastDrawReady) == 0u) return;  // no new depth: the point stands
+    const auto width = static_cast<float>(guest.call(fn::kGetScreenWidth));
+    const auto height = static_cast<float>(guest.call(fn::kGetFrameBufferHeight) & 0xFFFFu);
+    const float ndc_x = guest.f32(controller + kPointerPastPos) / width * 2.0f - 1.0f;
+    const float ndc_y = 1.0f - guest.f32(controller + kPointerPastPos + 4u) / height * 2.0f;
+    float near_z = 0.0f;
+    float far_z = 1.0f;
+    const std::uint32_t peek = guest.u32(director + kPointerPeekZ);
+    if (plausible(peek)) {
+        const float n = guest.f32(peek + kPeekZViewport + 16u);
+        const float f = guest.f32(peek + kPeekZViewport + 20u);
+        if (std::isfinite(n) && std::isfinite(f) && f > n) {
+            near_z = n;
+            far_z = f;
+        }
+    }
+    const std::uint32_t depth_word = guest.u32(controller + kPointerPastDepth) & 0xFFFFFFu;
+    const std::size_t picture = pointer_picture(guest, s, channel);
+    const coop::CameraMatrices& camera = s.pointers.camera[picture];
+    const std::array<float, 16>& projection = s.pointers.projection[picture];
+    if (!finite(camera.inverse) || projection[0] == 0.0f || projection[5] == 0.0f || !std::isfinite(ndc_x) ||
+        !std::isfinite(ndc_y)) {
+        return;
+    }
+    const coop::Vec3 point = coop::unproject_pointer(camera, projection, ndc_x, ndc_y,
+                                                     static_cast<float>(depth_word) / 16777215.0f, near_z, far_z);
+    // The far plane's depth (the sky) shows no point.
+    const bool has_point = depth_word < 0xFFFFFFu && std::isfinite(coop::length(point));
+    const coop::Vec3 goal = coop::star_bit_shot_goal(player, point, has_point, coop::pose_of(camera.inverse).eye,
+                                                     coop::pointer_world_ray(camera, projection, ndc_x, ndc_y));
+    if (std::isfinite(coop::length(goal))) guest.set_vec(controller + kPointerWorldPos, goal);
+}
+
+// The direct call at `pc` (a `bl`): its target.
+std::uint32_t direct_call_target(const Guest& guest, std::uint32_t pc) {
+    const std::uint32_t word = guest.u32(pc);
+    if ((word >> 26u) != 18u) return 0u;
+    std::uint32_t offset = word & 0x03FFFFFCu;
+    if ((offset & 0x02000000u) != 0u) offset |= 0xFC000000u;  // sign
+    return ((word & 2u) != 0u ? 0u : pc) + offset;
+}
+
+// Before StarPiece::throwToTarget(sensor, from, gravity, speed) or throwToTargetCore(target, from, gravity, speed,
+// bool) from StarPieceShooter::shoot, the second pointer's: the Star Bit leaves from the second player's camera in
+// split screen (as the game's shot leaves from its camera) and from above his head on a shared screen, under his
+// gravity. A thrown point stops at the first wall seen from the camera the pointer looked through (the game's
+// test used the shared camera).
+void shot_from_second_player(const Guest& guest, const State& s, PpcContext* context, std::uint32_t guest_pc) {
+    const std::uint32_t shooter = shooter_in_registers(guest, context);
+    if (shooter == 0u || guest.u32(shooter + kShooterChannel) != 1u || !plausible(s.first) || !plausible(s.second) ||
+        !plausible(s.second_mario) || s.down[1].down) {
+        return;
+    }
+    const std::uint32_t target_at = context->gpr[4];
+    const std::uint32_t from_at = context->gpr[5];
+    const std::uint32_t gravity_at = context->gpr[6];
+    if (!plausible(target_at) || !plausible(from_at) || !plausible(gravity_at)) return;
+    const coop::Vec3 luigi = guest.vec(s.second + actor::kPosition);
+    const coop::Vec3 up = player_up(guest, s.second_mario);
+    coop::Vec3 from = luigi + up * kShotAboveHead;
+    if (s.pointers.split && finite(s.pointers.camera[1].inverse)) {
+        const std::array<float, 12>& m = s.pointers.camera[1].inverse;
+        const coop::CameraPose pose = coop::pose_of(m);
+        const coop::Vec3 side = coop::normalized({m[0], m[4], m[8]}, {1.0f, 0.0f, 0.0f});
+        from = pose.eye - side * kShotCameraSide + pose.forward * kShotCameraAhead;
+    }
+    if (!std::isfinite(coop::length(from))) return;
+    guest.set_vec(from_at, from);
+    guest.set_vec(gravity_at, up * -1.0f);
+    // The point aimed at: the sensor locked on to, else the shooter's goal.
+    std::uint32_t sensor = guest.u32(shooter + kShooterSensor);
+    if (!plausible(sensor)) sensor = guest.u32(shooter + kShooterLastSensor);
+    const coop::Vec3 aimed = plausible(sensor) ? guest.vec(sensor + kSensorPosition) : guest.vec(shooter + actor::kPosition);
+    const bool core = direct_call_target(guest, guest_pc) == kThrowToTargetCore;
+    coop::Vec3 to = core ? guest.vec(target_at) : aimed;
+    if (s.pointers.split && core) {
+        // The first wall before it, from the camera the pointer looked through.
+        const coop::Vec3 eye = coop::pose_of(s.pointers.camera[pointer_picture(guest, s, 1u)].inverse).eye;
+        to = aimed;
+        {
+            SavedContext saved(context);
+            Guest::Frame frame(guest);
+            const std::uint32_t hit = frame.vec(0, aimed);
+            const std::uint32_t found = guest.call(fn::kFirstPolyOnLineToMap, hit, frame.scratch(), frame.vec(1, eye),
+                                                   frame.vec(2, aimed - eye));
+            const coop::Vec3 wall = guest.vec(hit);
+            if ((found & 0xFFu) != 0u && std::isfinite(coop::length(wall)) &&
+                coop::length(wall - eye) < coop::length(aimed - eye)) {
+                to = wall;
+            }
+        }
+        if (std::isfinite(coop::length(to))) guest.set_vec(target_at, to);
+    }
+    trace("star bit shot by the second player: from (%.0f %.0f %.0f) to (%.0f %.0f %.0f), he is at (%.0f %.0f %.0f)%s",
+          from.x, from.y, from.z, to.x, to.y, to.z, luigi.x, luigi.y, luigi.z, s.pointers.split ? ", split" : "");
+}
+
 // ---- 3D sound by the nearer brother ----
 // The game hears 3D sounds from its camera (AudCameraWatcher): far from the first player, the second player's
 // surroundings fell silent. After AudDopplerAudienceState::convertAbsToRel (every positioned sound's volume, pan,
@@ -3398,7 +3559,9 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
     }
     if (id == call::kStartBossBgm) return;
     if (id == call::kStarPieceCode) {
-        star_piece_code_begin(Guest(context, memory, services, guest_pc), s);
+        const Guest guest(context, memory, services, guest_pc);
+        if (in_shooter_shoot(guest_pc)) shot_from_second_player(guest, s, context, guest_pc);
+        star_piece_code_begin(guest, s);
         return;
     }
     if (id == call::kOneUp) {
@@ -3711,6 +3874,8 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
     if (id == call::kGetPlayerPos) {
         if (guest_pc >= 0x8002574Cu && guest_pc < 0x80025814u) {
             switch_area_player_pos(guest, s, context);  // SwitchArea::movement
+        } else if (in_shoot_goal(guest_pc)) {
+            shot_goal_player_pos(guest, s, context);
         } else {
             bunny_player_pos(guest, s, context, guest_pc);
         }
