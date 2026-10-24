@@ -3189,6 +3189,43 @@ std::vector<SettingsRow> game_page(const RuntimeSettings& runtime) {
                     },
                     "SHOWS YOUR GALAXY AND STAR IN DISCORD WHILE IT RUNS"});
     {
+        static constexpr galaxy::ButtonPrompts kPrompts[] = {galaxy::ButtonPrompts::Auto, galaxy::ButtonPrompts::Wii,
+                                                             galaxy::ButtonPrompts::Xbox, galaxy::ButtonPrompts::DualSense};
+        static constexpr const char* kPromptNames[] = {"AUTO", "WII", "XBOX", "PLAYSTATION"};
+        rows.push_back({"BUTTON PROMPTS", kPromptNames[static_cast<unsigned>(runtime.button_prompts) & 3u],
+                        [](RenderConfig&, int delta) {
+                            // Changes live: the input poll publishes the prompts (button_prompts.h).
+                            RuntimeSettings settings = get_runtime_settings();
+                            const unsigned next = settings_step(static_cast<unsigned>(settings.button_prompts) & 3u,
+                                                                static_cast<unsigned>(std::size(kPrompts)), delta);
+                            if (kPrompts[next] != settings.button_prompts) {
+                                settings.button_prompts = kPrompts[next];
+                                set_runtime_settings(settings);
+                                s_native_settings_dirty.store(true, std::memory_order_release);
+                            }
+                        },
+                        "THE BUTTONS THE GAME SHOWS. AUTO: THE CONTROLLER IN USE"});
+    }
+    rows.push_back({"CUSTOM VOICE", runtime.custom_voice ? std::string("ON") : std::string("OFF"),
+                    [](RenderConfig&, int delta) {
+                        if (delta == 0) return;
+                        RuntimeSettings settings = get_runtime_settings();
+                        settings.custom_voice = !settings.custom_voice;
+                        set_runtime_settings(settings);
+                        s_native_settings_dirty.store(true, std::memory_order_release);
+                    },
+                    "MARIO'S VOICE FROM A MOD'S VOICE FOLDER, WHEN ONE IS ON"});
+    rows.push_back({"HOME MENU",
+                    galaxy::input::get_controls_config().home_menu ? std::string("ON") : std::string("OFF"),
+                    [](RenderConfig&, int delta) {
+                        if (delta == 0) return;
+                        galaxy::input::ControlsConfig controls = galaxy::input::get_controls_config();
+                        controls.home_menu = !controls.home_menu;
+                        galaxy::input::set_controls_config(controls);
+                        s_native_settings_dirty.store(true, std::memory_order_release);
+                    },
+                    "WHETHER WII HOME OPENS THE HOME MENU"});
+    {
         rows.push_back({"MIIS", {}, nullptr, {}, true});
         std::string status;
         {
