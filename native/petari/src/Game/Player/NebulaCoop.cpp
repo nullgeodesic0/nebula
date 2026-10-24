@@ -20,7 +20,14 @@
 #include "Game/Util/CameraUtil.hpp"
 #include "Game/Util/DemoUtil.hpp"
 #include "Game/Util/ActorShadowUtil.hpp"
+#include "Game/Screen/GameSceneLayoutHolder.hpp"
+#include "Game/Screen/MarioMeter.hpp"
+#include "Game/Screen/MeterLayout.hpp"
 #include "Game/Util/DrawUtil.hpp"
+#include "Game/Util/LayoutUtil.hpp"
+#include "Game/Util/ObjUtil.hpp"
+#include <nw4r/lyt/pane.h>
+#include "Game/Util/EventUtil.hpp"
 #include "Game/Util/EffectUtil.hpp"
 #include "Game/Util/GamePadUtil.hpp"
 #include "Game/Util/LiveActorUtil.hpp"
@@ -86,20 +93,26 @@ namespace {
     const f32 kCatchUpDistance = 3000.0f;
     const f32 kCatchUpStillDistance = 300.0f;
 
-    // A launch star's virtual table (GALAXY_TEST_LAUNCH_STAR tells launch stars by it).
-    const void* sLaunchStarClass;
+    // Tests: the virtual tables of the kinds of objects the tests put players on (NEBULA_TEST_PUT_*), noted as they
+    // are made.
+    const void* sTestClasses[NEBULA_TEST_PUT_KINDS];
+    const char* const sTestKindNames[NEBULA_TEST_PUT_KINDS] = {"launch star", "pole", "Star Ball", "manta ray"};
 
     struct NearestStar {
         TVec3f mFrom;
         LiveActor* mStar;
         f32 mDistance;
+        u32 mKind;
+        u32 mCount;
     };
 
     void considerStar(NameObj* pObj, void* pData) {
         NearestStar* pNearest = static_cast< NearestStar* >(pData);
-        if (pObj == nullptr || *reinterpret_cast< const void* const* >(pObj) != sLaunchStarClass) {
+        if (pObj == nullptr || sTestClasses[pNearest->mKind] == nullptr ||
+            *reinterpret_cast< const void* const* >(pObj) != sTestClasses[pNearest->mKind]) {
             return;
         }
+        pNearest->mCount++;
         LiveActor* pStar = static_cast< LiveActor* >(pObj);
         const f32 distance = PSVECDistance(&pStar->mPosition, &pNearest->mFrom);
         if (!MR::isDead(pStar) && !MR::isHiddenModel(pStar) && distance < pNearest->mDistance) {
@@ -108,21 +121,37 @@ namespace {
         }
     }
 
-    // GALAXY_TEST_LAUNCH_STAR: the first player put on the scene's nearest launch star in play (a shake fires it).
-    void testLaunchStar() {
+    // The scene's nearest object in play of a kind (NEBULA_TEST_PUT_*) to a point; null when it has none.
+    LiveActor* findNearest(u32 kind, const TVec3f& rFrom) {
         NameObjHolder* pHolder = SingletonHolder< GameSystem >::get()->mSceneController->mObjHolder;
-        NearestStar nearest = {sState.mFirst->mPosition, nullptr, 1.0e9f};
-        if (pHolder != nullptr && sLaunchStarClass != nullptr) {
+        NearestStar nearest = {rFrom, nullptr, 1.0e9f, kind, 0};
+        if (pHolder != nullptr) {
             pHolder->forEach(considerStar, &nearest);
         }
-        LiveActor* pStar = nearest.mStar;
+        OSReport("coop test: %u %s(s) in this scene\n", nearest.mCount, sTestKindNames[kind]);
+        return nearest.mStar;
+    }
+
+    // GALAXY_TEST_LAUNCH_STAR: the first player put on the scene's nearest launch star in play (a shake fires it).
+    void testLaunchStar() {
+        LiveActor* pStar = findNearest(NEBULA_TEST_PUT_LAUNCH_STAR, sState.mFirst->mPosition);
         if (pStar == nullptr) {
-            OSReport("coop test: no launch star in this scene\n");
             return;
         }
-        OSReport("coop test: the first player to the launch star at %.0f %.0f %.0f (%s)\n", pStar->mPosition.x,
-                 pStar->mPosition.y, pStar->mPosition.z, MR::isDead(pStar) ? "dead" : "alive");
+        OSReport("coop test: the first player to the launch star at %.0f %.0f %.0f\n", pStar->mPosition.x,
+                 pStar->mPosition.y, pStar->mPosition.z);
         MR::setPlayerPos(pStar->mPosition);
+    }
+
+    // GALAXY_TEST_PUT: a player put at the scene's nearest object of a kind (call outside the second's turn; the
+    // second's own placement runs in his turn). Returns the object.
+    LiveActor* testPutTarget(u32 kind, MarioActor* pPlayer) {
+        LiveActor* pObj = findNearest(kind, pPlayer->mPosition);
+        if (pObj != nullptr) {
+            OSReport("coop test: the %s player to the %s at %.0f %.0f %.0f\n", pPlayer == sState.mFirst ? "first" : "second",
+                     sTestKindNames[kind], pObj->mPosition.x, pObj->mPosition.y, pObj->mPosition.z);
+        }
+        return pObj;
     }
 
     WPadHolder* padHolder() {
@@ -293,13 +322,20 @@ namespace {
         return pActor != nullptr && pActor->_934 && pActor->_924 != nullptr ? pActor->_924->mHost : nullptr;
     }
 
-    // The first player rides a vehicle (the Star Ball, the manta ray): the second goes along unseen at his side.
+    // A vehicle (the Star Ball, the manta ray), told by its class (Tamakoro::init and SurfRay::init note them; the
+    // objects' names are their placement's, in Japanese).
+    bool isVehicle(const LiveActor* pActor) {
+        if (pActor == nullptr) {
+            return false;
+        }
+        const void* const pClass = *reinterpret_cast< const void* const* >(pActor);
+        return (sTestClasses[NEBULA_TEST_PUT_STAR_BALL] != nullptr && pClass == sTestClasses[NEBULA_TEST_PUT_STAR_BALL]) ||
+               (sTestClasses[NEBULA_TEST_PUT_RAY] != nullptr && pClass == sTestClasses[NEBULA_TEST_PUT_RAY]);
+    }
+
+    // The first player rides a vehicle: the second goes along unseen at his side.
     bool firstOnVehicle() {
-        const LiveActor* pRide = riddenBy(sState.mFirst);
-        return pRide != nullptr && (const_cast< LiveActor* >(pRide)->getSensor("Bind") != nullptr &&
-                                        const_cast< LiveActor* >(pRide)->getSensor("Bind")->isType(ATYPE_SPHERE_PLAYER_BIND) ||
-                                    MR::isEqualString(pRide->mName, "SurfRay") ||
-                                    MR::isEqualString(pRide->mName, "SurfRayTutorial"));
+        return isVehicle(riddenBy(sState.mFirst));
     }
 
     void setHidden(bool hidden) {
@@ -324,6 +360,62 @@ namespace {
             }
         }
         pSecond->_482 = hidden;
+    }
+
+    // The second player's life meter (GameSceneLayoutHolder::mSecondMeter, the game's HitPointMeter made again): his
+    // health, his colour, where the first player's stands alone (the first's moved left beside it), shown while he
+    // plays and the game's own meter shows.
+    const char* const sMeterTintPanes[] = {"PicBase", "PicBaseW", "PicPoint1", "PicPoint2", "PicPoint3",
+                                           "PicPoint1W", "PicPoint2W", "PicPoint3W"};
+    const f32 kFirstMeterShift = -85.0f;
+
+    void updateSecondMeter(bool shown) {
+        if (!MR::isExistSceneObj(SceneObj_GameSceneLayoutHolder)) {
+            return;
+        }
+        GameSceneLayoutHolder* pHolder = MR::getGameSceneLayoutHolder();
+        MeterLayout* pMeter = pHolder->mSecondMeter;
+        MeterLayout* pFirst = pHolder->mMarioMeter != nullptr ? pHolder->mMarioMeter->mHitPointMeter : nullptr;
+        if (pMeter == nullptr || pFirst == nullptr) {
+            return;
+        }
+        // The first player's meter moved left by its root pane, in layout units (the HUD's widescreen fitting
+        // works on the panes below it).
+        static MeterLayout* spPlaced;
+        nw4r::lyt::Pane* pFirstRoot = MR::getRootPane(pFirst);
+        shown = shown && !MR::isDead(pFirst) && !MR::isHiddenLayout(pFirst) && !pHolder->mMarioMeter->mUseSuddenDeath;
+        if (!shown) {
+            if (spPlaced == pFirst) {
+                pFirstRoot->mTranslate.x -= kFirstMeterShift;
+                spPlaced = nullptr;
+            }
+            if (!MR::isHiddenLayout(pMeter)) {
+                MR::hideLayout(pMeter);
+            }
+            return;
+        }
+        if (spPlaced != pFirst) {
+            pFirstRoot->mTranslate.x += kFirstMeterShift;
+            spPlaced = pFirst;
+            pMeter->initCount(sState.mSecond->mHealth);
+            pMeter->requestActive();
+        }
+        if (MR::isHiddenLayout(pMeter)) {
+            MR::showLayout(pMeter);
+        }
+        pMeter->setCount(sState.mSecond->mHealth);
+        // His colour, set each frame (the meter's animations set the colours).
+        for (u32 i = 0; i < ARRAY_SIZE(sMeterTintPanes); i++) {
+            nw4r::lyt::Pane* pPane = MR::getPane(pMeter, sMeterTintPanes[i]);
+            if (pPane == nullptr) {
+                continue;
+            }
+            for (u32 corner = 0; corner < 4; corner++) {
+                pPane->SetVtxColorElement(corner * 4 + 0, coop::kSecondMeterTint[0]);
+                pPane->SetVtxColorElement(corner * 4 + 1, coop::kSecondMeterTint[1]);
+                pPane->SetVtxColorElement(corner * 4 + 2, coop::kSecondMeterTint[2]);
+            }
+        }
     }
 
     // The players do not pass through each other: each is pushed half the overlap apart (Mario::push keeps walls
@@ -369,6 +461,9 @@ namespace {
         if (sState.mLevelStart && sState.mControllableFrames >= coop::kLevelStartSettleFrames) {
             sState.mLevelStart = false;
             landBeside = true;
+            if (const u32 starBits = __NebulaOption(NEBULA_OPTION_TEST_STAR_BITS)) {
+                MR::addStarPiece(starBits);
+            }
         }
         // The first player taken somewhere far while the game had his controls (a launch star, a pipe, a warp):
         // the second joins him there once he has landed and has control again.
@@ -413,6 +508,31 @@ namespace {
         if (!sState.mLevelStart && sState.mTurns + 1 == __NebulaOption(NEBULA_OPTION_TEST_LAUNCH_STAR)) {
             testLaunchStar();
         }
+        // GALAXY_TEST_PUT: the first player now, the second in his turn below.
+        LiveActor* pPutSecondAt = nullptr;
+        {
+            const u32 put = __NebulaOption(NEBULA_OPTION_TEST_PUT);
+            if (put != 0 && !sState.mLevelStart && sState.mTurns + 1 == (put & 0xFFFFF)) {
+                const u32 kind = (put >> 20) & 0xF;
+                const bool second = (put >> 28) & 1;
+                LiveActor* pObj = kind < NEBULA_TEST_PUT_KINDS ? testPutTarget(kind, second ? pSecond : pFirst) : nullptr;
+                if (pObj != nullptr && !second) {
+                    // Onto a Star Ball from above (its centre is inside it).
+                    MR::setPlayerPos(kind == NEBULA_TEST_PUT_STAR_BALL ? pObj->mPosition + TVec3f(0.0f, 300.0f, 0.0f)
+                                                                       : pObj->mPosition);
+                } else {
+                    pPutSecondAt = pObj;
+                }
+            }
+        }
+        // Tests: what the second player rides, every two seconds.
+        if (sState.mTurns % 120 == 1 && __NebulaOption(NEBULA_OPTION_TEST_PUT) != 0) {
+            const LiveActor* pRide = riddenBy(pSecond);
+            const LiveActor* pFirstRide = riddenBy(pFirst);
+            OSReport("coop test: second at %.0f %.0f %.0f rides %s, hidden %d; first rides %s\n", pSecond->mPosition.x,
+                     pSecond->mPosition.y, pSecond->mPosition.z, pRide != nullptr ? pRide->mName : "nothing",
+                     sState.mHidden, pFirstRide != nullptr ? pFirstRide->mName : "nothing");
+        }
 
         // His turn.
         enterSecond();
@@ -440,7 +560,9 @@ namespace {
             }
         }
         // MR::setPlayerPos moves the scene's player: him, in his turn.
-        if (comeBack) {
+        if (pPutSecondAt != nullptr) {
+            MR::setPlayerPos(pPutSecondAt->mPosition);
+        } else if (comeBack) {
             // Back from a fall: beside the first, his state as at a fresh start.
             MR::setPlayerPosAndWait(besideFirst());
         } else if (!sState.mPresent || sState.mTravelling || landBeside || down || riding) {
@@ -452,6 +574,7 @@ namespace {
         }
         leaveSecond();
 
+        updateSecondMeter(sState.mPresent && !sState.mLevelStart && !down && !riding);
         if (!sState.mPresent || sState.mLevelStart || down || riding) {
             sState.mSplit.reset();
             sState.mFollow.reset();
@@ -460,7 +583,11 @@ namespace {
         }
         bumpPlayers();
         CameraContext* pContext = cameraContext();
-        const bool secondEvent = pSecond->mMario->isInputDisable() && !demo;
+        // His own event: his controls held, or a launch star (or another non-vehicle object) carrying him.
+        const LiveActor* pSecondRide = riddenBy(pSecond);
+        const bool secondEvent =
+            !demo && (pSecond->mMario->isInputDisable() ||
+                      (pSecondRide != nullptr && !isVehicle(pSecondRide) && MR::isEventCameraActive()));
         if (pContext == nullptr || holdHere || sState.mTravelling) {
             // One screen while the game holds the players (a cutscene, a level's opening): the split eases out.
             if (sState.mSplit.update(0.0f, 0.0f) == 0.0f) {
@@ -472,9 +599,12 @@ namespace {
         }
         // His own event: if the game camera went with him, the first player's half follows the first meanwhile.
         const coop::CameraMatrices gameCamera = pContext != nullptr ? readCamera(pContext) : coop::CameraMatrices{};
+        // The game camera went with him when an event camera runs that the first player did not start, or it is
+        // nearer him.
         sState.mSecondEvent = secondEvent && pContext != nullptr &&
-                              coop::camera_is_second_players(coop::pose_of(gameCamera.inverse).eye,
-                                                             toVec(pFirst->mPosition), toVec(pSecond->mPosition));
+                              ((MR::isEventCameraActive() && !firstHeld) ||
+                               coop::camera_is_second_players(coop::pose_of(gameCamera.inverse).eye,
+                                                              toVec(pFirst->mPosition), toVec(pSecond->mPosition)));
         if (sState.mSecondEvent) {
             const coop::Vec3 up = toVec(pFirst->mMario->getUpVec());
             if (!sState.mFirstFollow.started()) {
@@ -543,8 +673,50 @@ namespace NebulaCoop {
                  sState.mOwnIsLuigi ? "Mario" : "Luigi");
     }
 
-    void noteLaunchStar(const LiveActor* pStar) {
-        sLaunchStarClass = *reinterpret_cast< const void* const* >(pStar);
+    ShooterScope::ShooterScope(s32 channel) : mPlayer(false), mCamera(false) {
+        if (channel != 1 || sState.mSecond == nullptr || !sState.mPresent || sState.mHidden ||
+            MR::getMarioHolder()->getMarioActor() != sState.mFirst) {
+            return;
+        }
+        gIsLuigi = !sState.mOwnIsLuigi;
+        MR::getMarioHolder()->setMarioActor(sState.mSecond);
+        mPlayer = true;
+        CameraContext* pContext = cameraContext();
+        if (pContext != nullptr && splitShown() && !sState.mSecondEvent) {
+            sState.mGameCamera = readCamera(pContext);
+            memcpy(&sState.mGameProjection[0], &pContext->mProjection, sizeof(float) * 16);
+            writeCamera(pContext, coop::blend_cameras(sState.mGameCamera, sState.mFollowView, sState.mSplit.eased()));
+            setHalfProjection(pContext, true);
+            mCamera = true;
+        }
+    }
+
+    ShooterScope::~ShooterScope() {
+        if (mCamera) {
+            CameraContext* pContext = cameraContext();
+            writeCamera(pContext, sState.mGameCamera);
+            memcpy(&pContext->mProjection, &sState.mGameProjection[0], sizeof(float) * 16);
+        }
+        if (mPlayer) {
+            MR::getMarioHolder()->setMarioActor(sState.mFirst);
+            gIsLuigi = sState.mOwnIsLuigi;
+        }
+    }
+
+    bool isSecondInPlay() {
+        return sState.mSecond != nullptr && sState.mPresent;
+    }
+
+    bool isOtherBrother(const LiveActor* pActor, const LiveActor* pOther) {
+        return sState.mSecond != nullptr && pActor != pOther &&
+               (pActor == sState.mFirst || pActor == sState.mSecond) &&
+               (pOther == sState.mFirst || pOther == sState.mSecond);
+    }
+
+    void noteTestObject(u32 kind, const LiveActor* pObj) {
+        if (kind < NEBULA_TEST_PUT_KINDS) {
+            sTestClasses[kind] = *reinterpret_cast< const void* const* >(pObj);
+        }
     }
 
     BoundObjectScope::BoundObjectScope(const LiveActor* pActor) : mSwapped(false) {
@@ -570,12 +742,8 @@ namespace NebulaCoop {
         if (riddenBy(pOther) == pSensor->mHost) {
             return false;
         }
-        if (pActor == sState.mSecond) {
-            const LiveActor* pHost = pSensor->mHost;
-            if (pSensor->isType(ATYPE_SPHERE_PLAYER_BIND) || MR::isEqualString(pHost->mName, "SurfRay") ||
-                MR::isEqualString(pHost->mName, "SurfRayTutorial")) {
-                return false;
-            }
+        if (pActor == sState.mSecond && (pSensor->isType(ATYPE_SPHERE_PLAYER_BIND) || isVehicle(pSensor->mHost))) {
+            return false;
         }
         return true;
     }

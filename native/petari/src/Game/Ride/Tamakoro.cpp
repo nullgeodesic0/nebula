@@ -1,4 +1,5 @@
 #include "Game/Ride/Tamakoro.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #ifdef TARGET_PC
 #include <nebula_game_api.h>
 #endif
@@ -120,6 +121,9 @@ Tamakoro::Tamakoro(const char* pName)
 }
 
 void Tamakoro::init(const JMapInfoIter& rIter) {
+#ifdef TARGET_PC
+    NebulaCoop::noteTestObject(NEBULA_TEST_PUT_STAR_BALL, this);
+#endif
     MR::initDefaultPos(this, rIter);
     initModelManagerWithAnm("Tamakoro", nullptr, false);
     MR::connectToScene(this, MR::MovementType_Ride, MR::CalcAnimType_Ride, MR::DrawBufferType_IndirectMapObjStrongLight, MR::DrawType_None);

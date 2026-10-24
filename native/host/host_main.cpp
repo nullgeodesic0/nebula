@@ -2034,6 +2034,22 @@ uint32_t svc_option(void*, uint32_t what) {
 #else
         return 0;
 #endif
+    case NEBULA_OPTION_TEST_STAR_BITS: {
+        static const uint32_t count = [] {
+            const char* value = std::getenv("GALAXY_TEST_STAR_BITS");
+            return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+        }();
+        return count;
+    }
+    case NEBULA_OPTION_TEST_PUT: {
+        static const uint32_t put = [] {
+            const char* value = std::getenv("GALAXY_TEST_PUT");
+            unsigned kind = 0, player = 0, turn = 0;
+            return value != nullptr && sscanf_s(value, "%u,%u,%u", &kind, &player, &turn) == 3
+                ? (turn & 0xFFFFFu) | (kind & 0xFu) << 20 | (player & 1u) << 28 : 0u;
+        }();
+        return put;
+    }
     case NEBULA_OPTION_TEST_LAUNCH_STAR: {
         static const uint32_t turn = [] {
             const char* value = std::getenv("GALAXY_TEST_LAUNCH_STAR");
@@ -2353,7 +2369,56 @@ int svc_hbm(void*, uint32_t what, uint32_t value) {
 //   GALAXY_TEST_EVENTS actors@frame: the live actors with a model, by model name and position (where to teleport).
 std::atomic<bool> gTourDone{false};
 
+// GALAXY_STATE_HASH=<file>: every GALAXY_STATE_HASH_EVERY scene frames (60), a line "<scene frame> <hash>" of the
+// game's memory (each region, FNV-1a over 64-bit words), and with GALAXY_STATE_HASH_CHUNKS=1 a hash per megabyte
+// after it. Two runs with the same input that write the same lines computed the same game (netplay's determinism).
+void write_state_hash(uint64_t scene_frame) {
+    static FILE* file = [] {
+        const char* path = std::getenv("GALAXY_STATE_HASH");
+        FILE* opened = nullptr;
+        if (path != nullptr && path[0] != '\0') (void)fopen_s(&opened, path, "w");
+        return opened;
+    }();
+    if (file == nullptr) return;
+    static const uint64_t every = [] {
+        const char* value = std::getenv("GALAXY_STATE_HASH_EVERY");
+        const uint64_t parsed = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
+        return parsed != 0 ? parsed : 60ull;
+    }();
+    static const bool chunks = [] {
+        const char* value = std::getenv("GALAXY_STATE_HASH_CHUNKS");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (scene_frame % every != 0) return;
+    ensure_guest_memory();
+    uint64_t total = 1469598103934665603ull;
+    std::string chunk_text;
+    for (const galaxy::GuestMemoryRegion& region : gRegions) {
+        const auto* words = reinterpret_cast<const uint64_t*>(region.host_base);
+        const size_t count = region.size / sizeof(uint64_t);
+        constexpr size_t kChunkWords = (1u << 20) / sizeof(uint64_t);
+        for (size_t start = 0; start < count; start += kChunkWords) {
+            uint64_t hash = 1469598103934665603ull;
+            const size_t end = std::min(count, start + kChunkWords);
+            for (size_t i = start; i < end; ++i) {
+                hash = (hash ^ words[i]) * 1099511628211ull;
+            }
+            total = (total ^ hash) * 1099511628211ull;
+            if (chunks) {
+                char text[24];
+                std::snprintf(text, sizeof(text), " %08llx", static_cast<unsigned long long>(hash & 0xFFFFFFFFull));
+                chunk_text += text;
+            }
+        }
+    }
+    std::fprintf(file, "%llu %016llx%s\n", static_cast<unsigned long long>(scene_frame),
+                 static_cast<unsigned long long>(total), chunk_text.c_str());
+    std::fflush(file);
+}
+
 int svc_test_scene_frame(void*, NebulaTestAction* action) {
+    static uint64_t sHashFrame = 0;
+    write_state_hash(++sHashFrame);
     struct Stop {
         std::string stage;
         int32_t scenario;

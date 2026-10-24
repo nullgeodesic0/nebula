@@ -6,6 +6,7 @@ class CameraInfo;
 class CounterLayoutController;
 class InformationMessage;
 class MarioMeter;
+class MeterLayout;
 class MarioSubMeter;
 class MissLayout;
 #ifdef TARGET_PC
@@ -56,6 +57,8 @@ public:
     /* 0x34 */ CounterLayoutController* mCounterLayoutCtrl;
     /* 0x38 */ bool mIsActiveDefaultGameLayout;
 #ifdef TARGET_PC
+    // Nebula's co-op: the second player's life meter (NebulaCoop.cpp keeps it), null without co-op.
+    MeterLayout* mSecondMeter;
     // Nebula's achievement pop-up: GameScene runs and draws it (only in play, above everything else in 2D).
     NebulaAchievementToast* mAchievementToast;
     // Nebula's achievement board, in the Observatory (its Luma opens it); null elsewhere.

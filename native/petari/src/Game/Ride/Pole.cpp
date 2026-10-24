@@ -1,5 +1,6 @@
 #include "Game/Ride/Pole.hpp"
 #include "Game/Player/NebulaCoop.hpp"
+#include <nebula_game_api.h>
 #include "Game/LiveActor/HitSensor.hpp"
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Util/ActorCameraUtil.hpp"
@@ -85,6 +86,9 @@ Pole::Pole(const char* pName)
 }
 
 void Pole::init(const JMapInfoIter& rIter) {
+#ifdef TARGET_PC
+    NebulaCoop::noteTestObject(NEBULA_TEST_PUT_POLE, this);
+#endif
     MR::initDefaultPos(this, rIter);
     mBasePos.set(mPosition);
     mHeight = ::sHeightRate * mScale.y;

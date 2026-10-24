@@ -57,8 +57,32 @@ namespace NebulaCoop {
     // While the screen is split: the camera of the half the game camera does not draw (world-to-eye), for clipping.
     bool getOtherHalfView(TPos3f* pView);
 
-    // Tests (GALAXY_TEST_LAUNCH_STAR): a launch star's class, to tell launch stars among the scene's objects.
-    void noteLaunchStar(const LiveActor* pStar);
+    // Tests (GALAXY_TEST_LAUNCH_STAR, GALAXY_TEST_PUT): an object's class, to tell objects of its kind
+    // (NEBULA_TEST_PUT_*) among the scene's.
+    void noteTestObject(u32 kind, const LiveActor* pObj);
+
+    // StarPieceShooter::control for Wii Remote channel `channel`: the second Remote's shooter shoots from the second
+    // player, and in split screen aims through his half (the scene's camera is his meanwhile).
+    class ShooterScope {
+    public:
+        explicit ShooterScope(s32 channel);
+        ~ShooterScope();
+        // Whether the aim goes through the second player's half (the pointer's depth, read from the first's
+        // camera, does not hold there).
+        bool isOwnCamera() const {
+            return mCamera;
+        }
+
+    private:
+        bool mPlayer;
+        bool mCamera;
+    };
+
+    // Whether a second player is in this scene's play (the co-star's assists are off then).
+    bool isSecondInPlay();
+
+    // Whether `pOther` is the other brother of `pActor` (a player).
+    bool isOtherBrother(const LiveActor* pActor, const LiveActor* pOther);
 
     // The second player's MarioActor (null: none in this scene).
     MarioActor* getSecond();

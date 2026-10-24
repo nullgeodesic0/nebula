@@ -1,6 +1,22 @@
 #include "Game/Player/MarioActor.hpp"
 #include "Game/Util/GamePadUtil.hpp"
 #include "Game/Util/StarPointerUtil.hpp"
+#ifdef TARGET_PC
+#include "Game/Player/NebulaCoop.hpp"
+
+namespace {
+    // Nebula's co-op: the second Wii Remote is the second player's, not a co-star's: no jump assist from it.
+    bool isCoStarAssist() {
+        return !NebulaCoop::isSecondInPlay();
+    }
+}  // namespace
+#else
+namespace {
+    bool isCoStarAssist() {
+        return true;
+    }
+}  // namespace
+#endif
 
 void MarioActor::resetPadSwing() {
     _EF8 = 0;
@@ -88,7 +104,8 @@ bool MarioActor::isRequestSpin() const {
         return false;
     }
 
-    if (isJumping() && mMario->_3BC > 6 && MR::isStarPointerPointing2P(this, "\216\343" /* 弱 */, true, false) && MR::testCorePadTriggerA(1)) {
+    if (isCoStarAssist() && isJumping() && mMario->_3BC > 6 && MR::isStarPointerPointing2P(this, "\216\343" /* 弱 */, true, false) &&
+        MR::testCorePadTriggerA(1)) {
         return true;
     }
 
@@ -124,7 +141,7 @@ bool MarioActor::isRequestJump2P() const {
         return false;
     }
 
-    if (MR::isStarPointerPointing2P(this, "\216\343" /* 弱 */, true, false) && MR::testCorePadTriggerA(1)) {
+    if (isCoStarAssist() && MR::isStarPointerPointing2P(this, "\216\343" /* 弱 */, true, false) && MR::testCorePadTriggerA(1)) {
         return true;
     }
 
@@ -144,7 +161,7 @@ bool MarioActor::isKeepJump2P() const {
         return false;
     }
 
-    return MR::testCorePadButtonA(1);
+    return isCoStarAssist() && MR::testCorePadButtonA(1);
 }
 
 bool MarioActor::checkButtonType(u16 type, bool isObeyDisable) const {
@@ -365,7 +382,7 @@ bool MarioActor::isRequestSpinJump2P() const {
         return false;
     }
 
-    if (isJumping() && mMario->_3BC > 6 && MR::isStarPointerPointing2P(this, "\216\343" /* 弱 */, true, false) && MR::testCorePadTriggerA(1)) {
+    if (isCoStarAssist() && isJumping() && mMario->_3BC > 6 && MR::isStarPointerPointing2P(this, "\216\343" /* 弱 */, true, false) && MR::testCorePadTriggerA(1)) {
         return true;
     }
 

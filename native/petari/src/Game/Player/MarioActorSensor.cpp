@@ -2,6 +2,7 @@
 #include "Game/MapObj/CollectCounter.hpp"
 #include "Game/Player/Mario.hpp"
 #include "Game/Player/MarioActor.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/Player/MarioAnimator.hpp"
 #include "Game/Player/MarioConst.hpp"
 #include "Game/Player/MarioFoo.hpp"
@@ -332,6 +333,13 @@ void MarioActor::attackSensor(HitSensor* pOwn, HitSensor* pOther) {
     if (!isEnableNerveChange()) {
         return;
     }
+#ifdef TARGET_PC
+    // Nebula's co-op: the brothers' sensors pass each other by (their bodies push apart, NebulaCoop's bump);
+    // otherwise each treats the other as something to attack or ride.
+    if (NebulaCoop::isOtherBrother(this, pOther->mHost)) {
+        return;
+    }
+#endif
 
     if (pOwn->mType == ATYPE_PLAYER) {
         if (_934 && !getSensor("eye")->isValid()) {

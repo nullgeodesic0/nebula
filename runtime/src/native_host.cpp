@@ -3666,6 +3666,14 @@ struct PartnerFrame {
     bool present = false;            // channel 1 connected: he is in
     galaxy::input::LogicalInput logic{};
     bool shake = false;
+    // His pointer: moved by his controller's pointer stick (at `pointer_speed`) or its gyro, as the first
+    // player's (pointer_control.h); where it is, -1..1 across the picture.
+    float pointer_speed = 0.0f;
+    bool gyro_pointing = false;
+    float gyro_x = 0.0f;
+    float gyro_y = 0.0f;
+    float pointer_x = 0.0f;
+    float pointer_y = 0.0f;
 };
 PartnerFrame g_partner;
 
@@ -3679,6 +3687,11 @@ bool scripted_partner(std::uint64_t current_vi, NativeInputScriptOverlay& overla
     overlay = {};
     apply_button_script_env(overlay, current_vi, "GALAXY_INPUT_PARTNER_SCRIPT");
     apply_stick_script_env(overlay, current_vi, "GALAXY_INPUT_PARTNER_STICK_SCRIPT");
+    // GALAXY_INPUT_PARTNER_POINTER="x,y": his pointer held there (-1..1 across the picture).
+    static const std::optional<std::string> pointer = read_env_string("GALAXY_INPUT_PARTNER_POINTER");
+    if (pointer.has_value() && sscanf_s(pointer->c_str(), "%f,%f", &overlay.pointer_x, &overlay.pointer_y) == 2) {
+        overlay.has_pointer = true;
+    }
     return current_vi >= join_vi;
 }
 
@@ -3746,7 +3759,32 @@ galaxy::input::WiimoteInputSnapshot partner_snapshot(std::uint64_t current_vi, g
     snapshot.nunchuk.stick_y = galaxy::input::native_stick_axis_byte(stick_y, 0x1d, 0x81, 0xe6);
     snapshot.nunchuk.c = held(WiiTarget::C) || script.nunchuk_c;
     snapshot.nunchuk.z = held(WiiTarget::Z) || script.nunchuk_z;
-    galaxy::input::publish_wiimote_ir_dots(snapshot, 0.0f, 0.0f, false);
+    // His pointer (the second Star Pointer): his stick or gyro moves it, his recenter button centres it.
+    static std::uint64_t s_clock_us = 0u;
+    const std::uint64_t now_us = controller_hid_now_us();
+    const float dt = s_clock_us == 0u || now_us <= s_clock_us
+        ? 0.0f : std::min(static_cast<float>(now_us - s_clock_us) * 1e-6f, 0.05f);
+    s_clock_us = now_us;
+    float& px = g_partner.pointer_x;
+    float& py = g_partner.pointer_y;
+    if (held(WiiTarget::PointerRecenter)) {
+        px = py = 0.0f;
+    } else if (g_partner.gyro_pointing) {
+        px = std::clamp(px + g_partner.gyro_x, -galaxy::input::kGyroPointerLimit, galaxy::input::kGyroPointerLimit);
+        py = std::clamp(py - g_partner.gyro_y, -galaxy::input::kGyroPointerLimit, galaxy::input::kGyroPointerLimit);
+    } else {
+        const galaxy::input::StickVector velocity = galaxy::input::stick_pointer_velocity(
+            {logic.pointer_x, logic.pointer_y}, g_partner.pointer_speed);
+        px = std::clamp(px + velocity.x * dt, -galaxy::input::kStickPointerLimit, galaxy::input::kStickPointerLimit);
+        py = std::clamp(py - velocity.y * dt, -galaxy::input::kStickPointerLimit, galaxy::input::kStickPointerLimit);
+    }
+    if (script.has_pointer) {
+        px = script.pointer_x;
+        py = script.pointer_y;
+    }
+    galaxy::input::publish_wiimote_ir_dots(snapshot, px, py,
+                                           std::fabs(px) <= galaxy::input::kPointerVisibleLimit &&
+                                               std::fabs(py) <= galaxy::input::kPointerVisibleLimit);
     static galaxy::input::tilt::Tilt s_tilt{};
     apply_tilt_accel(snapshot, s_tilt, galaxy::input::tilt::Section::None, nullptr, 0.0f, 0.0f, false);
     snapshot.shake = g_partner.shake || held(WiiTarget::Shake) || script.shake;
@@ -3983,8 +4021,11 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
                                                                   : route.driving;
     g_partner.logic = {};
     g_partner.shake = false;
+    g_partner.gyro_pointing = false;
+    g_partner.gyro_x = g_partner.gyro_y = 0.0f;
     if (route.second == galaxy::players::kKeyboard) {
         g_partner.logic = keyboard_logic;
+        g_partner.pointer_speed = controls.config.tune(galaxy::input::ControlScheme::Keyboard).pointer_speed;
     }
     if (use_keyboard && !route.feeds_first(galaxy::players::kKeyboard)) {
         keyboard_logic = {};
@@ -4013,7 +4054,12 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
             const galaxy::players::DeviceKey key = pad_key(pad);
             if (key == route.second) {
                 g_partner.logic = pad_logic;
+                if (tuning.invert_pointer_y) g_partner.logic.pointer_y = -g_partner.logic.pointer_y;
                 g_partner.shake = pad.shake_remote || pad.shake_nunchuk;
+                g_partner.pointer_speed = tuning.pointer_speed;
+                g_partner.gyro_pointing = gyro_pointing;
+                g_partner.gyro_x = pad.gyro_x;
+                g_partner.gyro_y = tuning.invert_pointer_y ? -pad.gyro_y : pad.gyro_y;
                 continue;
             }
             if (!route.feeds_first(key)) continue;

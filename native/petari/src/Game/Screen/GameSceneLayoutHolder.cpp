@@ -6,6 +6,8 @@
 #include "Game/Screen/InformationMessage.hpp"
 #include "Game/Screen/MarioMeter.hpp"
 #include "Game/Screen/MarioSubMeter.hpp"
+#include "Game/Screen/MeterLayout.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/Screen/MissLayout.hpp"
 #include "Game/NPC/NebulaAchievementLuma.hpp"
 #include "Game/Screen/NebulaAchievementBoard.hpp"
@@ -55,6 +57,12 @@ GameSceneLayoutHolder::GameSceneLayoutHolder()
     mYesNoLayout->initWithoutIter();
 
 #ifdef TARGET_PC
+    mSecondMeter = nullptr;
+    if (NebulaCoop::isAvailable()) {
+        mSecondMeter = new MeterLayout("\222\312\217\355HP\203\201\201\133\203\136\201\133" /* 通常HPメーター */, "HitPointMeter");
+        mSecondMeter->initWithoutIter();
+        MR::hideLayout(mSecondMeter);
+    }
     mAchievementToast = new NebulaAchievementToast();
     mAchievementToast->initWithoutIter();
     mAchievementBoard = nullptr;

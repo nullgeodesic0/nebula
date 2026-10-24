@@ -1,4 +1,5 @@
 #include "Game/Ride/SurfRay.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #ifdef TARGET_PC
 #include <nebula_game_api.h>
 #endif
@@ -148,6 +149,9 @@ SurfRay::SurfRay(const char* pName, s32 channel)
 }
 
 void SurfRay::init(const JMapInfoIter& pMapInfoIter) {
+#ifdef TARGET_PC
+    NebulaCoop::noteTestObject(NEBULA_TEST_PUT_RAY, this);
+#endif
     if (MR::hasRetryGalaxySequence()) {
         MR::resetPosition(this, "\203\130\203\136\201\133\203\147\210\312\222\165\201\151\203\124\201\133\203\164\203\102\203\223\201\152" /* スタート位置（サーフィン） */);
     } else {

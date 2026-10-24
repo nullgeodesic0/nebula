@@ -146,8 +146,12 @@ enum {
                                    Wii Remote channel 1 is connected and sits out otherwise), 0: one player */
     NEBULA_OPTION_TEST_DOWN_SECOND, /* tests (GALAXY_TEST_DOWN_SECOND): the co-op second player's turn at which he
                                        falls (MarioActor::forceKill), 0 never */
+    NEBULA_OPTION_TEST_STAR_BITS,   /* tests (GALAXY_TEST_STAR_BITS): Star Bits given as the co-op players land, 0 none */
     NEBULA_OPTION_TEST_LAUNCH_STAR, /* tests (GALAXY_TEST_LAUNCH_STAR): the co-op second player's turn at which the
                                        first player is put on the scene's launch star (SuperSpinDriver), 0 never */
+    NEBULA_OPTION_TEST_PUT,         /* tests (GALAXY_TEST_PUT="<kind>,<player>,<turn>"): at the co-op second player's
+                                       turn, a player (0 first, 1 second) put on the scene's nearest object of a kind
+                                       (NEBULA_TEST_PUT_*): turn | kind << 20 | player << 28; 0 never */
 };
 
 /* NEBULA_OPTION_MOVESET: the moves on, then each of them, and whether a co-op second player has them too. */
@@ -172,6 +176,15 @@ enum {
     NEBULA_LIGHT_PLAYER,        /* the player's current light: ambient (3), then the key and the fill light each:
                                    colour (3), position (3; the camera's eye space when it follows the camera),
                                    follows the camera (1) */
+};
+
+/* NEBULA_OPTION_TEST_PUT's kinds. */
+enum {
+    NEBULA_TEST_PUT_LAUNCH_STAR = 0,
+    NEBULA_TEST_PUT_POLE,
+    NEBULA_TEST_PUT_STAR_BALL,
+    NEBULA_TEST_PUT_RAY,
+    NEBULA_TEST_PUT_KINDS,
 };
 
 /* gx_scene_marker: the scene bounds in the stream. */

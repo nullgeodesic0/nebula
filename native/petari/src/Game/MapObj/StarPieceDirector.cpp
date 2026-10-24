@@ -4,6 +4,14 @@
 #include "Game/MapObj/StarPiece.hpp"
 #include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/Screen/StarPointerDirector.hpp"
+#ifdef TARGET_PC
+#include "Game/Player/NebulaCoop.hpp"
+
+namespace {
+    // The shooter running now aims through the second player's own half (NebulaCoop::ShooterScope).
+    bool sOwnCameraAim;
+}  // namespace
+#endif
 #include "Game/Util.hpp"
 #ifdef TARGET_PC
 #include "Game/System/NebulaAchievements.hpp"
@@ -407,6 +415,11 @@ void StarPieceShooter::attackSensor(HitSensor* pSender, HitSensor* pReceiver) {
 }
 
 void StarPieceShooter::control() {
+#ifdef TARGET_PC
+    // Nebula's co-op: the second Remote's shots are the second player's (NebulaCoop.hpp).
+    NebulaCoop::ShooterScope coopScope(_A0);
+    sOwnCameraAim = coopScope.isOwnCamera();
+#endif
     tryShoot();
 
     TVec3f playerCenterPos(*MR::getPlayerCenterPos());
@@ -544,6 +557,12 @@ bool StarPieceShooter::tryShoot() {
 void StarPieceShooter::calcShootGoalUsingPointingDepth() {
     TVec3f playerPos(*MR::getPlayerPos());
     TVec3f starPointerWorldPos(*MR::getStarPointerWorldPosUsingDepth(_A0));
+#ifdef TARGET_PC
+    if (sOwnCameraAim) {
+        // The pointer's depth point comes from the other half's camera: aim along the ray of this half's.
+        starPointerWorldPos.set(playerPos.x + 1.0e5f, playerPos.y, playerPos.z);
+    }
+#endif
 
     mGravity.set(*MR::getPlayerGravity());
 
