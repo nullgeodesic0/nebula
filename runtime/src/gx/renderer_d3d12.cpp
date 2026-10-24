@@ -6,6 +6,12 @@
 #include "galaxy/experimental_ultrawide_aspect.h"
 #include "galaxy/gx_d3d12.h"
 #include "galaxy/gx/game_asset_extract.h"
+#include "galaxy/gx/game_disc.h"
+#include "galaxy/gx/game_font.h"
+#include "galaxy/gx/font_sdf.h"
+#include "galaxy/gx/host_menus.h"
+#include "galaxy/gx/menu_kit.h"
+#include "galaxy/gx/menu_kit_raster.h"
 #include "galaxy/gx/render_config.h"
 #include "galaxy/gx/texture_cache.h"
 #include "galaxy/runtime_settings.h"
@@ -5997,6 +6003,372 @@ void RendererD3D12::draw_ui_glyph(
     invalidate_gx_bindings();
 }
 
+// ---- The host menus (menu_kit.h): the game's font and button art from game.pak, one draw per frame.
+
+namespace {
+
+constexpr char kMenuKitShader[] = R"(
+Texture2D g_tex[16] : register(t0);
+SamplerState g_samp : register(s0);
+cbuffer Screen : register(b0) { float2 g_screen; float g_gain; };
+struct VsIn {
+    float2 pos : POSITION; float2 uv : TEXCOORD0; float4 color : COLOR0;
+    float4 c0 : COLOR1; float4 c1 : COLOR2; float4 params : TEXCOORD1;
+};
+struct PsIn {
+    float4 pos : SV_Position; float2 uv : TEXCOORD0; float4 color : COLOR0;
+    nointerpolation float4 c0 : COLOR1; nointerpolation float4 c1 : COLOR2; nointerpolation float4 params : TEXCOORD1;
+};
+PsIn vs_main(VsIn i) {
+    PsIn o;
+    o.pos = float4(i.pos.x / g_screen.x * 2.0 - 1.0, 1.0 - i.pos.y / g_screen.y * 2.0, 0.0, 1.0);
+    o.uv = i.uv; o.color = i.color; o.c0 = i.c0; o.c1 = i.c1; o.params = i.params;
+    return o;
+}
+// menu_kit_raster.cpp shade() is the same maths on the CPU.
+float4 ps_main(PsIn i) : SV_Target {
+    const uint t = (uint)i.params.x;
+    const uint mode = (uint)i.params.y;
+    const float4 texel = g_tex[NonUniformResourceIndex(t)].Sample(g_samp, i.uv);
+    float3 rgb = i.color.rgb;
+    float a = i.color.a;
+    if (mode == 1) {
+        a *= texel.a;
+    } else if (mode == 4) {
+        // A distance-field glyph: the edge stays one pixel wide at any size.
+        const float w = max(fwidth(texel.a) * 0.75, 0.02);
+        a *= smoothstep(0.5 - w, 0.5 + w, texel.a);
+    } else if (mode >= 2) {
+        const float3 face = min(i.c1.rgb * i.color.rgb * i.params.z, 1.0);
+        rgb = lerp(i.c0.rgb, face, texel.r);
+        a = i.color.a * texel.a;
+    }
+    rgb = saturate(saturate(rgb) * g_gain);
+    a = saturate(a);
+    return float4(rgb * a, mode == 3 ? 0.0 : a);
+}
+)";
+
+struct MenuKitVertex {
+    float x, y, u, v;
+    float color[4];
+    float c0[4];
+    float c1[4];
+    float params[4];  // texture, mode, TEV scale
+};
+constexpr std::size_t kMenuKitMaxQuads = 4096u;
+constexpr std::size_t kMenuKitSegmentBytes = kMenuKitMaxQuads * 6u * sizeof(MenuKitVertex);
+
+}  // namespace
+
+namespace {
+
+// The menus' assets, read and prepared off the render thread (the font's distance fields take most of a second).
+struct MenuKitPrepared {
+    std::unique_ptr<galaxy::gx::GameDisc> disc;
+    galaxy::gx::GameFont font;
+    galaxy::gx::DecodedTexture cap;
+    galaxy::gx::DecodedTexture corner;
+    std::vector<galaxy::gx::DecodedTexture> font_fields;
+};
+
+std::optional<MenuKitPrepared> prepare_menu_kit(std::string content_root) {
+    try {
+        const std::filesystem::path root(std::u8string(content_root.begin(), content_root.end()));
+        std::filesystem::path pak = root / "game.pak";
+        if (!std::filesystem::exists(pak)) pak = root / "DATA" / "game.pak";
+        MenuKitPrepared out;
+        out.disc = galaxy::gx::GameDisc::open(pak);
+        if (out.disc == nullptr) {
+            std::cerr << "[Renderer] menus: game.pak unreadable, the host menus are off\n";
+            return std::nullopt;
+        }
+        const auto font_bytes = out.disc->read_arc_entry("LayoutData/Font.arc", "messagefont26.brfnt");
+        const auto cap_bytes = out.disc->read_arc_entry("LayoutData/PauseMenu.arc", "mybuttonatypeside.tpl");
+        const auto corner_bytes = out.disc->read_arc_entry("LayoutData/SysInfoWindow.arc", "mysysinfowindow.tpl");
+        auto font = font_bytes ? galaxy::gx::parse_brfnt(*font_bytes) : std::nullopt;
+        auto cap = cap_bytes ? galaxy::gx::decode_tpl(*cap_bytes) : std::nullopt;
+        auto corner = corner_bytes ? galaxy::gx::decode_tpl(*corner_bytes) : std::nullopt;
+        if (!font || !cap || !corner) {
+            std::cerr << "[Renderer] menus: the game's font or menu art is missing, the host menus are off\n";
+            return std::nullopt;
+        }
+        out.font = std::move(*font);
+        out.cap = galaxy::gx::menu::mirror_cap_vertically(*cap);
+        out.corner = std::move(*corner);
+        for (const auto& sheet : out.font.sheets) out.font_fields.push_back(galaxy::gx::coverage_to_sdf(sheet));
+        return out;
+    } catch (const std::exception& e) {
+        std::cerr << "[Renderer] menus unavailable: " << e.what() << '\n';
+        return std::nullopt;
+    }
+}
+
+}  // namespace
+
+struct RendererD3D12::MenuKitState {
+    std::future<std::optional<MenuKitPrepared>> pending;
+    std::unique_ptr<galaxy::gx::GameDisc> disc;
+    std::optional<galaxy::gx::GameFont> font;
+    galaxy::gx::menu::Assets assets;
+    std::array<ComPtr<ID3D12Resource>, galaxy::gx::menu::kMaxTextures> textures;
+    std::vector<ComPtr<ID3D12Resource>> uploads;  // kept until shutdown (a few MB, once)
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    ComPtr<ID3D12RootSignature> root_sig;
+    ComPtr<ID3D12PipelineState> pipeline;
+    ComPtr<ID3D12Resource> vertices;  // kRingSegments segments of kMenuKitSegmentBytes, persistently mapped
+    std::uint8_t* mapped = nullptr;
+    bool ready = false;
+    bool failed = false;
+};
+
+bool RendererD3D12::ensure_menu_kit_loaded() {
+    if (menu_kit_ == nullptr) {
+        menu_kit_ = std::make_shared<MenuKitState>();
+        if (s_native_settings_content_root.empty()) {
+            menu_kit_->failed = true;
+        } else {
+            menu_kit_->pending = std::async(std::launch::async, prepare_menu_kit, s_native_settings_content_root);
+        }
+    }
+    MenuKitState& kit = *menu_kit_;
+    if (kit.ready || kit.failed) return kit.ready;
+    if (kit.pending.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+    std::optional<MenuKitPrepared> prepared = kit.pending.get();
+    if (!prepared) {
+        kit.failed = true;
+        return false;
+    }
+    try {
+        namespace menu = galaxy::gx::menu;
+        kit.disc = std::move(prepared->disc);
+        kit.font = std::move(prepared->font);
+        const auto upload_texture = [&](std::size_t slot, const galaxy::gx::DecodedTexture& tex) {
+            D3D12_HEAP_PROPERTIES default_heap{};
+            default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            desc.Width = tex.width;
+            desc.Height = tex.height;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            d3d_check(device_->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                       IID_PPV_ARGS(&kit.textures[slot])),
+                      "create menu texture");
+            const UINT row_pitch = static_cast<UINT>((tex.width * 4u + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) &
+                                                     ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u));
+            D3D12_HEAP_PROPERTIES upload_heap{};
+            upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC buf{};
+            buf.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            buf.Width = static_cast<UINT64>(row_pitch) * tex.height;
+            buf.Height = 1;
+            buf.DepthOrArraySize = 1;
+            buf.MipLevels = 1;
+            buf.SampleDesc.Count = 1;
+            buf.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            ComPtr<ID3D12Resource> upload;
+            d3d_check(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buf,
+                                                       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)),
+                      "create menu texture upload");
+            void* mapped = nullptr;
+            const D3D12_RANGE no_read{0, 0};
+            d3d_check(upload->Map(0, &no_read, &mapped), "map menu texture upload");
+            for (unsigned y = 0; y < tex.height; ++y) {
+                std::memcpy(static_cast<std::uint8_t*>(mapped) + static_cast<std::size_t>(y) * row_pitch,
+                            tex.rgba8.data() + static_cast<std::size_t>(y) * tex.width * 4u, tex.width * 4u);
+            }
+            upload->Unmap(0, nullptr);
+            D3D12_TEXTURE_COPY_LOCATION dst{};
+            dst.pResource = kit.textures[slot].Get();
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            D3D12_TEXTURE_COPY_LOCATION src{};
+            src.pResource = upload.Get();
+            src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, tex.width, tex.height, 1, row_pitch};
+            command_list_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = kit.textures[slot].Get();
+            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            command_list_->ResourceBarrier(1, &barrier);
+            kit.uploads.push_back(std::move(upload));
+        };
+
+        // Slot 0 (no texture) samples opaque white; unused slots point at it too.
+        galaxy::gx::DecodedTexture white{1u, 1u, {255u, 255u, 255u, 255u}};
+        upload_texture(0u, white);
+        upload_texture(static_cast<std::size_t>(menu::Tex::ButtonCap), prepared->cap);
+        upload_texture(static_cast<std::size_t>(menu::Tex::WindowCorner), prepared->corner);
+        for (std::size_t sheet = 0; sheet < kit.font->sheets.size(); ++sheet) {
+            const std::size_t slot = static_cast<std::size_t>(menu::Tex::Font) + sheet;
+            if (slot >= menu::kMaxTextures) break;
+            upload_texture(slot, prepared->font_fields[sheet]);
+        }
+
+        D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+        heap_desc.NumDescriptors = static_cast<UINT>(menu::kMaxTextures);
+        heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        d3d_check(device_->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&kit.srv_heap)), "create menu SRV heap");
+        const UINT increment = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = 1;
+        for (std::size_t slot = 0; slot < menu::kMaxTextures; ++slot) {
+            D3D12_CPU_DESCRIPTOR_HANDLE handle = kit.srv_heap->GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += slot * increment;
+            ID3D12Resource* resource = kit.textures[slot] ? kit.textures[slot].Get() : kit.textures[0].Get();
+            device_->CreateShaderResourceView(resource, &srv, handle);
+        }
+
+        D3D12_STATIC_SAMPLER_DESC sampler{};
+        sampler.Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_DESCRIPTOR_RANGE range{};
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        range.NumDescriptors = static_cast<UINT>(menu::kMaxTextures);
+        D3D12_ROOT_PARAMETER params[2]{};
+        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        params[0].Constants.Num32BitValues = 3;
+        params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[1].DescriptorTable.NumDescriptorRanges = 1;
+        params[1].DescriptorTable.pDescriptorRanges = &range;
+        params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC rsd{};
+        rsd.NumParameters = 2;
+        rsd.pParameters = params;
+        rsd.NumStaticSamplers = 1;
+        rsd.pStaticSamplers = &sampler;
+        rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        ComPtr<ID3DBlob> rs_blob, rs_err;
+        d3d_check(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rs_blob, &rs_err),
+                  "serialize menu root signature");
+        d3d_check(device_->CreateRootSignature(0, rs_blob->GetBufferPointer(), rs_blob->GetBufferSize(),
+                                               IID_PPV_ARGS(&kit.root_sig)),
+                  "create menu root signature");
+
+        const ComPtr<ID3DBlob> vs = compile_hlsl(kMenuKitShader, sizeof(kMenuKitShader) - 1, "vs_5_1", "vs_main");
+        const ComPtr<ID3DBlob> ps = compile_hlsl(kMenuKitShader, sizeof(kMenuKitShader) - 1, "ps_5_1", "ps_main");
+        const D3D12_INPUT_ELEMENT_DESC layout[] = {
+            {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"COLOR", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"COLOR", 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 48, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 64, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        };
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = kit.root_sig.Get();
+        pd.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+        pd.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+        pd.InputLayout = {layout, static_cast<UINT>(std::size(layout))};
+        // Premultiplied: an additive quad writes alpha 0.
+        auto& blend = pd.BlendState.RenderTarget[0];
+        blend.BlendEnable = TRUE;
+        blend.SrcBlend = D3D12_BLEND_ONE;
+        blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        blend.BlendOp = D3D12_BLEND_OP_ADD;
+        blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pd.SampleMask = UINT_MAX;
+        pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        pd.RasterizerState.DepthClipEnable = TRUE;
+        pd.DepthStencilState.DepthEnable = FALSE;
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.NumRenderTargets = 1;
+        pd.RTVFormats[0] = kBackbufferFormat;
+        pd.SampleDesc.Count = 1;
+        d3d_check(device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&kit.pipeline)), "create menu PSO");
+
+        D3D12_HEAP_PROPERTIES upload_heap{};
+        upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC vb{};
+        vb.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        vb.Width = kMenuKitSegmentBytes * kRingSegments;
+        vb.Height = 1;
+        vb.DepthOrArraySize = 1;
+        vb.MipLevels = 1;
+        vb.SampleDesc.Count = 1;
+        vb.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        d3d_check(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &vb,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&kit.vertices)),
+                  "create menu vertex ring");
+        void* mapped = nullptr;
+        const D3D12_RANGE no_read{0, 0};
+        d3d_check(kit.vertices->Map(0, &no_read, &mapped), "map menu vertex ring");
+        kit.mapped = static_cast<std::uint8_t*>(mapped);
+
+        kit.assets = {&*kit.font, true, true, true};
+        kit.ready = true;
+        std::cout << "[Renderer] menus: the game's font and menu art loaded from game.pak\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[Renderer] menus unavailable: " << e.what() << '\n';
+        kit.ready = false;
+        kit.failed = true;
+    }
+    invalidate_gx_bindings();
+    return kit.ready;
+}
+
+const galaxy::gx::menu::Assets* RendererD3D12::menu_kit_assets() const noexcept {
+    return menu_kit_ != nullptr && menu_kit_->ready ? &menu_kit_->assets : nullptr;
+}
+
+void RendererD3D12::draw_menu_kit(std::span<const galaxy::gx::menu::Quad> quads) {
+    if (quads.empty() || menu_kit_ == nullptr || !menu_kit_->ready || s_bb_width == 0u || s_bb_height == 0u) return;
+    MenuKitState& kit = *menu_kit_;
+    const std::size_t count = std::min(quads.size(), kMenuKitMaxQuads);
+    const std::size_t segment = static_cast<std::size_t>(frame_index_ % kRingSegments);
+    auto* out = reinterpret_cast<MenuKitVertex*>(kit.mapped + segment * kMenuKitSegmentBytes);
+    const auto vertex = [](const galaxy::gx::menu::Quad& q, int corner) {
+        const auto& v = q.v[static_cast<std::size_t>(corner)];
+        return MenuKitVertex{v.x, v.y, v.u, v.v,
+                             {v.color.r, v.color.g, v.color.b, v.color.a},
+                             {q.c0.r, q.c0.g, q.c0.b, q.c0.a},
+                             {q.c1.r, q.c1.g, q.c1.b, q.c1.a},
+                             {static_cast<float>(q.tex), static_cast<float>(q.mode), q.scale, 0.0f}};
+    };
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& q = quads[i];
+        out[i * 6u + 0u] = vertex(q, 0);
+        out[i * 6u + 1u] = vertex(q, 1);
+        out[i * 6u + 2u] = vertex(q, 2);
+        out[i * 6u + 3u] = vertex(q, 2);
+        out[i * 6u + 4u] = vertex(q, 1);
+        out[i * 6u + 5u] = vertex(q, 3);
+    }
+    D3D12_VERTEX_BUFFER_VIEW view{};
+    view.BufferLocation = kit.vertices->GetGPUVirtualAddress() + segment * kMenuKitSegmentBytes;
+    view.SizeInBytes = static_cast<UINT>(count * 6u * sizeof(MenuKitVertex));
+    view.StrideInBytes = sizeof(MenuKitVertex);
+    const float constants[3] = {static_cast<float>(s_bb_width), static_cast<float>(s_bb_height),
+                                galaxy::gx::menu::kPictureGain};
+    ID3D12DescriptorHeap* heaps[] = {kit.srv_heap.Get()};
+    command_list_->SetDescriptorHeaps(1, heaps);
+    command_list_->SetGraphicsRootSignature(kit.root_sig.Get());
+    command_list_->SetPipelineState(kit.pipeline.Get());
+    command_list_->SetGraphicsRoot32BitConstants(0, 3, constants, 0);
+    command_list_->SetGraphicsRootDescriptorTable(1, kit.srv_heap->GetGPUDescriptorHandleForHeapStart());
+    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    command_list_->IASetVertexBuffers(0, 1, &view);
+    command_list_->DrawInstanced(static_cast<UINT>(count * 6u), 1, 0, 0);
+    invalidate_gx_bindings();
+}
+
 void RendererD3D12::pump_messages() {
     // HWND ownership and all native modal loops stay on window_owner_.
     // Guest checkpoints must never dispatch a Win32 modal loop themselves.
@@ -10760,6 +11132,10 @@ bool RendererD3D12::present(
         draw_native_settings_hint(*this);
         draw_net_lobby_banner(*this);
         draw_online_menu(*this);
+        draw_host_menus(*this,
+                        {static_cast<float>(content_viewport.left), static_cast<float>(content_viewport.top),
+                         static_cast<float>(content_viewport.width), static_cast<float>(content_viewport.height)},
+                        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
         if (stall_watch_overlay) {
             const double stall_watch_ms =
                 std::chrono::duration<double, std::milli>(

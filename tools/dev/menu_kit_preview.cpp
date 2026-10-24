@@ -3,6 +3,7 @@
 // background.rgba is raw RGBA8. scene: pause (the two pause buttons, the first hovered), dialog (the Yes/No
 // window, No hovered), card (a status card), players (a Players panel sketch). `frame` steps the hover animation.
 
+#include "galaxy/gx/font_sdf.h"
 #include "galaxy/gx/game_disc.h"
 #include "galaxy/gx/game_font.h"
 #include "galaxy/gx/menu_kit.h"
@@ -42,10 +43,13 @@ int main(int argc, char** argv) {
     std::array<const DecodedTexture*, kMaxTextures> textures{};
     textures[static_cast<std::size_t>(Tex::ButtonCap)] = &cap;
     textures[static_cast<std::size_t>(Tex::WindowCorner)] = &*corner;
-    for (std::size_t i = 0; i < font->sheets.size() && static_cast<std::size_t>(Tex::Font) + i < kMaxTextures; ++i) {
-        textures[static_cast<std::size_t>(Tex::Font) + i] = &font->sheets[i];
+    // As the renderer binds them: distance fields.
+    std::vector<DecodedTexture> sdf;
+    for (const DecodedTexture& sheet : font->sheets) sdf.push_back(coverage_to_sdf(sheet));
+    for (std::size_t i = 0; i < sdf.size() && static_cast<std::size_t>(Tex::Font) + i < kMaxTextures; ++i) {
+        textures[static_cast<std::size_t>(Tex::Font) + i] = &sdf[i];
     }
-    Assets assets{&*font, true, true};
+    Assets assets{&*font, true, true, true};
     const Space space = Space::for_picture(0, 0, static_cast<float>(image.width), static_cast<float>(image.height));
     const std::string scene = argv[6];
     const float frame = argc > 7 ? static_cast<float>(std::atof(argv[7])) : 20.0f;

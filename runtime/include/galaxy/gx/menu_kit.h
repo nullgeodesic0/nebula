@@ -42,7 +42,8 @@ inline constexpr std::size_t kMaxTextures = 16u;
 //   times the vertex alpha (the pills' and windows' materials: the rim keeps c0 whatever the gradient does).
 // - Additive: as Material, added to what is under it (the decide shine).
 // Every mode's colour is then multiplied by kPictureGain, the brightness the game's picture reaches on screen.
-enum class Mode : std::uint16_t { Solid = 0, Coverage = 1, Material = 2, Additive = 3 };
+// - Text: the vertex colour, alpha times the edge of a distance-field glyph sheet (font_sdf.h), sharp at any size.
+enum class Mode : std::uint16_t { Solid = 0, Coverage = 1, Material = 2, Additive = 3, Text = 4 };
 inline constexpr float kPictureGain = 1.24f;
 
 struct Vertex {
@@ -128,6 +129,8 @@ struct Assets {
     const GameFont* font = nullptr;  // MessageFont26
     bool button_cap = false;
     bool window_corner = false;
+    // The font's sheets are bound as distance fields (Mode::Text) rather than coverage.
+    bool font_sdf = false;
 };
 
 // The pause menu's pill button (PauseMenu.arc NBackUp): centre width and height of the face, the pane scale

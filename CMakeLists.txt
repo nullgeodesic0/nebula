@@ -709,6 +709,8 @@ add_library(galaxy_gx STATIC
     runtime/src/gx/game_font.cpp
     runtime/src/gx/menu_kit.cpp
     runtime/src/gx/menu_kit_raster.cpp
+    runtime/src/gx/host_menus.cpp
+    runtime/src/gx/font_sdf.cpp
 )
 # AMD FidelityFX FSR 3.1 (MIT): the FidelityFX SDK 1.1.4 `sdk` directory
 # after its own build (bin/ffx_sdk holds the static libraries with the
@@ -769,6 +771,7 @@ target_compile_features(galaxy_game_menu_assets_tests PRIVATE cxx_std_20)
 set(galaxy_menu_kit_sources
     runtime/src/gx/menu_kit.cpp
     runtime/src/gx/menu_kit_raster.cpp
+    runtime/src/gx/font_sdf.cpp
     runtime/src/gx/game_disc.cpp
     runtime/src/gx/game_font.cpp
     runtime/src/gx/game_asset_extract.cpp)

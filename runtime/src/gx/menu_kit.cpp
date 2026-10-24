@@ -257,7 +257,8 @@ void text(DrawList& list, const Assets& assets, const Space& space, const TextSt
                 const float u1 = static_cast<float>(g.x + g.glyph_width) / static_cast<float>(sheet.width);
                 const float v1 = static_cast<float>(g.y + font.cell_height) / static_cast<float>(sheet.height);
                 push(list, space, gx, top, gx + gw, top - gh, u0, v0, u1, v1, color, color,
-                     static_cast<Tex>(static_cast<std::uint16_t>(Tex::Font) + g.sheet), Mode::Coverage);
+                     static_cast<Tex>(static_cast<std::uint16_t>(Tex::Font) + g.sheet),
+                     assets.font_sdf ? Mode::Text : Mode::Coverage);
             }
             pen += static_cast<float>(g.advance) * sx + style.char_space;
         }

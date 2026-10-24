@@ -41,6 +41,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <future>
+#include <memory>
 #include <optional>
 #include <string>
 #include <span>
@@ -50,6 +51,11 @@
 #include <vector>
 
 namespace galaxy::gx {
+
+namespace menu {
+struct Quad;
+struct Assets;
+}  // namespace menu
 
 class TextureCache;
 
@@ -741,7 +747,16 @@ public:
         int x, int y, int scale, std::uint64_t bitmap,
         const std::array<float, 4>& color);
 
+    // The host menus (menu_kit.h): the game's font and menu art read from game.pak on the first call (recorded on
+    // the open frame), then false for good if that failed. draw_menu_kit draws a frame's whole draw list in one
+    // call; call it at most once a frame (its vertices live in this frame's ring segment).
+    bool ensure_menu_kit_loaded();
+    [[nodiscard]] const menu::Assets* menu_kit_assets() const noexcept;
+    void draw_menu_kit(std::span<const menu::Quad> quads);
+
 private:
+    struct MenuKitState;
+    std::shared_ptr<MenuKitState> menu_kit_;
     void invalidate_gx_bindings();
     void pace_present_if_needed(unsigned vsync_interval, float max_fps);
     // VSYNC ON presents each frame for round(refresh / rate) refreshes when

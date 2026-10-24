@@ -37,6 +37,12 @@ Shaded shade(const Quad& quad, const Rgba& vertex, const std::array<float, 4>& t
     case Mode::Coverage:
         s.a = vertex.a * texel[3];
         break;
+    case Mode::Text: {
+        // The GPU widens the edge by the screen-space rate of change; a fixed width stands in for it here.
+        const float t = std::clamp((texel[3] - 0.42f) / 0.16f, 0.0f, 1.0f);
+        s.a = vertex.a * t * t * (3.0f - 2.0f * t);
+        break;
+    }
     case Mode::Material:
     case Mode::Additive: {
         const float t = texel[0];
