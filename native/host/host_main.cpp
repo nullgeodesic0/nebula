@@ -28,6 +28,7 @@
 #include "galaxy/guest_memory.h"
 #include "galaxy/native_host.h"
 #include "galaxy/native_input.h"
+#include "galaxy/net_lockstep.h"
 #include "galaxy/native_thp_video.h"
 #include "galaxy/perf_hint.h"
 #include "galaxy/achievements.h"
@@ -795,6 +796,10 @@ void send_wpad_reports(uint32_t frame);
 extern std::atomic<uint32_t> gRetraces;
 extern std::atomic<int> gWpadStarted;
 extern std::atomic<uint32_t> gWpadStartRetrace;
+extern std::atomic<int32_t> gStarPointerMode;
+extern std::atomic<uint32_t> gTiltSection;
+extern std::atomic<int> gWpadDpd;
+extern const galaxy::input::WiimoteInputSnapshot* gNetInputs;
 
 // The display's retrace at 60 Hz: the console's NTSC 59.94 would repeat a frame every 17 s on a 60 Hz display. A late
 // wake-up skips the fields it missed, as a display does, rather than delivering them back to back. On Android the
@@ -832,12 +837,35 @@ void vi_thread() {
             while (gRetraces.load(std::memory_order_acquire) < granted) {
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
             }
+            // Online: this PC's player's input for frame N + delay goes out, then frame N waits for both players'.
+            galaxy::input::WiimoteInputSnapshot net_inputs[2];
+            gNetInputs = nullptr;
+            if (galaxy::net::session().active()) {
+                galaxy::net::Session& net = galaxy::net::session();
+                const uint32_t frame = granted + 1;
+                galaxy::net::FrameInput local;
+                local.snapshot = galaxy::host::native_game_wiimote_snapshot(
+                    frame + net.settings().delay, gWpadDpd.load(std::memory_order_relaxed) != 0,
+                    gStarPointerMode.load(std::memory_order_relaxed),
+                    static_cast<uint8_t>(gTiltSection.load(std::memory_order_relaxed)));
+                net.send_input(frame + net.settings().delay, local);
+                galaxy::net::FrameInput both[2];
+                if (!net.frame_inputs(frame, both)) {
+                    std::fprintf(stderr, "[netplay] the session ended: closing\n");
+                    std::fflush(stderr);
+                    std::_Exit(0);
+                }
+                net_inputs[0] = both[0].snapshot;
+                net_inputs[1] = both[1].snapshot;
+                gNetInputs = net_inputs;
+            }
             // Once WPAD started in a retrace before this one: the game took that retrace, so it shows here whatever
             // the threads' timing.
             if (gWpadStarted.load(std::memory_order_acquire) &&
                 gWpadStartRetrace.load(std::memory_order_relaxed) < granted) {
                 send_wpad_reports(granted + 1);
             }
+            gNetInputs = nullptr;
             ++granted;
         }
         gModule.vi_retrace();
@@ -1748,7 +1776,7 @@ bool deterministic() {
         const char* value = std::getenv("GALAXY_DETERMINISTIC");
         return value != nullptr && value[0] == '1';
     }();
-    return on;
+    return on || galaxy::net::session().active();
 }
 
 uint32_t svc_gx_peek_efb(void*, uint16_t x, uint16_t y, uint32_t type, uint16_t token) {
@@ -2041,6 +2069,19 @@ void svc_game_light(void*, uint32_t kind, uint32_t id, const float* v) {
 }
 
 uint32_t svc_option(void*, uint32_t what) {
+    // Online: what changes the game's computation is the session's (the host's), the same on both PCs.
+    if (galaxy::net::session().active()) {
+        const galaxy::net::SessionSettings& session = galaxy::net::session().settings();
+        switch (what) {
+        case NEBULA_OPTION_COOP: return session.coop;
+        case NEBULA_OPTION_MOVESET: return session.moveset;
+        case NEBULA_OPTION_MOTION_STYLE: return session.motion_style;
+        case NEBULA_OPTION_TEXT_SPEED: return session.text_speed;
+        case NEBULA_OPTION_CALENDAR: return session.calendar;
+        case NEBULA_OPTION_RT_SHADOW_CASTERS: return 0;  // ray tracing keeps clipped actors drawn: this PC's choice
+        default: break;
+        }
+    }
     switch (what) {
     case NEBULA_OPTION_TEXT_SPEED:
 #if defined(NEBULA_HOST_RENDERER)
@@ -2246,6 +2287,9 @@ size_t idle_wiimote_report(uint8_t id, uint8_t* report) {
 // The remotes' reports for one moment (`frame`: the retrace the input scripts count): remote 0 connected with the
 // first report, co-op's remote 1 while its player is in. The WPAD thread sends them 100 times a second; in deterministic
 // mode the frame clock sends one set per retrace, before granting it.
+// Online (net_lockstep.h): both players' input for the frame being granted, by channel (the frame clock sets it).
+const galaxy::input::WiimoteInputSnapshot* gNetInputs = nullptr;
+
 void send_wpad_reports(uint32_t frame) {
     static NebulaWiimoteConnection connection{};
     static bool connected = false;
@@ -2271,9 +2315,10 @@ void send_wpad_reports(uint32_t frame) {
         return;
 #else
         const int32_t mode = gStarPointerMode.load(std::memory_order_relaxed);
-        const auto snapshot = galaxy::host::native_game_wiimote_snapshot(
-            frame, gWpadDpd.load(std::memory_order_relaxed) != 0, mode,
-            static_cast<uint8_t>(gTiltSection.load(std::memory_order_relaxed)));
+        const auto snapshot = gNetInputs != nullptr
+            ? gNetInputs[0]
+            : galaxy::host::native_game_wiimote_snapshot(frame, gWpadDpd.load(std::memory_order_relaxed) != 0, mode,
+                                                         static_cast<uint8_t>(gTiltSection.load(std::memory_order_relaxed)));
         // Every report renews the motor's state (a stale one stops), as the console's remote keeps its motor bit.
         galaxy::host::native_game_rumble(gMotor.load(std::memory_order_relaxed), mode);
         uint8_t report[galaxy::input::kMaxWiimoteInputReportBytes];
@@ -2286,7 +2331,12 @@ void send_wpad_reports(uint32_t frame) {
         }
         // Co-op's second player: his remote connects when he joins and goes when he leaves (NebulaCoop.cpp).
         galaxy::input::WiimoteInputSnapshot partner{};
-        const bool partner_in = galaxy::host::native_game_partner_snapshot(frame, mode, partner);
+        // Online, the second player is the other PC's (or this one's, joined) and always in.
+        const bool partner_in = gNetInputs != nullptr ? galaxy::net::session().settings().coop != 0
+                                                      : galaxy::host::native_game_partner_snapshot(frame, mode, partner);
+        if (gNetInputs != nullptr) {
+            partner = gNetInputs[1];
+        }
         if (partner_in != partner_connected) {
             partner_connected = partner_in;
             gModule.wpad_connect(1, partner_in ? 1 : 0, &connection);
@@ -2459,7 +2509,9 @@ void write_state_hash(uint64_t scene_frame) {
         if (path != nullptr && path[0] != '\0') (void)fopen_s(&opened, path, "w");
         return opened;
     }();
-    if (file == nullptr) return;
+    // Online, the two PCs compare this hash every galaxy::net::kHashEvery scene frames (a desync is logged).
+    const bool net_due = galaxy::net::session().active() && scene_frame % galaxy::net::kHashEvery == 0;
+    if (file == nullptr && !net_due) return;
     static const uint64_t every = [] {
         const char* value = std::getenv("GALAXY_STATE_HASH_EVERY");
         const uint64_t parsed = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
@@ -2469,7 +2521,7 @@ void write_state_hash(uint64_t scene_frame) {
         const char* value = std::getenv("GALAXY_STATE_HASH_CHUNKS");
         return value != nullptr && value[0] == '1';
     }();
-    if (scene_frame % every != 0) return;
+    if (scene_frame % every != 0 && !net_due) return;
     ensure_guest_memory();
     while (gDiscInFlight.load(std::memory_order_acquire) > 0) {
         std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -2542,9 +2594,14 @@ void write_state_hash(uint64_t scene_frame) {
             }
         }
     }
-    std::fprintf(file, "%llu %016llx%s\n", static_cast<unsigned long long>(scene_frame),
-                 static_cast<unsigned long long>(total), chunk_text.c_str());
-    std::fflush(file);
+    if (net_due) {
+        galaxy::net::session().report_hash(static_cast<uint32_t>(scene_frame), total);
+    }
+    if (file != nullptr && scene_frame % every == 0) {
+        std::fprintf(file, "%llu %016llx%s\n", static_cast<unsigned long long>(scene_frame),
+                     static_cast<unsigned long long>(total), chunk_text.c_str());
+        std::fflush(file);
+    }
 }
 
 int svc_test_scene_frame(void*, NebulaTestAction* action) {
@@ -3029,6 +3086,100 @@ int run_mods_tool() {
 }  // namespace
 #endif
 
+#if defined(NEBULA_HOST_RENDERER)
+// A file's contents as a short digest (FNV-1a): netplay's build check.
+std::string file_digest(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    uint64_t hash = 1469598103934665603ull;
+    char buffer[1 << 16];
+    while (in.read(buffer, sizeof(buffer)) || in.gcount() > 0) {
+        for (std::streamsize i = 0; i < in.gcount(); ++i) {
+            hash = (hash ^ static_cast<uint8_t>(buffer[i])) * 1099511628211ull;
+        }
+    }
+    char text[17];
+    std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(hash));
+    return text;
+}
+
+// Online co-op (net_lockstep.h), before the game boots: GALAXY_NET_HOST=<port> hosts (this PC plays Mario and its
+// save), GALAXY_NET_JOIN=<address>[:port] joins (this PC plays Luigi in the host's save, kept under the settings
+// folder's netplay\<host>). GALAXY_NET_DELAY: the input delay in frames (3; the host's counts).
+void start_netplay(const fs::path& module) {
+    const char* host_port = std::getenv("GALAXY_NET_HOST");
+    const char* join_address = std::getenv("GALAXY_NET_JOIN");
+    if (host_port == nullptr && join_address == nullptr) {
+        return;
+    }
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const std::string build_id = file_digest(exe) + "-" + file_digest(module);
+    std::string mods;
+    for (const galaxy::mods::ModInfo& mod : galaxy::mods::session_mods().started_with) {
+        if (!mod.enabled) continue;
+        mods += (mods.empty() ? "" : ", ") + mod.id;
+    }
+    std::string error;
+    if (host_port != nullptr) {
+        galaxy::net::SessionSettings settings;
+        // The calendar now, as seconds since 2000-01-01.
+        settings.calendar = static_cast<uint32_t>(std::time(nullptr) - 946684800);
+        settings.coop = 1;
+        settings.moveset = svc_option(nullptr, NEBULA_OPTION_MOVESET);
+        settings.motion_style = svc_option(nullptr, NEBULA_OPTION_MOTION_STYLE);
+        settings.text_speed = svc_option(nullptr, NEBULA_OPTION_TEXT_SPEED);
+        settings.language = static_cast<uint32_t>(galaxy::game_language_for_boot());
+        const char* delay = std::getenv("GALAXY_NET_DELAY");
+        settings.delay = std::clamp(delay != nullptr ? static_cast<uint32_t>(std::strtoul(delay, nullptr, 10)) : 3u,
+                                    1u, 15u);
+        // The save, and the Mii database the game reads at boot.
+        std::vector<galaxy::net::SaveFile> save;
+        for (const fs::path& part : {fs::path(gSaveDataPath.substr(1)), fs::path("shared2/menu/FaceLib")}) {
+            std::error_code walk;
+            for (fs::recursive_directory_iterator it(gNandRoot / part, walk), end; it != end; it.increment(walk)) {
+                if (walk || !it->is_regular_file()) continue;
+                std::ifstream in(it->path(), std::ios::binary);
+                galaxy::net::SaveFile file;
+                file.path = fs::relative(it->path(), gNandRoot).generic_string();
+                file.data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+                save.push_back(std::move(file));
+            }
+        }
+        if (!galaxy::net::session().host(static_cast<unsigned>(std::strtoul(host_port, nullptr, 10)), build_id, mods,
+                                         settings, save, error)) {
+            die("online: %s", error.c_str());
+        }
+        return;
+    }
+    galaxy::net::SessionSettings settings;
+    std::vector<galaxy::net::SaveFile> save;
+    if (!galaxy::net::session().join(join_address, build_id, mods, settings, save, error)) {
+        die("online: %s", error.c_str());
+    }
+    if (settings.language != static_cast<uint32_t>(galaxy::game_language_for_boot())) {
+        std::fprintf(stderr, "[netplay] the host plays in another language: the game may not stay in step\n");
+    }
+    // The host's save, apart from this PC's own.
+    std::string folder_name = join_address;
+    for (char& c : folder_name) {
+        if (c == ':' || c == '/' || c == '\\') c = '_';
+    }
+    const fs::path root = galaxy::runtime_settings_folder() / "netplay" / folder_name;
+    std::error_code error_code;
+    fs::remove_all(root, error_code);
+    for (const galaxy::net::SaveFile& file : save) {
+        const fs::path path = root / fs::path(file.path);
+        fs::create_directories(path.parent_path(), error_code);
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(file.data.data()), static_cast<std::streamsize>(file.data.size()));
+    }
+    gNandRoot = root;
+    fs::create_directories(gNandRoot / gSaveDataPath.substr(1), error_code);
+    fs::create_directories(gNandRoot / "tmp", error_code);
+    std::fprintf(stderr, "[netplay] playing the host's save from %s\n", root.string().c_str());
+}
+#endif
+
 int main(int argc, char** argv) {
 #if defined(NEBULA_HOST_RENDERER) && defined(_WIN32)
     if (argc >= 3 && std::strcmp(argv[1], "--crash-report") == 0) {
@@ -3205,6 +3356,7 @@ int main(int argc, char** argv) {
                                                          "Nebula mods applied at the last start: none\n");
         }
     }
+    start_netplay(module);
 #endif
 
     static NebulaHostServices services{};

@@ -127,6 +127,7 @@ galaxy_host_options(galaxy_jaudio_mixer)
 
 add_library(galaxy_native_host STATIC
     runtime/src/native_host.cpp
+    runtime/src/net_lockstep.cpp
     runtime/src/voice_replacement.cpp
     runtime/src/wii_device_data.cpp
     runtime/src/mii_import.cpp
@@ -582,6 +583,7 @@ galaxy_test(galaxy_odyssey_moveset_tests SOURCES ${rt}/odyssey_moveset_tests.cpp
 target_include_directories(galaxy_odyssey_moveset_tests PRIVATE native/include)
 galaxy_test(galaxy_motion_style_tests SOURCES ${rt}/motion_style_tests.cpp)
 target_include_directories(galaxy_motion_style_tests PRIVATE native/include)
+galaxy_test(galaxy_net_lockstep_tests SOURCES ${rt}/net_lockstep_tests.cpp ${rt}/net_lockstep.cpp)
 galaxy_test(galaxy_libm_tests SOURCES ${rt}/libm_tests.cpp native/libm/nebula_libm.c)
 target_compile_definitions(galaxy_libm_tests PRIVATE NEBULA_LIBM_PREFIX)
 galaxy_test(galaxy_coop_tests SOURCES ${rt}/coop_tests.cpp)
