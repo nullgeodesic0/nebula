@@ -41,19 +41,21 @@ namespace Nebula.Launcher
     /// </summary>
     internal sealed class ControlsSettings
     {
-        public const int SchemeCount = 4, TargetCount = 25, Slots = 4;
+        public const int SchemeCount = 5, TargetCount = 25, Slots = 4;
         public const int JumpBack = 24;
         // runtime_settings.ini controls_version (input_bindings.h kControlsVersion).
-        public const int ControlsVersion = 5;
+        public const int ControlsVersion = 8;
         // Version 3 still-pointer defaults (pads), replaced in version 4.
         public const float Version3PointerHideSeconds = 4.0f, Version3PointerHideRadius = 0.03f;
         // Version 4 still-pointer time and vibration strength, replaced in version 5.
         public const float Version4PointerHideSeconds = 2.0f;
         public const int Version4Rumble = 100;
         public const int ModeAuto = 0, ModeKeyboardMouse = 1, ModeController = 2, ModeRealWiimote = 3;
-        public const int Keyboard = 0, Xbox = 1, SwitchPro = 2, SwitchPro2 = 3;
-        public static readonly string[] SchemeIds = { "keyboard", "xbox", "switch_pro", "switch_pro2" };
-        public static readonly string[] SchemeLabels = { "Keyboard and mouse", "Xbox controller (XInput)", "Switch Pro Controller", "Switch 2 Pro Controller" };
+        public const int Keyboard = 0, Xbox = 1, SwitchPro = 2, SwitchPro2 = 3, DualSense = 4;
+        // Scheme 4 is the runtime's PlayStation scheme (DualShock 4, DualSense, Edge); files from the fork's DualSense
+        // builds name it "dualsense" (read as "playstation").
+        public static readonly string[] SchemeIds = { "keyboard", "xbox", "switch_pro", "switch_pro2", "playstation" };
+        public static readonly string[] SchemeLabels = { "Keyboard and mouse", "Xbox controller (XInput)", "Switch Pro Controller", "Switch 2 Pro Controller", "PlayStation controller" };
         public static readonly string[] TargetIds = {
             "a", "b", "one", "two", "plus", "minus", "home", "dpad_up", "dpad_down", "dpad_left", "dpad_right",
             "stick_up", "stick_down", "stick_left", "stick_right", "c", "z", "shake", "nunchuk_shake",
@@ -88,7 +90,19 @@ namespace Nebula.Launcher
             "LB", "RB", "Guide", "Share", "A", "B", "X", "Y", "GL", "GR", "C" };
         private static readonly string[] SwitchButtons = { "DpadUp", "DpadDown", "DpadLeft", "DpadRight", "Plus", "Minus", "LS", "RS",
             "L", "R", "Home", "Capture", "B", "A", "Y", "X", "GL", "GR", "C" };
+        private static readonly string[] DualSenseButtons = { "DpadUp", "DpadDown", "DpadLeft", "DpadRight", "Options", "Create", "L3", "R3",
+            "L1", "R1", "PS", "Touchpad", "Cross", "Circle", "Square", "Triangle", "GL", "GR", "C" };
         private static readonly string[] StickAxes = { "LX", "LY", "RX", "RY" };
+
+        private static string[] ButtonNames(int scheme) { return scheme == Xbox ? XboxButtons : scheme == DualSense ? DualSenseButtons : SwitchButtons; }
+        private static string TriggerName(int scheme, bool left)
+        {
+            if (scheme == Xbox) return left ? "LT" : "RT";
+            if (scheme == DualSense) return left ? "L2" : "R2";
+            return left ? "ZL" : "ZR";
+        }
+        /// <summary>Pads whose face buttons sit in the Xbox positions (input_bindings.h scheme_has_xbox_layout).</summary>
+        public static bool HasXboxLayout(int scheme) { return scheme == Xbox || scheme == DualSense; }
         private static readonly string[] MouseNames = { "MouseLeft", "MouseRight", "MouseMiddle", "Mouse4", "Mouse5" };
         private static readonly KeyValuePair<int, string>[] NamedKeys = {
             K(0x20, "Space"), K(0x0D, "Enter"), K(0x09, "Tab"), K(0x08, "Backspace"), K(0x1B, "Escape"),
@@ -102,6 +116,8 @@ namespace Nebula.Launcher
         private static KeyValuePair<int, string> K(int vk, string name) { return new KeyValuePair<int, string>(vk, name); }
 
         public int InputMode; // ModeAuto, ModeKeyboardMouse, ModeController, ModeRealWiimote (kept, not offered)
+        // home_menu: whether Wii HOME may open the game's HOME Menu (runtime ControlsConfig::home_menu). Off by default.
+        public bool HomeMenu;
         public readonly InputSource[][][] Bindings = new InputSource[SchemeCount][][];
         public readonly SchemeTuning[] Tuning = new SchemeTuning[SchemeCount];
 
@@ -113,7 +129,7 @@ namespace Nebula.Launcher
         }
 
         public static bool IsAnalog(int target) { return (target >= 11 && target <= 14) || (target >= 19 && target <= 22); }
-        public static bool HasMotion(int scheme) { return scheme == SwitchPro || scheme == SwitchPro2; }
+        public static bool HasMotion(int scheme) { return scheme == SwitchPro || scheme == SwitchPro2 || scheme == DualSense; }
 
         private static InputSource Key(int vk) { return new InputSource(SourceKind.Key, vk); }
         private static InputSource Mouse(int b) { return new InputSource(SourceKind.Mouse, b); }
@@ -152,7 +168,7 @@ namespace Nebula.Launcher
             t[19] = new[] { Pos(RightY) }; t[20] = new[] { Neg(RightY) }; t[21] = new[] { Neg(RightX) }; t[22] = new[] { Pos(RightX) };
             t[23] = new[] { Button(RightStick) };
             t[17] = new[] { Button(West), Button(North), Button(RightShoulder) };
-            if (scheme == Xbox)
+            if (HasXboxLayout(scheme))
             {
                 t[0] = new[] { Button(South) };
                 t[1] = new[] { Button(East), Pos(RightTrigger) };
@@ -161,8 +177,8 @@ namespace Nebula.Launcher
             {
                 t[0] = new[] { Button(East) };
                 t[1] = new[] { Button(South), Pos(RightTrigger) };
-                t[6] = new[] { Button(Home) };
             }
+            if (scheme != Xbox) t[6] = new[] { Button(Home) };
             return t;
         }
 
@@ -171,9 +187,9 @@ namespace Nebula.Launcher
         {
             var t = LegacyTable(scheme);
             if (scheme == Keyboard) return t;
-            bool xbox = scheme == Xbox;
-            t[0] = new[] { Button(xbox ? South : East) };
-            t[JumpBack] = new[] { Button(xbox ? East : South) };
+            bool xbox = scheme == Xbox, xboxFaces = HasXboxLayout(scheme);
+            t[0] = new[] { Button(xboxFaces ? South : East) };
+            t[JumpBack] = new[] { Button(xboxFaces ? East : South) };
             t[1] = new[] { Pos(RightTrigger) };
             t[16] = new[] { Pos(LeftTrigger) };
             t[15] = new[] { Button(LeftShoulder), Button(LeftStick) };
@@ -205,14 +221,8 @@ namespace Nebula.Launcher
             return t;
         }
 
-        /// <summary>
-        /// Super Mario Galaxy on Switch with the player's choices: A or B jump
-        /// (B backs out of menus), L/LB Star Bits, ZL/LT crouch, X/Y/ZR (Xbox
-        /// X/Y/RB/RT) or shake spin, left-stick click camera, R / right-stick
-        /// click recenters (held: pinned at the centre), gyro points, right
-        /// stick turns the camera (pointer when the gyro is off; Xbox: pointer).
-        /// </summary>
-        public static InputSource[][] DefaultTable(int scheme)
+        /// <summary>The defaults of controls version 5 (left-stick click camera), kept for migration.</summary>
+        public static InputSource[][] Version5Table(int scheme)
         {
             var t = Version3Table(scheme);
             if (scheme == Keyboard) return t;
@@ -220,6 +230,46 @@ namespace Nebula.Launcher
             t[17] = scheme == Xbox
                 ? new[] { Button(West), Button(North), Button(RightShoulder), Pos(RightTrigger) }
                 : new[] { Button(West), Button(North), Pos(RightTrigger) };
+            return t;
+        }
+
+        /// <summary>The defaults of controls version 6 (left-stick click Wii 1, right-stick click camera), kept for migration.</summary>
+        public static InputSource[][] Version6Table(int scheme)
+        {
+            var t = Version5Table(scheme);
+            if (scheme == Keyboard) return t;
+            t[2] = new[] { Button(LeftStick) };
+            t[15] = new[] { Button(RightStick) };
+            return t;
+        }
+
+        /// <summary>The defaults of controls version 7 (Wii HOME on keyboard H, Switch Home, DualSense PS), kept for migration.</summary>
+        public static InputSource[][] Version7Table(int scheme)
+        {
+            var t = Version6Table(scheme);
+            if (scheme == Keyboard) return t;
+            t[2] = new[] { Button(West) };
+            t[15] = new[] { Button(LeftStick) };
+            t[17] = scheme == Xbox
+                ? new[] { Button(North), Button(RightShoulder), Pos(RightTrigger) }
+                : new[] { Button(North), Pos(RightTrigger) };
+            return t;
+        }
+
+        /// <summary>
+        /// Super Mario Galaxy on Switch with the player's choices: A or B jump
+        /// (B backs out of menus), L/LB Star Bits, ZL/LT crouch, the north face
+        /// button/ZR (Xbox Y/RB/RT) or shake spin, the west face button (Xbox X,
+        /// DualSense square, Switch Y) Wii 1 (the Odyssey moveset's cap button),
+        /// left-stick click camera (Wii C), R / right-stick click recenters (held:
+        /// pinned at the centre), gyro points, right stick turns the camera
+        /// (pointer when the gyro is off; Xbox: pointer). Wii HOME is unbound:
+        /// the game's HOME Menu is off (home_menu).
+        /// </summary>
+        public static InputSource[][] DefaultTable(int scheme)
+        {
+            var t = Version7Table(scheme);
+            t[6] = new InputSource[0];
             return t;
         }
 
@@ -271,15 +321,20 @@ namespace Nebula.Launcher
                 var legacy = LegacyTable(s);
                 var version2 = Version2Table(s);
                 var version3 = Version3Table(s);
+                var version5 = Version5Table(s);
+                var version6 = Version6Table(s);
+                var version7 = Version7Table(s);
                 var current = DefaultTable(s);
                 for (int t = 0; t < TargetCount; t++)
                 {
                     bool old = SameBindings(Bindings[s][t], legacy[t]) || SameBindings(Bindings[s][t], version2[t]) ||
-                               SameBindings(Bindings[s][t], version3[t]);
+                               SameBindings(Bindings[s][t], version3[t]) || SameBindings(Bindings[s][t], version5[t]) ||
+                               SameBindings(Bindings[s][t], version6[t]) || SameBindings(Bindings[s][t], version7[t]);
                     if (old && !SameBindings(Bindings[s][t], current[t])) Bindings[s][t] = current[t];
                 }
                 if (version < 2 && Tuning[s].GyroPointer == LegacyTuning(s).GyroPointer) Tuning[s].GyroPointer = DefaultTuning(s).GyroPointer;
-                if (version < ControlsVersion && s != Keyboard)
+                // The still-pointer and vibration defaults changed in version 5; a later file's values are choices.
+                if (version < 5 && s != Keyboard)
                 {
                     var defaults = DefaultTuning(s);
                     bool oldSeconds = (version < 4 && Tuning[s].PointerHideSeconds == Version3PointerHideSeconds) ||
@@ -300,11 +355,11 @@ namespace Nebula.Launcher
                 case SourceKind.Key: return FormatKey(source.Code);
                 case SourceKind.Mouse: return source.Code < MouseNames.Length ? MouseNames[source.Code] : "None";
                 case SourceKind.Button:
-                    return source.Code < ButtonCount ? (scheme == Xbox ? XboxButtons : SwitchButtons)[source.Code] : "None";
+                    return source.Code < ButtonCount ? ButtonNames(scheme)[source.Code] : "None";
                 case SourceKind.AxisPositive:
                 case SourceKind.AxisNegative:
-                    if (source.Code == LeftTrigger) return scheme == Xbox ? "LT" : "ZL";
-                    if (source.Code == RightTrigger) return scheme == Xbox ? "RT" : "ZR";
+                    if (source.Code == LeftTrigger) return TriggerName(scheme, true);
+                    if (source.Code == RightTrigger) return TriggerName(scheme, false);
                     if (source.Code >= StickAxes.Length) return "None";
                     return StickAxes[source.Code] + (source.Kind == SourceKind.AxisPositive ? "+" : "-");
             }
@@ -346,10 +401,10 @@ namespace Nebula.Launcher
                 { source = Key(n); return true; }
                 return false;
             }
-            var names = scheme == Xbox ? XboxButtons : SwitchButtons;
+            var names = ButtonNames(scheme);
             for (int i = 0; i < names.Length; i++) if (string.Equals(text, names[i], ic)) { source = Button(i); return true; }
-            if (string.Equals(text, scheme == Xbox ? "LT" : "ZL", ic)) { source = Pos(LeftTrigger); return true; }
-            if (string.Equals(text, scheme == Xbox ? "RT" : "ZR", ic)) { source = Pos(RightTrigger); return true; }
+            if (string.Equals(text, TriggerName(scheme, true), ic)) { source = Pos(LeftTrigger); return true; }
+            if (string.Equals(text, TriggerName(scheme, false), ic)) { source = Pos(RightTrigger); return true; }
             if (text.Length == 3 && (text[2] == '+' || text[2] == '-'))
                 for (int i = 0; i < StickAxes.Length; i++)
                     if (string.Equals(text.Substring(0, 2), StickAxes[i], ic)) { source = text[2] == '+' ? Pos(i) : Neg(i); return true; }
@@ -372,7 +427,7 @@ namespace Nebula.Launcher
                 case SourceKind.Button:
                     if (scheme == Keyboard || s.Code >= ButtonCount) return false;
                     if (scheme == Xbox && (s.Code == Home || s.Code == Capture || s.Code >= GripLeft)) return false;
-                    if (scheme == SwitchPro && s.Code >= GripLeft) return false;
+                    if ((scheme == SwitchPro || scheme == DualSense) && s.Code >= GripLeft) return false;
                     return true;
                 case SourceKind.AxisPositive: return scheme != Keyboard && s.Code <= RightTrigger;
                 case SourceKind.AxisNegative: return scheme != Keyboard && s.Code <= RightY;
@@ -427,12 +482,20 @@ namespace Nebula.Launcher
                 else if (v.StartsWith("keyboard") || v == "kbm" || v == "mouse") InputMode = ModeKeyboardMouse;
                 return;
             }
+            if (key == "home_menu")
+            {
+                string v = value.Trim().ToLowerInvariant();
+                if (v == "1" || v == "true" || v == "on") HomeMenu = true;
+                else if (v == "0" || v == "false" || v == "off") HomeMenu = false;
+                return;
+            }
             bool bind = key.StartsWith("bind."), tune = key.StartsWith("tune.");
             if (!bind && !tune) return;
             string rest = key.Substring(5);
             int dot = rest.IndexOf('.');
             if (dot < 0) return;
-            int scheme = Array.IndexOf(SchemeIds, rest.Substring(0, dot));
+            string schemeId = rest.Substring(0, dot);
+            int scheme = schemeId == "dualsense" ? DualSense : Array.IndexOf(SchemeIds, schemeId);
             string name = rest.Substring(dot + 1);
             if (scheme < 0) return;
             if (bind)
@@ -489,6 +552,7 @@ namespace Nebula.Launcher
                 lines.Add(new KeyValuePair<string, string>("input_mode",
                     InputMode == ModeController ? "controller" : InputMode == ModeKeyboardMouse ? "keyboard_mouse" : "auto"));
             lines.Add(new KeyValuePair<string, string>("controls_version", ControlsVersion.ToString(CultureInfo.InvariantCulture)));
+            lines.Add(new KeyValuePair<string, string>("home_menu", HomeMenu ? "on" : "off"));
             for (int s = 0; s < SchemeCount; s++)
             {
                 string p = SchemeIds[s] + ".";
@@ -565,6 +629,7 @@ namespace Nebula.Launcher
         [DllImport("hid.dll")] private static extern void HidD_GetHidGuid(out Guid guid);
         [DllImport("hid.dll")] private static extern bool HidD_GetAttributes(SafeFileHandle device, ref HiddAttributes attributes);
         [DllImport("hid.dll")] private static extern bool HidD_GetPreparsedData(SafeFileHandle device, out IntPtr data);
+        [DllImport("hid.dll")] private static extern bool HidD_GetFeature(SafeFileHandle device, byte[] buffer, int length);
         [DllImport("hid.dll")] private static extern bool HidD_FreePreparsedData(IntPtr data);
         [DllImport("hid.dll")] private static extern int HidP_GetCaps(IntPtr data, ref HidpCaps caps);
         [DllImport("setupapi.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SetupDiGetClassDevsW(ref Guid guid, IntPtr enumerator, IntPtr parent, int flags);
@@ -579,7 +644,7 @@ namespace Nebula.Launcher
         private sealed class HidPad
         {
             public SafeFileHandle Handle;
-            public bool Pro2;
+            public int Scheme;  // ControlsSettings.SwitchPro, SwitchPro2 or DualSense
             public int InputLength, OutputLength;
             public Thread Reader;
             public readonly Sample State = new Sample();
@@ -616,7 +681,7 @@ namespace Nebula.Launcher
             {
                 foreach (var pad in pads)
                 {
-                    if (pad.Pro2 != (scheme == ControlsSettings.SwitchPro2) || !pad.State.Connected) continue;
+                    if (pad.Scheme != scheme || !pad.State.Connected) continue;
                     sample.Connected = true;
                     sample.Buttons = pad.State.Buttons;
                     Array.Copy(pad.State.Axes, sample.Axes, 6);
@@ -673,7 +738,8 @@ namespace Nebula.Launcher
                         path = Marshal.PtrToStringUni(new IntPtr(detail.ToInt64() + 4));
                     }
                     finally { Marshal.FreeHGlobal(detail); }
-                    if (path == null || path.IndexOf("057e", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (path == null || (path.IndexOf("057e", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                         path.IndexOf("054c", StringComparison.OrdinalIgnoreCase) < 0)) continue;
                     TryOpen(path);
                 }
             }
@@ -685,13 +751,18 @@ namespace Nebula.Launcher
             var handle = CreateFileW(path, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
             if (handle.IsInvalid) return;
             var attributes = new HiddAttributes { Size = Marshal.SizeOf(typeof(HiddAttributes)) };
-            if (!HidD_GetAttributes(handle, ref attributes) || attributes.Vendor != 0x057e ||
-                (attributes.Product != 0x2009 && attributes.Product != 0x2069))
+            bool nintendo = HidD_GetAttributes(handle, ref attributes) && attributes.Vendor == 0x057e &&
+                            (attributes.Product == 0x2009 || attributes.Product == 0x2069);
+            bool sony = attributes.Vendor == 0x054c && (attributes.Product == 0x0ce6 || attributes.Product == 0x0df2);
+            if (!nintendo && !sony)
             {
                 handle.Dispose();
                 return;
             }
-            var pad = new HidPad { Handle = handle, Pro2 = attributes.Product == 0x2069, InputLength = 64, OutputLength = 64 };
+            int scheme = sony ? ControlsSettings.DualSense
+                : attributes.Product == 0x2069 ? ControlsSettings.SwitchPro2 : ControlsSettings.SwitchPro;
+            var pad = new HidPad { Handle = handle, Scheme = scheme, InputLength = 64, OutputLength = 64 };
+            int featureLength = 41;
             IntPtr preparsed;
             if (HidD_GetPreparsedData(handle, out preparsed))
             {
@@ -700,8 +771,16 @@ namespace Nebula.Launcher
                 HidD_FreePreparsedData(preparsed);
                 pad.InputLength = Math.Max(64, (int)caps.InputLength);
                 pad.OutputLength = Math.Max(2, (int)caps.OutputLength);
+                featureLength = Math.Max(featureLength, (int)caps.FeatureLength);
             }
-            if (!pad.Pro2)
+            if (sony)
+            {
+                // Reading the calibration feature report also switches a Bluetooth DualSense to its full input report.
+                var feature = new byte[featureLength];
+                feature[0] = 0x05;
+                HidD_GetFeature(handle, feature, feature.Length);
+            }
+            else if (scheme == ControlsSettings.SwitchPro)
             {
                 bool bluetooth = path.IndexOf("{00001124-0000-1000-8000-00805f9b34fb}", StringComparison.OrdinalIgnoreCase) >= 0;
                 if (!bluetooth) { Write(pad, new byte[] { 0x80, 0x02 }); Write(pad, new byte[] { 0x80, 0x04 }); }
@@ -781,6 +860,35 @@ namespace Nebula.Launcher
                     s.Axes[i] = (i % 2) == 1 ? -v : v;
                 }
                 s.Axes[4] = (b0 & 0x40) != 0 ? 1f : 0f; s.Axes[5] = (b0 & 0x80) != 0 ? 1f : 0f;
+            }
+            else if ((size >= 64 && r[0] == 0x01) || (size >= 78 && r[0] == 0x31))
+            {
+                // DualSense (dualsense.cpp): the state block follows the report id (USB) or id + sequence (Bluetooth).
+                int o = r[0] == 0x01 ? 1 : 2;
+                byte b0 = r[o + 7], b1 = r[o + 8], b2 = r[o + 9];
+                int hatValue = b0 & 0x0F;
+                if (hatValue == 0 || hatValue == 1 || hatValue == 7) b |= 1 << ControlsSettings.DpadUp;
+                if (hatValue >= 3 && hatValue <= 5) b |= 1 << ControlsSettings.DpadDown;
+                if (hatValue >= 5 && hatValue <= 7) b |= 1 << ControlsSettings.DpadLeft;
+                if (hatValue >= 1 && hatValue <= 3) b |= 1 << ControlsSettings.DpadRight;
+                if ((b0 & 0x10) != 0) b |= 1 << ControlsSettings.West;
+                if ((b0 & 0x20) != 0) b |= 1 << ControlsSettings.South;
+                if ((b0 & 0x40) != 0) b |= 1 << ControlsSettings.East;
+                if ((b0 & 0x80) != 0) b |= 1 << ControlsSettings.North;
+                if ((b1 & 0x01) != 0) b |= 1 << ControlsSettings.LeftShoulder;
+                if ((b1 & 0x02) != 0) b |= 1 << ControlsSettings.RightShoulder;
+                if ((b1 & 0x10) != 0) b |= 1 << ControlsSettings.Back;
+                if ((b1 & 0x20) != 0) b |= 1 << ControlsSettings.Start;
+                if ((b1 & 0x40) != 0) b |= 1 << ControlsSettings.LeftStick;
+                if ((b1 & 0x80) != 0) b |= 1 << ControlsSettings.RightStick;
+                if ((b2 & 0x01) != 0) b |= 1 << ControlsSettings.Home;
+                if ((b2 & 0x02) != 0) b |= 1 << ControlsSettings.Capture;
+                for (int i = 0; i < 4; i++)
+                {
+                    float v = Math.Max(-1f, Math.Min(1f, (r[o + i] - 128) / (r[o + i] < 128 ? 128f : 127f)));
+                    s.Axes[i] = (i % 2) == 1 ? -v : v;
+                }
+                s.Axes[4] = r[o + 4] / 255f; s.Axes[5] = r[o + 5] / 255f;
             }
             else if (size >= 64 && r[0] == 0x05)
             {

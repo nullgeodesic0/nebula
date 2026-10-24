@@ -122,6 +122,7 @@ void test_ini_round_trip() {
     config.tune(ControlScheme::Keyboard).invert_pointer_y = true;
     config.tune(ControlScheme::Xbox).vibration = false;
     config.tune(ControlScheme::SwitchPro).rumble = 70;
+    config.home_menu = true;
     const std::string text = format_controls_settings(config);
     ControlsConfig parsed = default_controls_config();
     std::size_t lines = 0;
@@ -229,7 +230,7 @@ void test_evaluation() {
            "merge ORs buttons and keeps the larger axis");
 
     const KeyList keys = referenced_keys(config.table(ControlScheme::Keyboard));
-    expect(keys.count == 32u, "default keyboard map reads the 32 keys of the fixed map");
+    expect(keys.count == 31u, "default keyboard map reads the 31 keys of the fixed map (no H: HOME is unbound)");
 }
 
 void test_chord_and_capture() {
@@ -351,8 +352,8 @@ void test_switch_pro_decoding() {
     const LogicalInput logic = evaluate_pad_bindings(
         default_binding_table(ControlScheme::SwitchPro), sample, 96.0f / 255.0f);
     expect(logic.held(WiiTarget::A) && logic.held(WiiTarget::B) && logic.held(WiiTarget::Plus) &&
-               logic.held(WiiTarget::Home) && logic.held(WiiTarget::DpadUp) && !logic.held(WiiTarget::Z) && logic.held(WiiTarget::Shake),
-           "Switch defaults: A->A, L->B, ZR->spin, Plus, Home, D-pad");
+               !logic.held(WiiTarget::Home) && logic.held(WiiTarget::DpadUp) && !logic.held(WiiTarget::Z) && logic.held(WiiTarget::Shake),
+           "Switch defaults: A->A, L->B, ZR->spin, Plus, D-pad; Home is unbound");
 
     // Simple 0x3F report (Bluetooth default mode).
     std::vector<std::uint8_t> simple(12, 0);
@@ -462,6 +463,41 @@ std::array<float, 3> rotate(const std::array<float, 3>& v, const std::array<floa
     const std::array<float, 3> x{k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0]};
     return {v[0] * c + x[0] * s + k[0] * d * (1 - c), v[1] * c + x[1] * s + k[1] * d * (1 - c),
             v[2] * c + x[2] * s + k[2] * d * (1 - c)};
+}
+
+// The PlayStation scheme's defaults (upstream's PlayStation controllers; the fork's DualSense rules).
+void test_playstation_bindings() {
+    // Bindings: positional Xbox faces, PlayStation names; PS and the touchpad are unbound.
+    {
+        const BindingTable table = default_binding_table(ControlScheme::PlayStation);
+        expect(table[WiiTarget::A][0] == InputSource{SourceKind::Button, pad::kSouthBit},
+               "dualsense A is Cross");
+        expect(table[WiiTarget::Home][0].empty(), "dualsense HOME is unbound (the PS button does nothing)");
+        bool touchpad_bound = false;
+        for (std::size_t t = 0; t < kWiiTargetCount; ++t) {
+            for (const InputSource& source : table.targets[t]) {
+                touchpad_bound = touchpad_bound || source == InputSource{SourceKind::Button, pad::kCaptureBit} ||
+                                 source == InputSource{SourceKind::Button, pad::kHomeBit};
+            }
+        }
+        expect(!touchpad_bound, "the dualsense touchpad click and PS button are bound to nothing");
+        expect(format_input_source(ControlScheme::PlayStation, {SourceKind::Button, pad::kSouthBit}) == "Cross" &&
+                   format_input_source(ControlScheme::PlayStation, {SourceKind::AxisPositive, 5}) == "R2",
+               "dualsense names");
+        expect(scheme_has_motion(ControlScheme::PlayStation) && scheme_is_gamepad(ControlScheme::PlayStation),
+               "dualsense has motion");
+        expect(binding_source_allowed(ControlScheme::PlayStation, WiiTarget::Home,
+                                          {SourceKind::Button, pad::kHomeBit}),
+               "dualsense sources");
+        const ControlsConfig defaults = default_controls_config();
+        expect(defaults.tune(ControlScheme::PlayStation).gyro_pointer &&
+                   defaults.tune(ControlScheme::PlayStation).motion_shake == MotionShake::Remote,
+               "dualsense motion defaults");
+        // The overlay chord word does not swap face buttons (unlike Nintendo pads).
+        expect(settings_pad_buttons(ControlScheme::PlayStation, pad::bit(pad::kSouthBit)) ==
+                   settings_pad_buttons(ControlScheme::Xbox, pad::bit(pad::kSouthBit)),
+               "dualsense overlay faces are positional");
+    }
 }
 
 void test_motion() {
@@ -1134,11 +1170,12 @@ void test_defaults_and_migration() {
     expect(only(sw[WiiTarget::B], {SourceKind::Button, pad::kLeftShoulderBit}), "Switch: only L shoots Star Bits (Wii B)");
     expect(only(sw[WiiTarget::Z], zl), "Switch: ZL crouches (Wii Z)");
     expect(only(sw[WiiTarget::C], {SourceKind::Button, pad::kLeftStickBit}), "Switch: left-stick click resets the camera");
+    expect(only(sw[WiiTarget::One], {SourceKind::Button, pad::kWestBit}),
+           "Switch: Y (west) is Wii 1, the moveset's cap button");
     expect(only(sw[WiiTarget::PointerRecenter], {SourceKind::Button, pad::kRightShoulderBit}), "Switch: R recenters");
-    expect(sw[WiiTarget::Shake][0] == InputSource{SourceKind::Button, pad::kWestBit} &&
-               sw[WiiTarget::Shake][1] == InputSource{SourceKind::Button, pad::kNorthBit} &&
-               sw[WiiTarget::Shake][2] == zr && sw[WiiTarget::Shake][3].empty(),
-           "Switch: Y, X and ZR spin (with motion), not R");
+    expect(sw[WiiTarget::Shake][0] == InputSource{SourceKind::Button, pad::kNorthBit} &&
+               sw[WiiTarget::Shake][1] == zr && sw[WiiTarget::Shake][2].empty(),
+           "Switch: X and ZR spin (with motion), not Y or R");
     expect(sw[WiiTarget::DpadLeft][1] == InputSource{SourceKind::AxisNegative, static_cast<std::uint8_t>(PadAxis::RightX)},
            "Switch: right stick left is D-pad left (camera)");
     expect(config.tune(ControlScheme::SwitchPro).gyro_pointer && config.tune(ControlScheme::SwitchPro2).gyro_pointer,
@@ -1147,9 +1184,40 @@ void test_defaults_and_migration() {
     expect(only(xb[WiiTarget::B], {SourceKind::Button, pad::kLeftShoulderBit}), "Xbox: only LB shoots Star Bits");
     expect(only(xb[WiiTarget::Z], zl), "Xbox: LT crouches");
     expect(only(xb[WiiTarget::C], {SourceKind::Button, pad::kLeftStickBit}), "Xbox: LS click resets the camera");
-    expect(xb[WiiTarget::Shake][2] == InputSource{SourceKind::Button, pad::kRightShoulderBit} &&
-               xb[WiiTarget::Shake][3] == zr,
-           "Xbox: RB and RT spin");
+    expect(only(xb[WiiTarget::One], {SourceKind::Button, pad::kWestBit}), "Xbox: X is Wii 1");
+    {
+        const BindingTable& ds = config.table(ControlScheme::PlayStation);
+        const BindingTable& sw2 = config.table(ControlScheme::SwitchPro2);
+        expect(only(ds[WiiTarget::One], {SourceKind::Button, pad::kWestBit}) &&
+                   only(ds[WiiTarget::C], {SourceKind::Button, pad::kLeftStickBit}) &&
+                   only(sw2[WiiTarget::One], {SourceKind::Button, pad::kWestBit}) &&
+                   only(sw2[WiiTarget::C], {SourceKind::Button, pad::kLeftStickBit}),
+               "DualSense and Pro Controller 2: square / Y is Wii 1, L3 the camera reset");
+        expect(ds[WiiTarget::Shake][0] == InputSource{SourceKind::Button, pad::kNorthBit} &&
+                   ds[WiiTarget::Shake][1] == zr && ds[WiiTarget::Shake][2].empty(),
+               "DualSense: triangle and R2 spin, not square");
+        expect(config.table(ControlScheme::Keyboard)[WiiTarget::C] ==
+                       legacy_binding_table(ControlScheme::Keyboard)[WiiTarget::C] &&
+                   config.table(ControlScheme::Keyboard)[WiiTarget::Shake] ==
+                       legacy_binding_table(ControlScheme::Keyboard)[WiiTarget::Shake],
+               "the keyboard keeps C on Wii C and its spin keys");
+        // No pad button both spins and presses the cap button.
+        for (const auto scheme : {ControlScheme::Xbox, ControlScheme::SwitchPro, ControlScheme::SwitchPro2,
+                                  ControlScheme::PlayStation}) {
+            const BindingTable& table = config.table(scheme);
+            bool shared = false;
+            for (const InputSource& source : table[WiiTarget::Shake]) {
+                for (const InputSource& one : table[WiiTarget::One]) {
+                    shared = shared || (!source.empty() && source == one);
+                }
+            }
+            expect(!shared, "Wii 1 and the spin share no button");
+        }
+    }
+    expect(xb[WiiTarget::Shake][0] == InputSource{SourceKind::Button, pad::kNorthBit} &&
+               xb[WiiTarget::Shake][1] == InputSource{SourceKind::Button, pad::kRightShoulderBit} &&
+               xb[WiiTarget::Shake][2] == zr && xb[WiiTarget::Shake][3].empty(),
+           "Xbox: Y, RB and RT spin, not X");
     // A trigger bound to a level target presses at the trigger threshold.
     {
         PadSample pad_sample{};
@@ -1252,6 +1320,87 @@ void test_defaults_and_migration() {
                    v3.tune(ControlScheme::Xbox).pointer_hide_radius == kDefaultPointerHideRadius,
                "a changed hide time stays");
     }
+    // A version-5 file: the left-stick click on the camera reset and Wii 1 unbound move to the
+    // version-6 defaults; a player's own choice stays.
+    {
+        ControlsConfig v5 = default_controls_config();
+        for (std::size_t i = 0; i < kControlSchemeCount; ++i) {
+            v5.tables[i] = version5_binding_table(static_cast<ControlScheme>(i));
+        }
+        v5.table(ControlScheme::Xbox)[WiiTarget::C] = {};
+        add_binding(v5.table(ControlScheme::Xbox)[WiiTarget::C], {SourceKind::Button, pad::kBackBit});
+        expect(migrate_legacy_controls(v5, 5u) > 0u, "version-5 defaults migrate");
+        expect(v5.table(ControlScheme::PlayStation) == default_binding_table(ControlScheme::PlayStation),
+               "an untouched version-5 table becomes the current defaults");
+        expect(v5.table(ControlScheme::Xbox)[WiiTarget::C][0] == InputSource{SourceKind::Button, pad::kBackBit} &&
+                   v5.table(ControlScheme::Xbox)[WiiTarget::One] == default_binding_table(ControlScheme::Xbox)[WiiTarget::One],
+               "a changed camera reset stays; Wii 1 still moves to the west face button");
+    }
+    // A version-6 file: the left-stick click on Wii 1, the right-stick click on the camera reset and
+    // the west face button spinning move to the version-7 defaults; a player's own choice stays.
+    {
+        ControlsConfig v6 = default_controls_config();
+        for (std::size_t i = 0; i < kControlSchemeCount; ++i) {
+            v6.tables[i] = version6_binding_table(static_cast<ControlScheme>(i));
+        }
+        v6.table(ControlScheme::SwitchPro)[WiiTarget::One] = {};
+        add_binding(v6.table(ControlScheme::SwitchPro)[WiiTarget::One], {SourceKind::Button, pad::kBackBit});
+        expect(migrate_legacy_controls(v6, 6u) > 0u, "version-6 defaults migrate");
+        expect(v6.table(ControlScheme::Xbox) == default_binding_table(ControlScheme::Xbox) &&
+                   v6.table(ControlScheme::PlayStation) == default_binding_table(ControlScheme::PlayStation) &&
+                   v6.table(ControlScheme::SwitchPro2) == default_binding_table(ControlScheme::SwitchPro2),
+               "untouched version-6 tables become the version-7 defaults");
+        const BindingTable& sw6 = v6.table(ControlScheme::SwitchPro);
+        expect(sw6[WiiTarget::One][0] == InputSource{SourceKind::Button, pad::kBackBit} &&
+                   sw6[WiiTarget::C] == default_binding_table(ControlScheme::SwitchPro)[WiiTarget::C] &&
+                   sw6[WiiTarget::Shake] == default_binding_table(ControlScheme::SwitchPro)[WiiTarget::Shake],
+               "a changed cap button stays; the camera reset and the spin still move");
+        ControlsConfig v6_again = v6;
+        expect(migrate_legacy_controls(v6_again, kControlsVersion) == 0u && v6_again == v6,
+               "a migrated version-6 file is current");
+    }
+    // A version-7 file: Wii HOME on keyboard H, Switch Home and DualSense PS goes unbound; a HOME binding the
+    // player chose, and a still-pointer time and vibration strength they set, stay.
+    {
+        ControlsConfig v7 = default_controls_config();
+        for (std::size_t i = 0; i < kControlSchemeCount; ++i) {
+            v7.tables[i] = version7_binding_table(static_cast<ControlScheme>(i));
+        }
+        expect(only(v7.table(ControlScheme::PlayStation)[WiiTarget::Home], {SourceKind::Button, pad::kHomeBit}) &&
+                   only(v7.table(ControlScheme::Keyboard)[WiiTarget::Home], {SourceKind::Key, 'H'}),
+               "version 7 bound HOME to PS and H");
+        v7.table(ControlScheme::SwitchPro)[WiiTarget::Home] = {};
+        add_binding(v7.table(ControlScheme::SwitchPro)[WiiTarget::Home], {SourceKind::Button, pad::kCaptureBit});
+        v7.tune(ControlScheme::Xbox).pointer_hide_seconds = kVersion4PointerHideSeconds;
+        v7.tune(ControlScheme::PlayStation).rumble = kVersion4Rumble;
+        expect(migrate_legacy_controls(v7, 7u) > 0u, "version-7 defaults migrate");
+        for (const auto scheme : {ControlScheme::Keyboard, ControlScheme::Xbox, ControlScheme::SwitchPro2,
+                                  ControlScheme::PlayStation}) {
+            expect(v7.table(scheme)[WiiTarget::Home][0].empty(), "an untouched version-7 HOME binding goes");
+        }
+        expect(only(v7.table(ControlScheme::SwitchPro)[WiiTarget::Home], {SourceKind::Button, pad::kCaptureBit}),
+               "a HOME binding the player chose stays");
+        expect(v7.tune(ControlScheme::Xbox).pointer_hide_seconds == kVersion4PointerHideSeconds &&
+                   v7.tune(ControlScheme::PlayStation).rumble == kVersion4Rumble,
+               "a version-7 file's still-pointer time and vibration strength are choices and stay");
+        ControlsConfig v7_again = v7;
+        expect(migrate_legacy_controls(v7_again, kControlsVersion) == 0u && v7_again == v7,
+               "a migrated version-7 file is current");
+    }
+    // HOME: unbound everywhere by default, the HOME Menu off; home_menu=on|off is a controls line.
+    {
+        const ControlsConfig defaults = default_controls_config();
+        for (std::size_t i = 0; i < kControlSchemeCount; ++i) {
+            expect(defaults.tables[i][WiiTarget::Home][0].empty(), "no default binding for Wii HOME");
+        }
+        expect(!defaults.home_menu, "the HOME Menu is off by default");
+        expect(format_controls_settings(defaults).find("home_menu=off\n") != std::string::npos,
+               "home_menu=off is written");
+        ControlsConfig on = defaults;
+        expect(apply_controls_setting(on, "home_menu", "on") && on.home_menu, "home_menu=on turns it on");
+        expect(apply_controls_setting(on, "home_menu", "0") && !on.home_menu, "home_menu=0 turns it off");
+        expect(apply_controls_setting(on, "home_menu", "maybe") && !on.home_menu, "an unknown value changes nothing");
+    }
     // A version-4 file: a 2 s still pointer and 100% vibration move to 4 s and 50%. Values the player
     // changed stay.
     {
@@ -1318,26 +1467,29 @@ void test_playstation_and_steam_schemes() {
                bindings_text(ControlScheme::PlayStation, WiiTarget::B) == "L1" &&
                bindings_text(ControlScheme::PlayStation, WiiTarget::Z) == "L2" &&
                bindings_text(ControlScheme::PlayStation, WiiTarget::C) == "L3" &&
-               bindings_text(ControlScheme::PlayStation, WiiTarget::Shake) == "Square, Triangle, R2" &&
+               bindings_text(ControlScheme::PlayStation, WiiTarget::Shake) == "Triangle, R2" &&
+               bindings_text(ControlScheme::PlayStation, WiiTarget::One) == "Square" &&
                bindings_text(ControlScheme::PlayStation, WiiTarget::PointerRecenter) == "R1" &&
                bindings_text(ControlScheme::PlayStation, WiiTarget::Plus) == "Options" &&
                bindings_text(ControlScheme::PlayStation, WiiTarget::Minus) == "Share" &&
-               bindings_text(ControlScheme::PlayStation, WiiTarget::Home) == "PS" &&
+               bindings_text(ControlScheme::PlayStation, WiiTarget::Home) == "None" &&
                bindings_text(ControlScheme::PlayStation, WiiTarget::DpadUp) == "DpadUp, RY+",
            "PlayStation defaults");
     expect(bindings_text(ControlScheme::Steam, WiiTarget::A) == "A" &&
                bindings_text(ControlScheme::Steam, WiiTarget::JumpBack) == "B" &&
                bindings_text(ControlScheme::Steam, WiiTarget::B) == "LB" &&
                bindings_text(ControlScheme::Steam, WiiTarget::Z) == "LT" &&
-               bindings_text(ControlScheme::Steam, WiiTarget::Shake) == "X, Y, RT" &&
+               bindings_text(ControlScheme::Steam, WiiTarget::Shake) == "Y, RT" &&
+               bindings_text(ControlScheme::Steam, WiiTarget::One) == "X" &&
                bindings_text(ControlScheme::Steam, WiiTarget::PointerRecenter) == "RB" &&
-               bindings_text(ControlScheme::Steam, WiiTarget::Home) == "Steam",
+               bindings_text(ControlScheme::Steam, WiiTarget::Home) == "None",
            "Steam defaults");
     for (ControlScheme scheme : {ControlScheme::PlayStation, ControlScheme::Steam}) {
-        expect(legacy_binding_table(scheme) == default_binding_table(scheme) &&
-                   version2_binding_table(scheme) == default_binding_table(scheme) &&
-                   version3_binding_table(scheme) == default_binding_table(scheme),
-               "new schemes have no older defaults to migrate");
+        // Versions 1-5 share upstream's tables; the fork's versions 6-8 then move the cap button and HOME.
+        expect(legacy_binding_table(scheme) == version5_binding_table(scheme) &&
+                   version2_binding_table(scheme) == version5_binding_table(scheme) &&
+                   version3_binding_table(scheme) == version5_binding_table(scheme),
+               "new schemes have no older defaults before version 5");
         const SchemeTuning tuning = default_scheme_tuning(scheme);
         expect(tuning.gyro_pointer && tuning.motion_shake == MotionShake::Remote && tuning.vibration &&
                    tuning.pointer_hide_seconds == kDefaultPointerHideSeconds,
@@ -1550,6 +1702,7 @@ int main(int argc, char** argv) {
     test_chord_and_capture();
     test_switch_pro_decoding();
     test_switch2_decoding();
+    test_playstation_bindings();
     test_motion();
     test_pointer_ownership();
     test_stick_pointer();

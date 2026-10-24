@@ -22,7 +22,7 @@ namespace galaxy::input {
         (b.one ? 0x0200u : 0u) | (b.b ? 0x0400u : 0u) |
         (b.a ? 0x0800u : 0u) | (b.minus ? 0x1000u : 0u) |
         (snapshot.nunchuk.z ? 0x2000u : 0u) |
-        (snapshot.nunchuk.c ? 0x4000u : 0u) | (b.home ? 0x8000u : 0u);
+        (snapshot.nunchuk.c ? 0x4000u : 0u) | (b.home && home_button_enabled() ? 0x8000u : 0u);
 }
 
 struct SyntheticKpadButtons {

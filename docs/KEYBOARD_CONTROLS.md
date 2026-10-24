@@ -19,15 +19,16 @@ ZR/RT/R2 as a spin button and ZL/LT/L2 as crouch.
 | Star Bits, back (B) | `Left Shift`, `Right Shift`, right mouse button | LB | L | L1 | LB |
 | Crouch, ground pound (Z) | `Z`, `Left Ctrl`, `Right Ctrl` | LT | ZL | L2 | LT |
 | Camera reset (C) | `C` | Left stick click | Left stick click | L3 | Left stick click |
-| Spin (Wii Remote shake) | `Q`, `E` | X, Y, RB, RT | X, Y, ZR, shake the controller | Square, Triangle, R2, shake | X, Y, RT, shake |
+| Spin (Wii Remote shake) | `Q`, `E` | Y, RB, RT | X, ZR, shake the controller | Triangle, R2, shake | Y, RT, shake |
 | Move (Nunchuk stick) | `W` `A` `S` `D` | Left stick | Left stick | Left stick | Left stick |
 | Camera, first person (D-pad) | Arrow keys | D-pad | D-pad; right stick while the gyro points | same as Switch | same as Switch |
 | Pointer | Mouse, `I` `J` `K` `L` | Right stick | Gyro; right stick when the gyro is off | same as Switch | same as Switch |
 | Pointer recenter | `R` | Right stick click | R | R1 | RB |
 | Pause (Plus) | `=`, `P` | Menu | Plus | Options | Menu |
 | Minus | `-`, `M` | View | Minus | Share (Create) | View |
-| Home | `H` | - | Home | PS | Steam |
-| 1, 2 | `1`, `2` (and numpad) | - | - | - | - |
+| Home (off: see below) | - | - | - | - | - |
+| 1 (the Odyssey moveset's cap button: dive, roll, roll boost) | `1` (and numpad) | X | Y | Square | X |
+| 2 | `2` (and numpad) | - | - | - | - |
 | Shake (Nunchuk) | - | - | - | - | - |
 
 B (controllers) never shoots Star Bits: it is Wii B (back) only while a
@@ -41,6 +42,17 @@ buttons are by label (Nintendo A is Wii A); Xbox, PlayStation and Steam buttons
 by position (Cross is the south button, as Xbox A). Capture, GL, GR and C (Pro
 Controller 2), the touchpad click, mute and paddles (PlayStation), and QAM, L4,
 R4, L5, R5 and the trackpad clicks (Steam) are unbound by default.
+The west face button (Xbox X, Switch Y, PlayStation Square, Steam X) is 1, the
+Odyssey moveset's cap button, and does not spin (controls version 7).
+
+The game's HOME Menu (the Wii HOME button menu) is off: no key or button is
+bound to Wii HOME (controls version 8 removed keyboard `H`, Switch Home,
+PlayStation PS and Steam's Steam button), and while `home_menu=off` (the default) the virtual Wii Remote
+never reports HOME at all, so a HOME binding you add yourself, a mouse button
+or a second player cannot open it either. Pressing PS or Home does nothing in
+the game. For testing, `home_menu=on` in `runtime_settings.ini` (or
+`GALAXY_HOME_MENU=1`; `0` forces it off) lets HOME through again; bind it
+under F1 > Controls > Home.
 
 Pointer recenter: press R (Switch), R1/RB (PlayStation, Steam), the right stick
 click (Xbox) or `R` (keyboard) to put the pointer in the middle of the picture; it also brings a
@@ -159,6 +171,7 @@ L2 R2 L3 R3 Options Share Create PS Touchpad LeftPaddle RightPaddle Mute
 DpadUp...`; Steam `A B X Y LB RB LT RT LS RS Menu View Steam QAM L4 R4 L5 R5
 LPad RPad DpadUp...`; generic `Button1`..`Button19 LT RT DpadUp...`; sticks
 `LX+ LX- LY+ LY- RX+ RX- RY+ RY-`.
+(the fork's DualSense scheme `dualsense` reads as `playstation`).
 
 Files with an older `controls_version` are migrated on load: bindings and tuning values that
 still hold an earlier version's defaults take the current defaults, a `rumble=0` from version 4
