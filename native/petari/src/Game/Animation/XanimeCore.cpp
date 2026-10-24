@@ -6,6 +6,35 @@
 #include <JSystem/J3DGraphAnimator/J3DMtxBuffer.hpp>
 #include <JSystem/JMath/JMath.hpp>
 
+#ifdef TARGET_PC
+#include <revolution/os.h>
+
+namespace {
+    // An animation covers the joints its file has (J3DAnmTransform::field_0x1e, the ANK1/ANF1 joint count). A model
+    // with more joints than an animation (a player model built with extra face and finger joints) keeps those at
+    // their rest pose; the console read past the animation's table for them.
+    void restPoseOrTransform(const J3DAnmTransform* pAnm, J3DJoint* pJoint, u16 joint, J3DTransformInfo* pOut) {
+        if (joint < pAnm->field_0x1e) {
+            pAnm->getTransform(joint, pOut);
+            return;
+        }
+        *pOut = pJoint->getTransformInfo();
+        static const J3DAnmTransform* sReported[8];
+        for (u32 i = 0; i < 8; i++) {
+            if (sReported[i] == pAnm) {
+                return;
+            }
+            if (sReported[i] == nullptr) {
+                sReported[i] = pAnm;
+                OSReport("Xanime: an animation of %u joints on a model with joint %u: the rest pose there\n",
+                         static_cast< u32 >(pAnm->field_0x1e), static_cast< u32 >(joint));
+                return;
+            }
+        }
+    }
+}  // namespace
+#endif
+
 TVec3f (TVec3f::* XanimeCore_FORCE_EMIT())(const TVec3f&) const {
     (void)1.0f;
     (void)0.0f;
@@ -196,7 +225,11 @@ void XanimeCore::calcBlend(TVec3f* pScale, TVec3f* pTranslate) {
         XanimeTrack* pTrack = &mTrackList[i];
 
         if (pTrack->_0 != nullptr && pTrack->mWeight != 0.0f) {
+#ifdef TARGET_PC
+            restPoseOrTransform(pTrack->_0, getJoint(), joint, &transform);
+#else
             pTrack->_0->getTransform(joint, &transform);
+#endif
             Quaternion trackRotation;
             JMAEulerToQuat(transform.mRotation.x, transform.mRotation.y, transform.mRotation.z, &trackRotation);
 
@@ -252,7 +285,11 @@ void XanimeCore::calcSingle(TVec3f* pScale, TVec3f* pTranslate) {
         return;
     }
 
+#ifdef TARGET_PC
+    restPoseOrTransform(mTrackList[0]._0, getJoint(), joint, &transform);
+#else
     mTrackList[0]._0->getTransform(joint, &transform);
+#endif
     JMAEulerToQuat(transform.mRotation.x, transform.mRotation.y, transform.mRotation.z, &rotation);
     *pScale = reinterpret_cast< const TVec3f& >(transform.mScale);
     *pTranslate = reinterpret_cast< const TVec3f& >(transform.mTranslate);
@@ -309,7 +346,11 @@ void XanimeCore::calcBlendSpecial() {
         XanimeTrack* pTrack = &mTrackList[i];
 
         if (pTrack->_0 != nullptr && pTrack->mWeight != 0.0f) {
+#ifdef TARGET_PC
+            restPoseOrTransform(pTrack->_0, getJoint(), joint, &transform);
+#else
             pTrack->_0->getTransform(joint, &transform);
+#endif
             Quaternion trackRotation;
             JMAEulerToQuat(transform.mRotation.x, transform.mRotation.y, transform.mRotation.z, &trackRotation);
 
