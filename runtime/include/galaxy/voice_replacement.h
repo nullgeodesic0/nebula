@@ -46,7 +46,6 @@ struct PlaybackState {
     std::size_t position = 0;
     std::uint64_t last_start = UINT64_MAX;
     bool rendered = false;
-    double game_energy = 0.0, clip_energy = 0.0, gain = 1.0, game_peak = 0.0;
     std::uint64_t on_channel = 0, after_channel = 0, centred = 0;
     std::minstd_rand random{};
 };
