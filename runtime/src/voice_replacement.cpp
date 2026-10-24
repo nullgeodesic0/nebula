@@ -27,13 +27,6 @@ std::uint32_t s_playing = UINT32_MAX;
 std::size_t s_position = 0;
 std::uint64_t s_last_start = UINT64_MAX;
 bool s_rendered = false;  // the carrier channel took samples this subframe
-// Energy of the game's line and of the clip over the time both have played, and the clip's level from them.
-double s_game_energy = 0.0;
-double s_clip_energy = 0.0;
-double s_gain = 1.0;
-// The loudest subframe of the game's line: its trailing tail (below 1/16 of that) no longer sets the level, or the
-// clip would fade out along with the game's shorter line.
-double s_game_peak = 0.0;
 // GALAXY_TRACE_VOICE: samples of the current clip played on the game's channel, after it, and centred.
 std::uint64_t s_on_channel = 0, s_after_channel = 0, s_centred = 0;
 bool trace_enabled() noexcept {
@@ -48,7 +41,7 @@ void report(const char* why) noexcept {
     if (trace_enabled() && s_playing < s_clips.size()) {
         std::cerr << "[voice] clip " << s_playing << " " << why << ": on channel " << s_on_channel
                   << " after " << s_after_channel << " centred " << s_centred << " of "
-                  << s_clips[s_playing].samples.size() << " gain " << s_gain << '\n';
+                  << s_clips[s_playing].samples.size() << '\n';
     }
 }
 std::minstd_rand s_random{0x6d61726fu};
@@ -155,33 +148,17 @@ void render(std::int16_t* out, std::uint32_t count) noexcept {
     std::uint32_t i = 0;
     if (s_playing < s_clips.size()) {
         const std::vector<std::int16_t>& samples = s_clips[s_playing].samples;
-        if (s_position == 0) {
-            s_game_energy = 0.0;
-            s_clip_energy = 0.0;
-            s_gain = 1.0;
-            s_game_peak = 0.0;
+        // The clips come loudness-normalised with a true-peak ceiling (build_voice_mod.py), and play at that
+        // level: the game's channel volume and placement still apply. Matching each clip to the energy of the
+        // game's own line made the same clip swing by 8 dB from one play to the next (the game picks among
+        // its own takes) and pushed near-full-scale clips into clipping.
+        bool game = false;
+        for (std::uint32_t k = 0; k < count && !game; ++k) {
+            game = out[k] != 0;
         }
-        // The game's own line, decoded into `out`, sets the level: while it plays, the clip is scaled so that
-        // the two carry the same energy so far. Lines the game mixes quietly stay quiet, loud ones loud.
-        double game = 0.0;
-        double clip = 0.0;
-        for (std::uint32_t k = 0; k < count; ++k) {
-            game += static_cast<double>(out[k]) * out[k];
-            const std::size_t at = s_position + k;
-            const double c = at < samples.size() ? samples[at] : 0.0;
-            clip += c * c;
-        }
-        (game > 0.0 ? s_on_channel : s_after_channel) += count;
-        s_game_peak = std::max(s_game_peak, game);
-        if (game > 0.0 && game * 16.0 >= s_game_peak) {
-            s_game_energy += game;
-            s_clip_energy += clip;
-            if (s_clip_energy > 0.0) {
-                s_gain = std::clamp(std::sqrt(s_game_energy / s_clip_energy), 0.1, 4.0);
-            }
-        }
+        (game ? s_on_channel : s_after_channel) += count;
         for (; i < count && s_position < samples.size(); ++i, ++s_position) {
-            out[i] = static_cast<std::int16_t>(std::clamp(samples[s_position] * s_gain, -32768.0, 32767.0));
+            out[i] = samples[s_position];
         }
         if (s_position >= samples.size()) {
             report("finished");
