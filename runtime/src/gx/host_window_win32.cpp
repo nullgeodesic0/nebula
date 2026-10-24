@@ -4646,10 +4646,11 @@ void draw_native_settings_kit(const galaxy::gx::menu::Assets& assets) {
     const bool page_tab = settings_page_tab(tab);
     const std::vector<SettingsRow> page =
         page_tab ? settings_page(tab, row_render, row_runtime, row_caps) : std::vector<SettingsRow>{};
-    constexpr float kTop = 96.0f, kPitch = 31.0f;
+    // Nine rows above the status line (the help of the selected row shows there).
+    constexpr float kTop = 96.0f, kPitch = 28.0f;
     menu::TextStyle row_style = title;
-    row_style.font_w = 17.0f;
-    row_style.font_h = 22.0f;
+    row_style.font_w = 16.0f;
+    row_style.font_h = 21.0f;
     row_style.align = menu::TextStyle::Align::Left;
     std::string help;
     for (unsigned row = s_settings_first_row; row < s_settings_first_row + visible_rows; ++row) {
@@ -4677,9 +4678,9 @@ void draw_native_settings_kit(const galaxy::gx::menu::Assets& assets) {
         }
         const bool chosen = row == selected_row;
         if (chosen) {
-            menu::rect(list, space, left + 26.0f, y + 14.0f, right - 26.0f, y - 14.0f, menu::rgb255(196, 222, 255),
+            menu::rect(list, space, left + 26.0f, y + 13.0f, right - 26.0f, y - 13.0f, menu::rgb255(196, 222, 255),
                        menu::rgb255(166, 202, 250));
-            menu::rect(list, space, left + 26.0f, y + 14.0f, left + 31.0f, y - 14.0f, menu::rgb255(0, 190, 255),
+            menu::rect(list, space, left + 26.0f, y + 13.0f, left + 31.0f, y - 13.0f, menu::rgb255(0, 190, 255),
                        menu::rgb255(0, 150, 240));
         }
         style.color = chosen ? menu::rgb255(30, 40, 80) : menu::rgb255(80, 90, 130);
@@ -4711,14 +4712,14 @@ void draw_native_settings_kit(const galaxy::gx::menu::Assets& assets) {
         footer.color = status_kind == 2 ? menu::rgb255(210, 60, 60)
                        : status_kind == 1 ? menu::rgb255(0, 120, 210)
                                           : menu::rgb255(120, 130, 160);
-        menu::text(list, assets, space, footer, 0.0f, -150.0f, galaxy::gx::menu::readable_words(status), 1.0f);
+        menu::text(list, assets, space, footer, 0.0f, -160.0f, galaxy::gx::menu::readable_words(status), 1.0f);
     }
     footer.color = menu::rgb255(120, 130, 160);
     footer.font_w = 14.0f;
     footer.font_h = 18.0f;
-    menu::text(list, assets, space, footer, 0.0f, -176.0f,
+    menu::text(list, assets, space, footer, 0.0f, -181.0f,
                galaxy::gx::menu::readable_words("F1, VIEW+MENU OR MINUS+PLUS TOGGLE  TAB/LB/RB PAGE"), 1.0f);
-    menu::text(list, assets, space, footer, 0.0f, -197.0f, galaxy::gx::menu::readable_words(native_settings_hint(tab)),
+    menu::text(list, assets, space, footer, 0.0f, -200.0f, galaxy::gx::menu::readable_words(native_settings_hint(tab)),
                1.0f);
 }
 

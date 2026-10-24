@@ -8002,13 +8002,16 @@ float env_float(const char* name, float fallback, float minimum) {
 }  // namespace
 
 bool RendererD3D12::record_scene_effects() {
-    if (!scene_projection_valid_ || output_efb_active_ || replay_recording_ ||
+    // The plain scene EFB only: MSAA and the HDR scene EFB (ray tracing) are left as they are.
+    if (!scene_projection_valid_ || output_efb_active_ || replay_recording_ || efb_variant() != 0u ||
         !post_process_.ready() || !efb_color_ || !efb_depth_ || command_list_ == nullptr) {
         return false;
     }
     const RenderConfig cfg = get_render_config();
+    // Upstream's ambient occlusion (ambient_occlusion) replaces the fork's own: ours runs only with it off.
+    const unsigned own_ssao = cfg.ambient_occlusion ? 0u : std::min(cfg.ssao, 100u);
     const bool shadows = cfg.contact_shadows != 0u && scene_light_valid_;
-    const bool occlusion = post_process_.ssao_ready() && (cfg.ssao != 0u || shadows);
+    const bool occlusion = post_process_.ssao_ready() && (own_ssao != 0u || shadows);
     const bool dof = post_process_.dof_ready() && cfg.depth_of_field != 0u;
     const bool reflections = post_process_.ssr_ready() && cfg.reflections != 0u;
     // Motion blur reads the scene's motion vectors (written by the draws of a
@@ -8033,7 +8036,7 @@ bool RendererD3D12::record_scene_effects() {
     for (unsigned i = 0; i < 4u; ++i) in.proj[i] = scene_proj_[i];
     static const float radius = env_float("GALAXY_SSAO_RADIUS", 120.0f, 1.0f);
     in.radius = radius;
-    in.strength = static_cast<float>(std::min(cfg.ssao, 100u)) / 100.0f;
+    in.strength = static_cast<float>(own_ssao) / 100.0f;
     if (shadows) {
         static const float shadow_length = env_float("GALAXY_CONTACT_SHADOW_LENGTH", 80.0f, 1.0f);
         std::memcpy(in.light, scene_light_, sizeof(in.light));
