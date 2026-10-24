@@ -152,7 +152,8 @@ units behind and 380 above along their gravity, steered with the pointer stick o
 Event cameras (warps, launch stars, cutscenes) remain the game camera's, handed over as below.
 
 Only the brother in an event gets its camera; the other keeps his own the whole time. One brother's own event (a
-launch star he rides, a warp, a pipe) splits the screen even when they stand together (`solo_event`). A camera
+launch star he rides, a warp, a pipe) splits the screen even when they stand together (`solo_event`), but only with
+both brothers in play: with the other down or sitting out there is one screen, as in single player. A camera
 event the second player sets off plays in their half with the game's own camera (easing in from the second
 player's), and the first player's half keeps the game camera's last view of him, carried along with him; after
 it, his half keeps that view until the game camera is back with him (within 2500 units and settled), then eases

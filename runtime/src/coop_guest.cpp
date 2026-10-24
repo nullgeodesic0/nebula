@@ -1392,7 +1392,9 @@ void keep_camera_on_first_player(const Guest& guest, State& s) {
     // At a level start every camera is the first player's (the intro ends where the second player waits).
     s.event_second = !s.level_start && coop::camera_event_is_second(actor, s.second, event, second_special, first_special);
     // One brother's own event (his launch star, warp, pipe): the screen splits so the other keeps his own camera.
-    s.solo_event = event && !s.level_start && first_special != second_special;
+    // Only with both in play: a brother down or sitting out (co-op off, nobody dropped in) has no view to keep,
+    // and splitting for him drew the whole flight twice, both halves at full detail, for one screen's picture.
+    s.solo_event = event && !s.level_start && first_special != second_special && !s.down[0].down && !s.down[1].down;
     s.first_event = s.solo_event && first_special;
     const unsigned inputs = (event ? 1u : 0u) | (actor == s.second ? 2u : actor == s.first ? 4u : 0u) |
                             (second_special ? 8u : 0u) | (first_special ? 16u : 0u);
