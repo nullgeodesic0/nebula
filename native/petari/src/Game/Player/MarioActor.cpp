@@ -1,4 +1,5 @@
 #include "Game/Player/MarioActor.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/Animation/XanimeCore.hpp"
 #include "Game/Camera/CameraTargetArg.hpp"
 #include "Game/Enemy/KarikariDirector.hpp"
@@ -459,6 +460,10 @@ void MarioActor::init2(const TVec3f& rA, const TVec3f& rB, s32 initialAnimation)
     }
 
     _8C = 0;  // is this to indicate that we are in the process of initialization?
+#ifdef TARGET_PC
+    // Nebula's co-op: the second player beside the first (NebulaCoop.hpp).
+    NebulaCoop::afterPlayerInit(this);
+#endif
 }
 
 void MarioActor::initAfterPlacement() {

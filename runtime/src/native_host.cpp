@@ -11,6 +11,7 @@
 #include "galaxy/input_bindings.h"
 #include "galaxy/native_input.h"
 #include "galaxy/native_settings_pad.h"
+#include "galaxy/player_devices.h"
 #include "galaxy/pointer_control.h"
 #include "galaxy/rumble.h"
 #include "galaxy/tilt.h"
@@ -3659,6 +3660,100 @@ galaxy::input::WiimoteInputSnapshot build_replayed_hid_input_snapshot(
 
 // The live controls as one Wii Remote report: the bindings of every connected controller and of the keyboard and
 // mouse, the pointer from whichever source moved last, tilt, shake and the scripted test input.
+// The second player's Wii Remote (channel 1) in co-op: his controller's input, made by the input poll on the WPAD
+// thread with the first player's and read there (native_game_partner_snapshot).
+struct PartnerFrame {
+    bool present = false;            // channel 1 connected: he is in
+    galaxy::input::LogicalInput logic{};
+    bool shake = false;
+};
+PartnerFrame g_partner;
+
+// GALAXY_INPUT_PARTNER_SCRIPT (buttons, as GALAXY_INPUT_AUTOPRESS_SCRIPT) and GALAXY_INPUT_PARTNER_STICK_SCRIPT
+// (as GALAXY_INPUT_STICK_SCRIPT): a scripted second controller for tests, in from GALAXY_INPUT_PARTNER_JOIN_VI (0).
+bool scripted_partner(std::uint64_t current_vi, NativeInputScriptOverlay& overlay) {
+    static const bool scripted = read_env_string("GALAXY_INPUT_PARTNER_SCRIPT").has_value() ||
+                                 read_env_string("GALAXY_INPUT_PARTNER_STICK_SCRIPT").has_value();
+    if (!scripted) return false;
+    static const std::uint64_t join_vi = read_env_u64_optional("GALAXY_INPUT_PARTNER_JOIN_VI").value_or(0);
+    overlay = {};
+    apply_button_script_env(overlay, current_vi, "GALAXY_INPUT_PARTNER_SCRIPT");
+    apply_stick_script_env(overlay, current_vi, "GALAXY_INPUT_PARTNER_STICK_SCRIPT");
+    return current_vi >= join_vi;
+}
+
+// Routes this poll's devices between the brothers (player_devices.h) and keeps the second player's frame. Returns
+// the route; the first player takes the devices it says feed him.
+galaxy::players::Route route_players(std::span<const galaxy::players::DeviceFrame> devices, std::uint64_t current_vi) {
+    static galaxy::players::Router s_router;
+    static bool s_loaded = false;
+    if (!s_loaded) {
+        s_router.parse_seats(galaxy::get_runtime_settings().player_devices.data());
+        s_loaded = true;
+    }
+    const bool coop = galaxy::coop_for_boot();
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    NativeInputScriptOverlay script{};
+    const bool scripted = scripted_partner(current_vi, script);
+    // A scripted second player has no device here: the router sees him out.
+    galaxy::players::Route route = s_router.step(devices, g_partner.present && !scripted, now, coop);
+    for (const galaxy::players::Event& event : s_router.take_events()) {
+        static const char* const kNames[] = {"joined", "disconnected", "reconnected", "left"};
+        std::cerr << "[coop] second player " << kNames[static_cast<int>(event.kind)] << " (device " << std::hex
+                  << event.device << std::dec << ")\n";
+    }
+    if (!coop) {
+        g_partner = {};
+        return route;
+    }
+    if (scripted) {
+        g_partner.present = true;
+        return route;
+    }
+    // In on a free controller's +, out when the grace for his lost controller ends.
+    if (!g_partner.present && route.second != galaxy::players::kNoDevice) {
+        g_partner.present = true;
+    } else if (g_partner.present && route.second == galaxy::players::kNoDevice && !route.waiting) {
+        g_partner.present = false;
+    }
+    return route;
+}
+
+// The second player's remote report from his controller's input: buttons, Nunchuk stick, C and Z and a shake; no
+// pointer yet.
+galaxy::input::WiimoteInputSnapshot partner_snapshot(std::uint64_t current_vi, galaxy::input::PlayContext context) {
+    galaxy::input::WiimoteInputSnapshot snapshot{};
+    NativeInputScriptOverlay script{};
+    (void)scripted_partner(current_vi, script);
+    const galaxy::input::LogicalInput& logic = g_partner.logic;
+    using galaxy::input::WiiTarget;
+    const auto held = [&logic](WiiTarget target) { return logic.held(target); };
+    snapshot.buttons.left = held(WiiTarget::DpadLeft) || script.buttons.left;
+    snapshot.buttons.right = held(WiiTarget::DpadRight) || script.buttons.right;
+    snapshot.buttons.down = held(WiiTarget::DpadDown) || script.buttons.down;
+    snapshot.buttons.up = held(WiiTarget::DpadUp) || script.buttons.up;
+    snapshot.buttons.plus = held(WiiTarget::Plus) || script.buttons.plus;
+    snapshot.buttons.minus = held(WiiTarget::Minus) || script.buttons.minus;
+    snapshot.buttons.one = held(WiiTarget::One) || script.buttons.one;
+    snapshot.buttons.two = held(WiiTarget::Two) || script.buttons.two;
+    static galaxy::input::JumpBackLatch s_jump_back{};
+    const galaxy::input::JumpBackLatch::Output jump_back = s_jump_back.update(held(WiiTarget::JumpBack), context);
+    snapshot.buttons.a = held(WiiTarget::A) || jump_back.a || script.buttons.a;
+    snapshot.buttons.b = held(WiiTarget::B) || jump_back.b || script.buttons.b;
+    const float stick_x = script.has_stick ? script.stick_x : logic.stick_x;
+    const float stick_y = script.has_stick ? script.stick_y : logic.stick_y;
+    snapshot.nunchuk.stick_x = galaxy::input::native_stick_axis_byte(stick_x, 0x15, 0x7b, 0xe0);
+    snapshot.nunchuk.stick_y = galaxy::input::native_stick_axis_byte(stick_y, 0x1d, 0x81, 0xe6);
+    snapshot.nunchuk.c = held(WiiTarget::C) || script.nunchuk_c;
+    snapshot.nunchuk.z = held(WiiTarget::Z) || script.nunchuk_z;
+    galaxy::input::publish_wiimote_ir_dots(snapshot, 0.0f, 0.0f, false);
+    static galaxy::input::tilt::Tilt s_tilt{};
+    apply_tilt_accel(snapshot, s_tilt, galaxy::input::tilt::Section::None, nullptr, 0.0f, 0.0f, false);
+    snapshot.shake = g_partner.shake || held(WiiTarget::Shake) || script.shake;
+    snapshot.nunchuk_shake = held(WiiTarget::NunchukShake);
+    return snapshot;
+}
+
 galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     std::uint64_t current_vi,
     const galaxy::RuntimeInputModeState& input_mode_state,
@@ -3840,15 +3935,68 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     };
     galaxy::input::tilt::Vec3 tilt_up_value{0.0f, 1.0f, 0.0f};
     const galaxy::input::tilt::Vec3* tilt_up = nullptr;
+    // Every device's input this poll, then which brother it is for (player_devices.h): in co-op a free
+    // controller's + brings the second player in and that controller is his.
+    std::array<galaxy::input::LogicalInput, XUSER_MAX_COUNT + kMaxHidPads> pad_logics{};
+    std::array<galaxy::players::DeviceFrame, XUSER_MAX_COUNT + kMaxHidPads + 1u> device_frames{};
+    std::size_t device_frame_count = 0u;
+    const std::uint32_t plus_bit = galaxy::input::wii_target_bit(galaxy::input::WiiTarget::Plus);
+    if (use_pads) {
+        for (std::size_t index = 0; index < live_pads.size(); ++index) {
+            const LivePad& pad = live_pads[index];
+            if (!pad.sample.connected) {
+                s_pad_previous_pressed[index] = 0u;
+                continue;
+            }
+            const galaxy::input::SchemeTuning& tuning = controls.config.tune(pad.sample.scheme);
+            const std::uint32_t previous = s_pad_previous_pressed[index];
+            pad_logics[index] = galaxy::input::evaluate_pad_bindings(
+                controls.config.table(pad.sample.scheme), pad.sample, trigger_threshold, previous,
+                tuning.gyro_pointer && pad.imu_live);
+            s_pad_previous_pressed[index] = pad_logics[index].pressed;
+            const bool moved = pad_has_input(pad.sample) || pad.shake_remote || pad.shake_nunchuk ||
+                               std::fabs(pad.gyro_x) + std::fabs(pad.gyro_y) > 0.003f;
+            device_frames[device_frame_count++] = {
+                pad_key(pad), moved, (pad_logics[index].pressed & plus_bit) != 0u && (previous & plus_bit) == 0u};
+        }
+    } else {
+        s_pad_previous_pressed = {};
+    }
+    galaxy::input::LogicalInput keyboard_logic{};
+    if (use_keyboard) {
+        keyboard_logic = galaxy::input::evaluate_keyboard_bindings(keyboard_table, keyboard_levels);
+        if (controls.config.tune(galaxy::input::ControlScheme::Keyboard).invert_pointer_y) {
+            keyboard_logic.pointer_y = -keyboard_logic.pointer_y;
+        }
+        static std::uint32_t s_keyboard_previous = 0u;
+        const bool keys_moved =
+            keyboard_logic.pressed != 0u || keyboard_logic.stick_x != 0.0f || keyboard_logic.stick_y != 0.0f;
+        device_frames[device_frame_count++] = {galaxy::players::kKeyboard, keys_moved,
+                                               (keyboard_logic.pressed & plus_bit) != 0u &&
+                                                   (s_keyboard_previous & plus_bit) == 0u};
+        s_keyboard_previous = keyboard_logic.pressed;
+    }
+    const galaxy::players::Route route =
+        route_players(std::span(device_frames.data(), device_frame_count), current_vi);
+    s_driving_pad = route.driving == galaxy::players::kKeyboard ? kDrivingKeyboard
+                    : route.driving == galaxy::players::kNoDevice ? kDrivingNone
+                                                                  : route.driving;
+    g_partner.logic = {};
+    g_partner.shake = false;
+    if (route.second == galaxy::players::kKeyboard) {
+        g_partner.logic = keyboard_logic;
+    }
+    if (use_keyboard && !route.feeds_first(galaxy::players::kKeyboard)) {
+        keyboard_logic = {};
+    } else if (route.is_join_candidate(galaxy::players::kKeyboard)) {
+        keyboard_logic.pressed &= ~plus_bit;
+    }
     if (use_pads) {
         const LivePad* driving = nullptr;
         const LivePad* first_connected = nullptr;
         for (const LivePad& pad : live_pads) {
-            if (!pad.sample.connected) continue;
+            if (!pad.sample.connected || !route.feeds_first(pad_key(pad))) continue;
             if (first_connected == nullptr) first_connected = &pad;
-            const bool moved = pad_has_input(pad.sample) || pad.shake_remote || pad.shake_nunchuk ||
-                               std::fabs(pad.gyro_x) + std::fabs(pad.gyro_y) > 0.003f;
-            if (moved) s_driving_pad = pad_key(pad);
             if (pad_key(pad) == s_driving_pad) driving = &pad;
         }
         if (driving == nullptr && s_driving_pad != kDrivingKeyboard) driving = first_connected;
@@ -3858,16 +4006,19 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
         }
         for (std::size_t index = 0; index < live_pads.size(); ++index) {
             const LivePad& pad = live_pads[index];
-            if (!pad.sample.connected) {
-                s_pad_previous_pressed[index] = 0u;
-                continue;
-            }
+            if (!pad.sample.connected) continue;
             const galaxy::input::SchemeTuning& tuning = controls.config.tune(pad.sample.scheme);
             const bool gyro_pointing = tuning.gyro_pointer && pad.imu_live;
-            galaxy::input::LogicalInput pad_logic = galaxy::input::evaluate_pad_bindings(
-                controls.config.table(pad.sample.scheme), pad.sample, trigger_threshold,
-                s_pad_previous_pressed[index], gyro_pointing);
-            s_pad_previous_pressed[index] = pad_logic.pressed;
+            galaxy::input::LogicalInput pad_logic = pad_logics[index];
+            const galaxy::players::DeviceKey key = pad_key(pad);
+            if (key == route.second) {
+                g_partner.logic = pad_logic;
+                g_partner.shake = pad.shake_remote || pad.shake_nunchuk;
+                continue;
+            }
+            if (!route.feeds_first(key)) continue;
+            // A free controller's + asks for the second player, never the first player's pause.
+            if (route.is_join_candidate(key)) pad_logic.pressed &= ~plus_bit;
             if (tuning.invert_pointer_y) pad_logic.pointer_y = -pad_logic.pointer_y;
             if (std::fabs(pad_logic.pointer_x) + std::fabs(pad_logic.pointer_y) >
                 std::fabs(pad_logic_all.pointer_x) + std::fabs(pad_logic_all.pointer_y)) {
@@ -3887,18 +4038,6 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
                 gyro_x += pad.gyro_x;
                 gyro_y += tuning.invert_pointer_y ? -pad.gyro_y : pad.gyro_y;
             }
-        }
-    } else {
-        s_pad_previous_pressed = {};
-    }
-    galaxy::input::LogicalInput keyboard_logic{};
-    if (use_keyboard) {
-        keyboard_logic = galaxy::input::evaluate_keyboard_bindings(keyboard_table, keyboard_levels);
-        if (controls.config.tune(galaxy::input::ControlScheme::Keyboard).invert_pointer_y) {
-            keyboard_logic.pointer_y = -keyboard_logic.pointer_y;
-        }
-        if (keyboard_logic.pressed != 0u || keyboard_logic.stick_x != 0.0f || keyboard_logic.stick_y != 0.0f) {
-            s_driving_pad = kDrivingKeyboard;
         }
     }
     {
@@ -4344,6 +4483,19 @@ galaxy::input::WiimoteInputSnapshot native_game_wiimote_snapshot(
         : galaxy::input::tilt::Section::None;
     return build_native_hid_input_snapshot(
         current_vi, galaxy::get_runtime_input_mode_state(), ir_enabled, context, section);
+}
+
+bool native_game_partner_snapshot(
+    std::uint64_t current_vi,
+    std::int32_t star_pointer_mode,
+    galaxy::input::WiimoteInputSnapshot& snapshot) {
+    if (!g_partner.present) return false;
+    const galaxy::input::PlayContext context =
+        star_pointer_mode >= 0 && static_cast<std::uint32_t>(star_pointer_mode) < galaxy::input::kStarPointerModeCount
+        ? galaxy::input::play_context_from_star_pointer_mode(static_cast<std::uint32_t>(star_pointer_mode))
+        : galaxy::input::PlayContext::Play;
+    snapshot = partner_snapshot(current_vi, context);
+    return true;
 }
 
 void native_game_rumble(bool motor_on, std::int32_t star_pointer_mode) noexcept {

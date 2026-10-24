@@ -1,4 +1,5 @@
 #include "Game/Map/RaceManager.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/NPC/EventDirector.hpp"
 #include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/Scene/ScenePlayingResult.hpp"
@@ -160,6 +161,12 @@ namespace MR {
     }
 
     bool isPlayerLuigi() {
+#ifdef TARGET_PC
+        bool second = false;
+        if (NebulaCoop::isMakingSecond(&second)) {
+            return second;
+        }
+#endif
         return !GameDataFunction::isDataMario();
     }
 

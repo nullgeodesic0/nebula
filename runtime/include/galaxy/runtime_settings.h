@@ -1,6 +1,7 @@
 // Player settings in runtime_settings.ini: input mode, audio gains, text speed, language, Discord status.
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <cstdint>
 
@@ -65,11 +66,17 @@ struct RuntimeSettings {
     // Animation smoothing and Mario's movement feel (nebula_motion_style.h): 0 original, 1 smooth, 2 modern.
     // Changes live.
     unsigned motion_style = 0u;
+    // Local co-op (nebula_coop.h): Luigi joins when a second controller presses +. Takes effect at the next start.
+    bool coop = false;
+    // Which controller plays which brother (player_devices.h): `xbox.0=second,keyboard.0=first`.
+    std::array<char, 128> player_devices{};
 };
 
 // The language the game runs in this session: the setting when the game first asks (at boot), then
 // fixed, so a change made while playing never mixes two languages.
 [[nodiscard]] GameLanguage game_language_for_boot() noexcept;
+// Co-op for this session: the setting when the game first asks (at boot, its heaps are sized for it), then fixed.
+[[nodiscard]] bool coop_for_boot() noexcept;
 // Whether the game has asked yet, and if so, its language.
 [[nodiscard]] bool running_game_language(GameLanguage& language) noexcept;
 // "english", "french" or "spanish" (runtime_settings.ini).

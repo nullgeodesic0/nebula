@@ -1985,6 +1985,12 @@ uint32_t svc_option(void*, uint32_t what) {
 #else
         return 0;
 #endif
+    case NEBULA_OPTION_COOP:
+#if defined(NEBULA_HOST_RENDERER)
+        return galaxy::coop_for_boot() ? 1u : 0u;
+#else
+        return 0;
+#endif
     case NEBULA_OPTION_DRAW_IDENTITIES:
 #if defined(NEBULA_HOST_RENDERER)
         return galaxy::gx::draw_identity_wanted() ? 1u : 0u;
@@ -2054,7 +2060,8 @@ uint32_t svc_sc_get(void*, uint32_t item) {
 // connected when the game starts WPAD and reporting 100 times a second in the format the game asks for. Headless, the
 // same remote at rest: the game sees a connected controller (no "connect the Wii Remote" pause) and no input.
 std::atomic<int> gWpadStarted{0};
-std::atomic<uint32_t> gWpadReport{0x30};
+// Per channel: 0 the first player's remote, 1 co-op's second player's (connected while he plays).
+std::atomic<uint32_t> gWpadReport[2]{0x30, 0x30};
 std::atomic<int> gWpadDpd{0};
 
 uint8_t report_id_for_format(uint32_t format) {
@@ -2126,12 +2133,14 @@ void wpad_thread() {
     connection.extension = 1;  // WPAD_DEV_FREESTYLE: the Nunchuk
     connection.battery = 0xC0;
     gModule.wpad_connect(0, 1, &connection);
+    bool partner_connected = false;
+    (void)partner_connected;
     const auto period = std::chrono::milliseconds(10);
     auto next = Clock::now() + period;
     for (;;) {
         sleep_until_precise(next);
         next += period;
-        const uint8_t id = static_cast<uint8_t>(gWpadReport.load(std::memory_order_relaxed));
+        const uint8_t id = static_cast<uint8_t>(gWpadReport[0].load(std::memory_order_relaxed));
 #if !defined(NEBULA_HOST_RENDERER)
         uint8_t idle[22];
         gModule.wpad_report(0, idle, idle_wiimote_report(id, idle), nullptr);
@@ -2151,11 +2160,32 @@ void wpad_thread() {
             gModule.wpad_shake(0, (snapshot.shake ? 1u : 0u) | (snapshot.nunchuk_shake ? 2u : 0u));
             gModule.wpad_report(0, report + 1, built.size - 1, snapshot.pointer_exact ? &pointer : nullptr);
         }
+        // Co-op's second player: his remote connects when he joins and goes when he leaves (NebulaCoop.cpp).
+        galaxy::input::WiimoteInputSnapshot partner{};
+        const bool partner_in = galaxy::host::native_game_partner_snapshot(
+            gRetraces.load(std::memory_order_relaxed), mode, partner);
+        if (partner_in != partner_connected) {
+            partner_connected = partner_in;
+            gModule.wpad_connect(1, partner_in ? 1 : 0, &connection);
+            std::fprintf(stderr, "[coop] remote 2 %s\n", partner_in ? "connected" : "disconnected");
+        }
+        if (partner_in) {
+            const uint8_t partner_id = static_cast<uint8_t>(gWpadReport[1].load(std::memory_order_relaxed));
+            const auto partner_built = galaxy::input::build_wiimote_input_report(partner_id, partner, report);
+            if (partner_built.status == galaxy::input::WiimoteReportBuildStatus::Ok && partner_built.size > 1) {
+                gModule.wpad_shake(1, (partner.shake ? 1u : 0u) | (partner.nunchuk_shake ? 2u : 0u));
+                gModule.wpad_report(1, report + 1, partner_built.size - 1, nullptr);
+            }
+        }
 #endif
     }
 }
 
 void svc_wpad_control(void*, uint32_t chan, uint32_t what, uint32_t value) {
+    if (chan == 1 && what == NEBULA_WPAD_FORMAT) {
+        gWpadReport[1].store(report_id_for_format(value), std::memory_order_relaxed);
+        return;
+    }
     if (chan != 0) {
         return;
     }
@@ -2164,7 +2194,7 @@ void svc_wpad_control(void*, uint32_t chan, uint32_t what, uint32_t value) {
         gWpadStarted.store(1, std::memory_order_release);
         break;
     case NEBULA_WPAD_FORMAT:
-        gWpadReport.store(report_id_for_format(value), std::memory_order_relaxed);
+        gWpadReport[0].store(report_id_for_format(value), std::memory_order_relaxed);
         break;
     case NEBULA_WPAD_DPD:
         gWpadDpd.store(value != 0, std::memory_order_relaxed);

@@ -120,6 +120,12 @@ GamePaths locate_game(const std::filesystem::path& input);
     bool ir_enabled,
     std::int32_t star_pointer_mode,
     std::uint8_t tilt_section);
+// Co-op's second player (player_devices.h): whether he is in (his remote, channel 1, connected) and, when he is, his
+// controller's input as of the last native_game_wiimote_snapshot.
+[[nodiscard]] bool native_game_partner_snapshot(
+    std::uint64_t current_vi,
+    std::int32_t star_pointer_mode,
+    galaxy::input::WiimoteInputSnapshot& snapshot);
 // The game's motor bit to the controller in use, held off in menus (the HOME Menu, pause, error). Renew it with every
 // input report: a motor whose state goes stale stops.
 void native_game_rumble(bool motor_on, std::int32_t star_pointer_mode) noexcept;

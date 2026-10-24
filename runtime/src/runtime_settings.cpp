@@ -160,6 +160,11 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
         if (_stricmp(value, "playstation") == 0) settings.button_prompts = ButtonPrompts::DualSense;
     } else if (std::strcmp(key, "custom_voice") == 0) {
         settings.custom_voice = value[0] != '0' && _stricmp(value, "off") != 0;
+    } else if (std::strcmp(key, "coop") == 0) {
+        settings.coop = value[0] != '0' && _stricmp(value, "off") != 0;
+    } else if (std::strcmp(key, "player_devices") == 0) {
+        settings.player_devices.fill('\0');
+        (void)strncpy_s(settings.player_devices.data(), settings.player_devices.size(), value, _TRUNCATE);
     } else if (std::strcmp(key, "motion_style") == 0) {
         for (unsigned style = 0u; style < 3u; ++style) {
             if (_stricmp(value, motion_style_key(style)) == 0) settings.motion_style = style;
@@ -321,6 +326,7 @@ void apply_env_overrides(RuntimeSettings& settings) {
     apply_env(settings, "GALAXY_CUSTOM_VOICE", "custom_voice");
     apply_env(settings, "GALAXY_MOTION_STYLE", "motion_style");
     apply_env(settings, "GALAXY_ODYSSEY_MOVESET", "odyssey_moveset");
+    apply_env(settings, "GALAXY_TWO_PLAYERS", "coop");
 }
 
 }  // namespace
@@ -354,6 +360,22 @@ GameLanguage game_language_for_boot() noexcept {
             ? chosen : expected;
     }
     return static_cast<GameLanguage>(running);
+}
+
+namespace {
+// 0 until the game first asks, then 1 (off) or 2 (on).
+std::atomic<std::uint8_t> s_running_coop{0u};
+}  // namespace
+
+bool coop_for_boot() noexcept {
+    std::uint8_t running = s_running_coop.load(std::memory_order_acquire);
+    if (running == 0u) {
+        std::uint8_t expected = 0u;
+        const std::uint8_t chosen = get_runtime_settings().coop ? 2u : 1u;
+        running = s_running_coop.compare_exchange_strong(expected, chosen, std::memory_order_acq_rel)
+            ? chosen : expected;
+    }
+    return running == 2u;
 }
 
 bool running_game_language(GameLanguage& language) noexcept {
@@ -479,6 +501,8 @@ bool save_runtime_settings_to_file() {
                  << "moveset_dive=" << (settings.moveset.dive ? "on" : "off") << '\n'
                  << "moveset_turn_boost=" << (settings.moveset.turn_boost ? "on" : "off") << '\n'
                  << "moveset_second_player=" << (settings.moveset.second_player ? "on" : "off") << '\n'
+                 << "coop=" << (settings.coop ? "on" : "off") << '\n'
+                 << "player_devices=" << settings.player_devices.data() << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;

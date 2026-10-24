@@ -91,6 +91,7 @@ target_link_libraries(galaxy_atomic_file PUBLIC galaxy_runtime_abi)
 add_library(galaxy_runtime_settings STATIC
     runtime/src/runtime_settings.cpp
     runtime/src/input_bindings.cpp
+    runtime/src/player_devices.cpp
     runtime/src/achievements.cpp
     runtime/src/stats.cpp)
 target_link_libraries(galaxy_runtime_settings PUBLIC galaxy_runtime_abi galaxy_atomic_file)
@@ -581,6 +582,9 @@ galaxy_test(galaxy_odyssey_moveset_tests SOURCES ${rt}/odyssey_moveset_tests.cpp
 target_include_directories(galaxy_odyssey_moveset_tests PRIVATE native/include)
 galaxy_test(galaxy_motion_style_tests SOURCES ${rt}/motion_style_tests.cpp)
 target_include_directories(galaxy_motion_style_tests PRIVATE native/include)
+galaxy_test(galaxy_coop_tests SOURCES ${rt}/coop_tests.cpp)
+target_include_directories(galaxy_coop_tests PRIVATE native/include)
+galaxy_test(galaxy_player_devices_tests SOURCES ${rt}/player_devices_tests.cpp LIBS galaxy_runtime_settings)
 if(WIN32)
     galaxy_test(galaxy_button_prompts_tests SOURCES ${rt}/button_prompts_tests.cpp LIBS galaxy_runtime_settings galaxy_native_input)
 endif()

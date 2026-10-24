@@ -1,4 +1,5 @@
 #include "Game/NameObj/NameObjListExecutor.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/Scene/SceneFunction.hpp"
 
 NameObjListExecutor::NameObjListExecutor() : mBufferHolder(), mMovementList(), mCalcAnimList(), mDrawList() {
@@ -85,6 +86,9 @@ void NameObjListExecutor::removeToDraw(NameObj* pObj, int category) {
 
 void NameObjListExecutor::executeMovement(int category) {
     mMovementList->execute(category);
+#ifdef TARGET_PC
+    NebulaCoop::afterMovement(category);
+#endif
 }
 
 void NameObjListExecutor::executeCalcAnim(int category) {

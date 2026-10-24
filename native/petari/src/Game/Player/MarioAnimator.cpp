@@ -8,6 +8,8 @@
 #include "Game/Player/MarioActor.hpp"
 #include "Game/Player/MarioAnimatorData.hpp"
 #include "Game/Player/MarioConst.hpp"
+#include "Game/Player/NebulaCoop.hpp"
+#include <cstring>
 #include "Game/Player/MarioState.hpp"
 #include "Game/Util/ActorSensorUtil.hpp"
 #include "Game/Util/DemoUtil.hpp"
@@ -56,7 +58,20 @@ void MarioAnimator::init() {
         luigiAnimations = luigiAnimeSwapTable;
     }
 
-    mResourceTable = new XanimeResourceTable(MR::getResourceHolder(mActor), marioAnimeTable, marioAnimeAuxTable, marioAnimeOfsTable,
+    XanimeGroupInfo* pGroups = marioAnimeTable;
+#ifdef TARGET_PC
+    // Nebula's co-op: the resource table resolves each group's animations into the table it is given, so each
+    // player gets his own copy (the brothers' animations come from their own archives).
+    if (NebulaCoop::isAvailable()) {
+        u32 count = 0;
+        while (marioAnimeTable[count].mParent.mAnimationName[0] != '\0') {
+            count++;
+        }
+        pGroups = new XanimeGroupInfo[count + 1];
+        memcpy(pGroups, marioAnimeTable, sizeof(XanimeGroupInfo) * (count + 1));
+    }
+#endif
+    mResourceTable = new XanimeResourceTable(MR::getResourceHolder(mActor), pGroups, marioAnimeAuxTable, marioAnimeOfsTable,
                                              reinterpret_cast< XanimeBckTable* >(singleAnimeTable), doubleAnimeTable, tripleAnimeTable,
                                              quadAnimeTable, luigiAnimations);
 

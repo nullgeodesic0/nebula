@@ -1,6 +1,7 @@
 #include "Game/System/GameSystemSceneController.hpp"
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/NameObj/NameObjHolder.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/Scene/IntermissionScene.hpp"
 #include "Game/Scene/PlayTimerScene.hpp"
 #include "Game/Scene/ScenarioSelectScene.hpp"
@@ -72,7 +73,13 @@ void SceneControlInfo::setStartIdInfo(const JMapIdInfo& rInfo) {
 GameSystemSceneController::GameSystemSceneController()
     : mSpine(), mNextNerve(), mIsResetProcessing(), mScenarioParser(), mObjHolder(), mScene(), mSceneInitializeState(), mIntermissionScene(),
       mPlayTimerScene(), mScenarioSelectScene() {
+#ifdef TARGET_PC
+    // Nebula's co-op: the second player's MarioActor, models and parts add their own entries (the table has no
+    // bounds check; big galaxies ran past it).
+    mObjHolder = new NameObjHolder(NebulaCoop::isAvailable() ? 0x1300 + 0x800 : 0x1300);
+#else
     mObjHolder = new NameObjHolder(0x1300);
+#endif
     mSpine = new Spine(this, GET_NERVE(GameSystemSceneController, GameSystemSceneControllerNotInitialized));
     mIntermissionScene = static_cast< IntermissionScene* >(MR::createScene("Intermission"));
     mPlayTimerScene = new PlayTimerScene();

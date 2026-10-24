@@ -6,6 +6,7 @@
 #include "Game/System/HeapMemoryWatcher.hpp"
 #include "Game/System/ResourceHolder.hpp"
 #include "Game/System/StationedFileInfo.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/Util/FileUtil.hpp"
 #include "Game/Util/MemoryUtil.hpp"
 #include "Game/Util/NerveUtil.hpp"
@@ -39,6 +40,13 @@ bool ConditionUsePlayerHeap::isExecute(const MR::StationedFileInfo* pInfo) const
         type = MR::StationedFileInfo::LOAD_TYPE_MOUNT_RESOURCE_MARIO;
     }
 
+#ifdef TARGET_PC
+    // Nebula's co-op: the other character's model, face and shadow load too (NebulaCoop.hpp).
+    if (NebulaCoop::isAvailable()) {
+        return pInfo->mLoadType == MR::StationedFileInfo::LOAD_TYPE_MOUNT_RESOURCE_MARIO ||
+               pInfo->mLoadType == MR::StationedFileInfo::LOAD_TYPE_MOUNT_RESOURCE_LUIGI;
+    }
+#endif
     return pInfo->mLoadType == type;
 }
 
@@ -57,8 +65,14 @@ JKRHeap* ConditionUsePlayerHeap::getProperHeap(const MR::StationedFileInfo* pInf
 
 PlayerHeapHolder::PlayerHeapHolder() : mCondition(), mNapaHeap(), mGDDRHeap(), mIsDataMario(true) {
     ConditionUsePlayerHeap* condition = new ConditionUsePlayerHeap();
-    mNapaHeap = PlayerHeapHolder::createHeap(0x500000, MR::getStationedHeapNapa());
-    JKRExpHeap* gddr = PlayerHeapHolder::createHeap(0x500000, MR::getStationedHeapGDDR3());
+#ifdef TARGET_PC
+    // Nebula's co-op: room for both characters' archives (the loader shrinks the heaps to fit once loaded).
+    const u32 size = NebulaCoop::isAvailable() ? 0x700000 : 0x500000;
+#else
+    const u32 size = 0x500000;
+#endif
+    mNapaHeap = PlayerHeapHolder::createHeap(size, MR::getStationedHeapNapa());
+    JKRExpHeap* gddr = PlayerHeapHolder::createHeap(size, MR::getStationedHeapGDDR3());
     mGDDRHeap = gddr;
     condition->mNapaHeap = mNapaHeap;
     condition->mGDDRHeap = gddr;
@@ -276,6 +290,13 @@ void GameSystemStationedArchiveLoader::startToLoadStationedArchiveOthers() {
 void GameSystemStationedArchiveLoader::createAndAddPlayerArchives(bool isDataMario) {
     ConditionIsEqualType cond(isDataMario);
     StationedArchiveLoader::createAndAddResourcesFromTable(cond);
+#ifdef TARGET_PC
+    // Nebula's co-op: the other character's resource holders too.
+    if (NebulaCoop::isAvailable()) {
+        ConditionIsEqualType partner(!isDataMario);
+        StationedArchiveLoader::createAndAddResourcesFromTable(partner);
+    }
+#endif
 
     ResourceHolder* pMarioAnimeHolder = MR::createAndAddResourceHolder("MarioAnime.arc");
 
