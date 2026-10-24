@@ -195,8 +195,7 @@ void mix_remainder(std::int16_t* left, std::int16_t* right, std::uint32_t count,
 }
 
 PlaybackState save_playback() noexcept {
-    return {s_playing, s_position, s_last_start, s_rendered, s_game_energy, s_clip_energy, s_gain, s_game_peak,
-            s_on_channel, s_after_channel, s_centred, s_random};
+    return {s_playing, s_position, s_last_start, s_rendered, s_on_channel, s_after_channel, s_centred, s_random};
 }
 
 void restore_playback(const PlaybackState& state) noexcept {
@@ -204,10 +203,6 @@ void restore_playback(const PlaybackState& state) noexcept {
     s_position = state.position;
     s_last_start = state.last_start;
     s_rendered = state.rendered;
-    s_game_energy = state.game_energy;
-    s_clip_energy = state.clip_energy;
-    s_gain = state.gain;
-    s_game_peak = state.game_peak;
     s_on_channel = state.on_channel;
     s_after_channel = state.after_channel;
     s_centred = state.centred;
