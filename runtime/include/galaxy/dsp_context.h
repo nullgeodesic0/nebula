@@ -751,6 +751,9 @@ struct DspExternalInterruptRequested {};
 struct DspHostWakeState {
     std::atomic<std::uint64_t> generation{};
     std::atomic<std::uint64_t> idle_wait_count{};
+    // The generation the worker last parked at. Equal to `generation` while it is parked and nothing has woken it
+    // since: deterministic mode waits for that before the CPU runs on (NativeDspCoprocessor::parked_in_idle_wait).
+    std::atomic<std::uint64_t> parked_generation{~std::uint64_t{0}};
 };
 
 // Cumulative counters for native liveness. They are kept apart from the retired HLE mixer
@@ -4636,6 +4639,8 @@ inline std::uint16_t dsp_ifx_read(DspContext& context, std::uint16_t address) {
                 dsp_native_telemetry_publish_pending_worker_counts(context);
                 context.host_wake->idle_wait_count.fetch_add(
                     1u, std::memory_order_release);
+                context.host_wake->parked_generation.store(
+                    generation, std::memory_order_release);
                 context.host_wake->generation.wait(
                     generation, std::memory_order_acquire);
             }
@@ -4702,6 +4707,8 @@ inline std::uint16_t dsp_ifx_read(DspContext& context, std::uint16_t address) {
                 dsp_native_telemetry_publish_pending_worker_counts(context);
                 context.host_wake->idle_wait_count.fetch_add(
                     1u, std::memory_order_release);
+                context.host_wake->parked_generation.store(
+                    generation, std::memory_order_release);
                 context.host_wake->generation.wait(
                     generation, std::memory_order_acquire);
             }

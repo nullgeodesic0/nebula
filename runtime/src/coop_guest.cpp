@@ -1,0 +1,4545 @@
+#include "galaxy/coop_guest.h"
+
+#include "guest_access.h"
+
+#include "galaxy/coop.h"
+#include "galaxy/netplay.h"
+#include "galaxy/netplay_session.h"
+#include "galaxy/runtime_settings.h"
+
+#include <chrono>
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cctype>
+#include <cstdarg>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+namespace galaxy {
+namespace {
+
+using guest_access::Guest;
+using guest_access::plausible;
+using guest_access::SavedContext;
+
+// Mario and Luigi co-op on one screen, in one world (docs/MULTIPLAYER.md).
+//
+// The game has one player: a MarioActor, which the game reaches through the scene's MarioHolder, and whose
+// character (gIsLuigi) and controller (Wii Remote channel 0) are global. A second MarioActor is created right
+// after the first, as the other character; it is kept out of the game's own movement list and moved by the
+// runtime straight after the first player, with the MarioHolder, gIsLuigi and the channel 0 and 1 pads
+// swapped to it for that call, so the game's player code runs for it as it does for the first. Its
+// controller is channel 1, which the runtime fills from the second controller (KpadSynth).
+//
+// RMGE01 addresses and layouts are from Petari (symbols.txt, MarioActor.hpp, WPad.hpp and the
+// stationed-archive loader); call ids are translate.rs coop_call_id.
+
+namespace call {
+constexpr std::uint32_t kKpadRead = 1u;
+constexpr std::uint32_t kGameDataHolderIsDataMario = 2u;
+constexpr std::uint32_t kGameDataFunctionIsDataMario = 3u;
+constexpr std::uint32_t kMarioActorInit2 = 4u;
+constexpr std::uint32_t kCategoryListExecuteMovement = 5u;
+constexpr std::uint32_t kMountArchive = 6u;
+constexpr std::uint32_t kCreateAndAddPlayerArchives = 7u;
+constexpr std::uint32_t kPlayerHeapCreateHeap = 8u;
+constexpr std::uint32_t kGameSceneDraw3D = 9u;
+constexpr std::uint32_t kGxSetViewport = 10u;  // hooked but left alone: viewports stay full-screen
+constexpr std::uint32_t kGxSetScissor = 11u;   // likewise: the renderer keeps each half (SplitClip)
+constexpr std::uint32_t kClipFrustum = 12u;
+constexpr std::uint32_t kShadowFarClipping = 13u;
+constexpr std::uint32_t kSetPlayerMode = 14u;
+constexpr std::uint32_t kNameObjHolderCtor = 15u;
+constexpr std::uint32_t kNameObjHolderAdd = 16u;
+constexpr std::uint32_t kSolidHeapAllocHead = 17u;  // JKRSolidHeap::allocFromHead(u32 size, int align)
+constexpr std::uint32_t kSolidHeapAllocTail = 18u;  // JKRSolidHeap::allocFromTail(u32 size, int align)
+// A player down (the calls MarioActor::exeGameOver* make; skippable).
+constexpr std::uint32_t kStartPlayerEvent = 19u;
+constexpr std::uint32_t kStartDeathCamera = 20u;
+constexpr std::uint32_t kStartPointerDeathDemo = 21u;
+constexpr std::uint32_t kSetCubeBgmChangeInvalid = 22u;
+constexpr std::uint32_t kClearBgmQueue = 23u;
+// HUD.
+constexpr std::uint32_t kMarioInit2D = 24u;    // skippable
+constexpr std::uint32_t kMarioUpdate2D = 25u;  // skippable
+constexpr std::uint32_t kMeterRequestFirst = 26u;  // 26-30: MeterLayout::request*
+constexpr std::uint32_t kMeterRequestLast = 30u;
+constexpr std::uint32_t kPlayerLeftFirst = 31u;    // 31-33: PlayerLeft::appear, forceAppear, disappear
+constexpr std::uint32_t kPlayerLeftLast = 33u;
+constexpr std::uint32_t kGetPlayerLeft = 34u;
+constexpr std::uint32_t kIncPlayerLife = 35u;
+// Launch stars: SuperSpinDriver then SpinDriver exeCapture, exeShootStart, exeShoot.
+constexpr std::uint32_t kStarStepFirst = 36u;
+constexpr std::uint32_t kStarStepLast = 41u;
+constexpr std::uint32_t kAddArchive = 42u;          // NameObjArchiveListCollector::addArchive(const char*)
+constexpr std::uint32_t kAttackFirst = 43u;         // 43-45: MarioActor::attackOrPushSensor*(HitSensor*, f32)
+constexpr std::uint32_t kAttackLast = 45u;
+// EarthenPipe exeReady, exePlayerIn (skippable), exeTargetPipeShowUp, exePlayerOut.
+constexpr std::uint32_t kPipeStepFirst = 46u;
+constexpr std::uint32_t kPipePlayerIn = 47u;
+constexpr std::uint32_t kPipePlayerOut = 49u;
+constexpr std::uint32_t kPipeStepLast = 49u;
+constexpr std::uint32_t kIsNearPlayer = 50u;         // MR::isNearPlayer(const LiveActor*, f32)
+constexpr std::uint32_t kIsNearPlayerAnyTime = 51u;  // MR::isNearPlayerAnyTime(const LiveActor*, f32)
+constexpr std::uint32_t kGetPlayerPos = 52u;         // MR::getPlayerPos()
+constexpr std::uint32_t kNearerPlayerCode = 53u;     // any function of the star bunnies (TrickRabbit, RunawayRabbit)
+// Multiplayer talks (talk_begin).
+constexpr std::uint32_t kTryTalk = 54u;              // MR::tryTalk*(TalkMessageCtrl*, ...)
+constexpr std::uint32_t kTryTalkNpc = 55u;           // MR::tryTalk*AndStartTalkAction(NPCActor*, ...)
+constexpr std::uint32_t kTalkDirectorStep = 56u;     // TalkDirector::movement's updateMessage and LayoutActor::movement
+constexpr std::uint32_t kEndRemoteDemo = 57u;        // MarioAccess::endRemoteDemo(const RushEndInfo*)
+constexpr std::uint32_t kReadyRemoteDemo = 58u;      // MarioAccess::readyRemoteDemo()
+constexpr std::uint32_t kPadButtonA = 59u;           // MR::testCorePadButtonA(s32)
+constexpr std::uint32_t kPadTriggerA = 60u;          // MR::testCorePadTriggerA(s32)
+constexpr std::uint32_t kPointingPane = 61u;         // MR::isStarPointerPointingPane(layout, pane, s32 chan, bool, name)
+constexpr std::uint32_t kMenuDecide = 62u;           // MR::testDPDMenuPadDecideTrigger()
+// Talks that do not freeze the world (63-68 skippable, by call site in TalkDirector).
+constexpr std::uint32_t kTalkDemoStart = 63u;        // MR::tryStartDemoMarioPuppetable (prepTalk)
+constexpr std::uint32_t kStartPlayerTalk = 64u;      // MR::startPlayerTalk (prepTalk)
+constexpr std::uint32_t kEndPlayerTalk = 65u;        // MR::endPlayerTalk (termTalk)
+constexpr std::uint32_t kEndDemo = 66u;              // MR::endDemo (termTalk)
+constexpr std::uint32_t kTalkCamera = 67u;           // TalkMessageCtrl::startCamera (TalkStateEvent::open)
+constexpr std::uint32_t kTalkCameraEnd = 68u;        // MR::endNPCTalkCamera, MR::endMultiActorCamera (termTalk)
+constexpr std::uint32_t kCameraNearlyEnd = 69u;      // MR::isCameraInterpolatingNearlyEnd (TalkBalloonEvent::exeWait)
+constexpr std::uint32_t kCanStartDemo = 70u;         // MR::canStartDemo()
+constexpr std::uint32_t kCheckButton = 71u;          // MarioActor::checkButtonType(u16 button, bool)
+constexpr std::uint32_t kLodDistance = 72u;          // LodCtrl::calcDistanceToCamera() const
+constexpr std::uint32_t kBalloonPos = 73u;           // TalkMessageCtrl::updateBalloonPos() (TalkBalloon::updateBalloon)
+// Star Pointers (docs/MULTIPLAYER.md "Star Pointers").
+constexpr std::uint32_t kPointingCore = 74u;      // isStarPointerPointingCore(info, actor, s32 channel, ...)
+constexpr std::uint32_t kScreenPosition = 75u;    // MR::calcScreenPosition(TVec2f*, const TVec3f&)
+constexpr std::uint32_t kTractTrigger = 76u;      // MR::isOnTractTrigger()
+constexpr std::uint32_t kCaptureCode = 77u;       // calls into GCapture and GCaptureTarget
+constexpr std::uint32_t kPointing = 78u;          // MR::isStarPointerPointing(const LiveActor*, s32, bool, const char*)
+constexpr std::uint32_t kPointerScreenPos = 79u;  // MR::getStarPointerScreenPosition(s32)
+constexpr std::uint32_t kStrokeMoment = 80u;      // MR::calcStarPointerStrokeRotateMoment(TVec3f*, const TVec3f&, f32, s32)
+constexpr std::uint32_t kCoStar = 81u;            // the second pointer's Co-Star actions (MarioActor::isRequestJump2P, ...)
+constexpr std::uint32_t kSpineUpdate = 82u;       // Spine::update(): an actor's nerve step
+constexpr std::uint32_t kAddRushSensor = 83u;     // MarioActor::addRushSensor(HitSensor*, bool) (skippable)
+constexpr std::uint32_t kStartBossBgm = 84u;      // MR::startBossBGM(s32): a boss fight begins
+constexpr std::uint32_t kPointerDecoration = 85u; // StarPointerLayout::drawDecoration() const, from its draw
+constexpr std::uint32_t kStarPieceCode = 86u;     // calls into StarPiece's code
+constexpr std::uint32_t kSoundRelPos = 87u;       // AudDopplerAudienceState::convertAbsToRel(const TVec3f&, RelPos*)
+constexpr std::uint32_t kClipFrustumFar = 88u;    // ClippingJudge::isJudgedToClipFrustum(const TVec3f&, f32) const
+constexpr std::uint32_t kOneUp = 89u;             // MR::incPlayerLeft() (skippable)
+}  // namespace call
+
+namespace fn {
+constexpr std::uint32_t kCreateMarioActor = 0x80263C34u;     // createNameObj<MarioActor>(const char*)
+constexpr std::uint32_t kMarioActorInit2 = 0x802AED64u;      // MarioActor::init2(const TVec3f&, const TVec3f&, s32)
+constexpr std::uint32_t kMarioActorMovement = 0x802AFD80u;   // MarioActor::movement()
+constexpr std::uint32_t kRequestSuspend = 0x80261278u;       // NameObj::requestSuspend(): out of the movement list
+constexpr std::uint32_t kGetMarioHolder = 0x802E1528u;       // MR::getMarioHolder()
+constexpr std::uint32_t kSetMarioActor = 0x802E1518u;        // MarioHolder::setMarioActor(MarioActor*)
+constexpr std::uint32_t kGetMarioActor = 0x802E1520u;        // MarioHolder::getMarioActor() const
+constexpr std::uint32_t kSetCameraTargetToPlayer = 0x803C8ACCu;  // MR::setGameCameraTargetToPlayer()
+constexpr std::uint32_t kGetWPadHolder = 0x803AB558u;        // (WPadHolder.cpp) getWPadHolder(): +0 WPad* mPad[2]
+constexpr std::uint32_t kSetPlayerPos = 0x803F1F80u;         // MR::setPlayerPos(const TVec3f&)
+constexpr std::uint32_t kSetPlayerMode = 0x802C42C0u;        // MarioActor::setPlayerMode(u16, bool)
+constexpr std::uint32_t kMountArchive = 0x803CDDD4u;         // MR::mountArchive(const char*, JKRHeap*)
+constexpr std::uint32_t kCreateAndAddStationed = 0x803A6A70u;  // ResourceHolderManager::createAndAddStationed(const char*)
+// Mario::push(const TVec3f&): added to the velocity on Mario's next move (Mario::tryPushToVelocity), which
+// keeps walls and the ground in charge, as when objects shove the player.
+constexpr std::uint32_t kMarioPush = 0x8030C330u;
+// Split screen (docs/MULTIPLAYER.md): the 3D scene is drawn a second time with the second player's camera.
+constexpr std::uint32_t kGameSceneDraw3D = 0x8033EE8Cu;     // GameScene::draw3D() const
+constexpr std::uint32_t kCalcViewAndEntry = 0x80343DCCu;    // SceneFunction::executeCalcViewAndEntryList()
+constexpr std::uint32_t kLoadViewMtx = 0x803C7394u;         // MR::loadViewMtx(): CameraContext view -> j3dSys
+constexpr std::uint32_t kSetDefaultViewportAndScissor = 0x803CA5F4u;  // MR::setDefaultViewportAndScissor()
+constexpr std::uint32_t kGetCameraDirector = 0x8009B08Cu;   // MR::getCameraDirector()
+constexpr std::uint32_t kIsEventCameraActive = 0x803C799Cu;  // MR::isEventCameraActive()
+constexpr std::uint32_t kIsOpeningCamera = 0x8033F9F4u;  // GameSceneFunction::isExecScenarioOpeningCamera()
+
+constexpr std::uint32_t kGetFrameBufferWidth = 0x802B5140u;   // MR::getFrameBufferWidth()
+constexpr std::uint32_t kGetFrameBufferHeight = 0x8034AFB0u;  // MR::getFrameBufferHeight()
+// MR::getFirstPolyOnLineToMap(TVec3f* hit, Triangle*, const TVec3f& start, const TVec3f& direction): the
+// second player's camera collision.
+constexpr std::uint32_t kFirstPolyOnLineToMap = 0x803E0874u;
+constexpr std::uint32_t kShadowGetDropPos = 0x8016C1B4u;  // ShadowController::getDropPos(TVec3f*) const
+constexpr std::uint32_t kIsInAreaObj = 0x803FEA64u;  // MR::isInAreaObj(const char* name, const TVec3f& position)
+constexpr std::uint32_t kIsDemoActive = 0x803C9E84u;     // MR::isDemoActive()
+constexpr std::uint32_t kIsTimeKeepDemoActive = 0x803C9F80u;  // MR::isTimeKeepDemoActive()
+constexpr std::uint32_t kIsInputDisable = 0x802E98B8u;   // MarioModule::isInputDisable() const (on a Mario)
+// Lives and respawn.
+constexpr std::uint32_t kGetPlayerLeft = 0x803CC3CCu;    // MR::getPlayerLeft()
+constexpr std::uint32_t kIncPlayerLeft = 0x803CC3D0u;    // MR::incPlayerLeft()
+constexpr std::uint32_t kDecPlayerLeft = 0x803CC3D8u;    // MR::decPlayerLeft()
+constexpr std::uint32_t kSetNerve = 0x80165824u;         // LiveActor::setNerve(const Nerve*)
+constexpr std::uint32_t kSetPlayerPosAndWait = 0x803F2528u;  // MR::setPlayerPosAndWait(const TVec3f&)
+constexpr std::uint32_t kShowModel = 0x803DD758u;        // MR::showModel(LiveActor*)
+constexpr std::uint32_t kHideModel = 0x803DD794u;        // MR::hideModel(LiveActor*)
+constexpr std::uint32_t kValidateHitSensors = 0x803C27B8u;    // MR::validateHitSensors(LiveActor*)
+constexpr std::uint32_t kInvalidateHitSensors = 0x803C27CCu;  // MR::invalidateHitSensors(LiveActor*)
+constexpr std::uint32_t kChangeGameOverAnimation = 0x802AF7BCu;  // MarioActor::changeGameOverAnimation()
+constexpr std::uint32_t kChangeAnimationNonStop = 0x802AF660u;  // MarioActor::changeAnimationNonStop(const char*)
+// Pipes (EarthenPipe.cpp).
+constexpr std::uint32_t kIsBckStopped = 0x803DB2B0u;     // MR::isBckStopped(const LiveActor*)
+constexpr std::uint32_t kPipeNrvWait = 0x806A06D0u;      // NrvEarthenPipe::EarthenPipeNrvWait::sInstance
+constexpr std::uint32_t kAreaIsInVolume = 0x8001E1A0u;   // AreaObj::isInVolume(const TVec3f&) const
+constexpr std::uint32_t kSetPaneScale = 0x803D6A24u;     // MR::setPaneScale(const LayoutActor*, f32, f32, const char* pane)
+constexpr std::uint32_t kTalkBalloonEventVtable = 0x805A21A0u;  // __vt__16TalkBalloonEvent
+// Talks.
+constexpr std::uint32_t kIsSystemTalking = 0x803CA334u;  // MR::isSystemTalking()
+constexpr std::uint32_t kReadyRemoteDemo = 0x80303B5Cu;  // MarioAccess::readyRemoteDemo(): the game's player held
+constexpr std::uint32_t kEndRemoteDemo = 0x80304538u;    // MarioAccess::endRemoteDemo(const RushEndInfo*)
+constexpr std::uint32_t kTestPadButtonA = 0x803D2244u;   // MR::testCorePadButtonA(s32 channel)
+constexpr std::uint32_t kTestPadTriggerA = 0x803D25CCu;  // MR::testCorePadTriggerA(s32 channel)
+constexpr std::uint32_t kPointingPane = 0x803FA9ECu;     // MR::isStarPointerPointingPane(...)
+constexpr std::uint32_t kMenuDecide = 0x803D2B6Cu;       // MR::testDPDMenuPadDecideTrigger(): channel 0's A
+// HUD.
+constexpr std::uint32_t kGetLayoutHolder = 0x80361738u;  // MR::getGameSceneLayoutHolder()
+constexpr std::uint32_t kAddArchive = 0x8026158Cu;       // NameObjArchiveListCollector::addArchive(const char*)
+constexpr std::uint32_t kNewOnHeap = 0x80409B0Cu;        // operator new(u32 size, JKRHeap*, int align)
+constexpr std::uint32_t kInitWithoutIter = 0x8026120Cu;  // NameObj::initWithoutIter()
+constexpr std::uint32_t kMeterLayoutCtor = 0x8036C2BCu;  // MeterLayout::MeterLayout(const char*, const char*)
+constexpr std::uint32_t kMeterInitCount = 0x8036C80Cu;   // MeterLayout::initCount(s32)
+constexpr std::uint32_t kMeterSetCount = 0x8036C814u;    // MeterLayout::setCount(s32)
+constexpr std::uint32_t kPlayerLeftCtor = 0x8037867Cu;   // PlayerLeft::PlayerLeft(const char*)
+constexpr std::uint32_t kLayoutSetTrans = 0x803662CCu;   // LayoutActor::setTrans(const TVec2f&): a screen position
+constexpr std::uint32_t kGetPane = 0x803D82F4u;          // MR::getPane(const LayoutActor*, const char*)
+constexpr std::uint32_t kIsLayoutDead = 0x803D813Cu;     // MR::isDead(const LayoutActor*)
+constexpr std::uint32_t kShowLayout = 0x803D814Cu;       // MR::showLayout(LayoutActor*)
+constexpr std::uint32_t kLayoutKill = 0x803661F8u;       // LayoutActor::kill()
+// nw4r::lyt::Picture::SetVtxColorElement(u32 element, u8): element 4 * corner + R, G, B, A.
+constexpr std::uint32_t kPictureSetVtxColorElement = 0x8000DE94u;
+constexpr std::uint32_t kPictureVtable = 0x80550130u;    // nw4r::lyt::Picture's vtable
+// MR::convertScreenPosToLayoutPos(TVec2f* layout, const TVec2f& screen)
+constexpr std::uint32_t kScreenToLayout = 0x80366658u;
+// The MeterLayout requests MarioMeter makes (ids 26-30) and the PlayerLeft calls the counters make (31-33),
+// made on the second player's meter and counter as well.
+constexpr std::array<std::uint32_t, 5> kMeterRequests = {0x8036C59Cu, 0x8036C664u, 0x8036C6E8u, 0x8036C72Cu,
+                                                         0x8036C79Cu};
+constexpr std::array<std::uint32_t, 3> kPlayerLeftCalls = {0x803787CCu, 0x80378828u, 0x80378888u};
+// Star Pointers.
+constexpr std::uint32_t kStarPointerViewMtx = 0x803FB51Cu;  // MR::getStarPointerViewMtx(): StarPointerTransformHolder's
+constexpr std::uint32_t kStarPointerProjMtx = 0x803FB540u;  // MR::getStarPointerProjMtx()
+constexpr std::uint32_t kIsStarPointerPointing = 0x803FA9A8u;  // MR::isStarPointerPointing(actor, s32, bool, const char*)
+constexpr std::uint32_t kIsNerve = 0x8016582Cu;              // LiveActor::isNerve(const Nerve*) const
+constexpr std::uint32_t kGetStarPointerDirector = 0x80386000u;  // StarPointerFunction::getStarPointerDirector()
+constexpr std::uint32_t kGetScreenWidth = 0x803F6B44u;          // MR::getScreenWidth(): 832 wide, 608 at 4:3
+// The star get.
+constexpr std::uint32_t kIsPowerStarGetDemoActive = 0x803CA2BCu;  // MR::isPowerStarGetDemoActive()
+constexpr std::uint32_t kMarioChangeAnimation = 0x802AF658u;      // MarioActor::changeAnimation(const char*, const char*)
+constexpr std::uint32_t kMarioAccessSetBaseMtx = 0x80303E44u;     // MarioAccess::setBaseMtx(MtxPtr): the game's player
+// A black hole's cameras, ended when a player who fell in comes back.
+constexpr std::uint32_t kEndActorCamera = 0x803BCB8Cu;        // MR::endActorCamera(actor, ActorCameraInfo*, bool, s32)
+// And what the fall left on the player (MarioActor::exeGameOverBlackHole2 starts them; a miss never stopped them).
+constexpr std::uint32_t kStopEffectForce = 0x802DDCA8u;       // MarioActor::stopEffectForce(const char*)
+constexpr std::uint32_t kBlackHoleEffect = 0x805A64EAu;         // the game's "共通ブラックホール"
+constexpr std::uint32_t kForceDeleteEffectAll = 0x803CBCDCu;   // MR::forceDeleteEffectAll(LiveActor*)
+constexpr std::uint32_t kActivateDefaultGameLayout = 0x803F78B0u;  // MR::activateDefaultGameLayout()
+constexpr std::uint32_t kIsActiveDefaultGameLayout = 0x803F78F8u;  // MR::isActiveDefaultGameLayout()
+constexpr std::uint32_t kEndGlobalEventCamera = 0x803C7A3Cu;  // MR::endGlobalEventCamera(const char*, s32, bool)
+}  // namespace fn
+constexpr std::uint32_t kPointerLayoutChannel = 0x34u;  // StarPointerLayout::mPadChannel
+// StarPointerDirector +4: StarPointerController[2], each kStarPointerControllerSize; mPastInfo.mPos (the position
+// target tests use, last frame's) at kPointerPastPos.
+constexpr std::uint32_t kStarPointerControllerSize = 0x74u;
+constexpr std::uint32_t kPointerPastPos = 0x04u;
+// StarPointerController: mPastInfo's mDrawReady (the depth below came this frame) and mZDepth (the EFB depth under
+// mPastInfo.mPos), and mWorldPos (that point in the world, where Star Bits aim). StarPointerDirector +0x10:
+// StarPointerPeekZ, its viewport (GXGetViewportv: x, y, width, height, near, far) at +0x28.
+constexpr std::uint32_t kPointerPastDrawReady = 0x0Du;
+constexpr std::uint32_t kPointerPastDepth = 0x10u;
+constexpr std::uint32_t kPointerWorldPos = 0x64u;
+constexpr std::uint32_t kPointerPeekZ = 0x10u;
+constexpr std::uint32_t kPeekZViewport = 0x28u;
+// Star Bit shots (StarPieceDirector.cpp): StarPieceShooter, one per pointer (_A0 its channel), the sensor it
+// locks on to (_90, or last frame's _98), and its code: calcShootGoalUsingPointingDepth (where the shot aims,
+// mPosition) and shoot (StarPiece::throwToTarget / throwToTargetCore, hook 86).
+constexpr std::uint32_t kStarPieceShooterVtable = 0x8058F4D0u;  // __vt__16StarPieceShooter
+constexpr std::uint32_t kShooterChannel = 0xA0u;
+constexpr std::uint32_t kShooterSensor = 0x90u;
+constexpr std::uint32_t kShooterLastSensor = 0x98u;
+constexpr std::uint32_t kActorGravity = 0x3Cu;    // LiveActor::mGravity
+constexpr std::uint32_t kSensorPosition = 0x04u;  // HitSensor::mPosition
+constexpr std::uint32_t kThrowToTargetCore = 0x8023ED88u;  // StarPiece::throwToTargetCore(target, from, gravity, f32, bool)
+constexpr bool in_shoot_goal(std::uint32_t pc) { return pc >= 0x80241B5Cu && pc < 0x80241CF4u; }
+constexpr bool in_shooter_shoot(std::uint32_t pc) { return pc >= 0x802416D0u && pc < 0x802418C4u; }
+// The second player's shot leaves from his own camera as the game's does from its (StarPieceDirector::
+// calcPosCameraShoot: 300 to the side, the second pointer's to the left, 30 ahead) in split screen, and from above
+// his head on one shared screen.
+constexpr float kShotCameraSide = 300.0f;
+constexpr float kShotCameraAhead = 30.0f;
+constexpr float kShotAboveHead = 160.0f;
+
+// Pull Stars (GCapture.cpp): the one GCapture, its idle nerves, and its and GCaptureTarget's code.
+constexpr std::uint32_t kGCaptureVtable = 0x80580814u;
+constexpr std::uint32_t kGCaptureTargetVtable = 0x80580AB0u;
+constexpr std::uint32_t kStarPieceVtable = 0x8058F2A0u;  // __vt__9StarPiece
+// The star get (PowerStar.cpp): the star, its matrix (both brothers pinned beside it) and the game's calls.
+constexpr std::uint32_t kPowerStarVtable = 0x80587430u;  // __vt__9PowerStar
+constexpr std::uint32_t kPowerStarBaseMtx = 0xE8u;       // PowerStar::mBaseMtx (TPos3f), the player's place
+constexpr float kStarGetSide = 110.0f;                   // the other brother's place beside the taker
+constexpr std::uint32_t kMarioActorBlackHole = 0xF4Cu;   // MarioActor::mBlackHole, the one he fell into
+constexpr std::uint32_t kBlackHoleCameraInfo = 0x108u;   // BlackHole::mCameraInfo (ActorCameraInfo*)
+// AudDopplerAudienceState: its listener matrix (3x4, +0x00) and position (+0x3C); JAUDopplerAudibleRelPos: the
+// source relative to it (+0x00), its direction (+0x0C) and distance (+0x18).
+constexpr std::uint32_t kAudienceMtx = 0x00u;
+constexpr std::uint32_t kAudiencePos = 0x3Cu;
+constexpr std::uint32_t kRelPos = 0x00u;
+constexpr std::uint32_t kRelDir = 0x0Cu;
+constexpr std::uint32_t kRelDist = 0x18u;
+constexpr std::uint32_t kGCaptureNrvWait = 0x806A07E0u;      // NrvGCapture::GCaptureNrvWait::sInstance
+constexpr std::uint32_t kGCaptureNrvCoolDown = 0x806A07F8u;  // NrvGCapture::GCaptureNrvCoolDown::sInstance
+constexpr bool in_capture_target(std::uint32_t pc) { return pc >= 0x801E1630u && pc < 0x801E2408u; }
+constexpr bool in_capture_code(std::uint32_t pc) {
+    return (pc >= 0x801DEBA4u && pc < 0x801E0CF8u) || in_capture_target(pc);
+}
+constexpr bool in_star_pointer_layout(std::uint32_t pc) { return pc >= 0x803861D4u && pc < 0x803893A4u; }
+constexpr bool in_capture_receive(std::uint32_t pc) { return pc >= 0x801DF0ECu && pc < 0x801DF164u; }  // receiveOtherMsg
+
+// CameraContext (scene object 0x17), reached as MR::getCameraViewMtx does: *(r13 - 0x3A78) -> +0x24 -> +0xAC ->
+// +0x10 -> [0x17].
+namespace camera {
+constexpr std::uint32_t kView = 0x0Cu;        // 3x4
+constexpr std::uint32_t kInverse = 0x3Cu;     // 3x4
+constexpr std::uint32_t kProjection = 0x6Cu;  // 4x4; [0][0] is the x scale
+constexpr std::uint32_t kAspect = 0xACu;
+constexpr std::uint32_t kFarZ = 0xB4u;
+constexpr std::uint32_t kFovy = 0xB8u;  // degrees
+}  // namespace camera
+
+constexpr std::uint32_t kIsLuigi = 0x806A18C8u;               // gIsLuigi (bool)
+constexpr std::uint32_t kResourceHolderManager = 0x806A2480u;  // SingletonHolder<ResourceHolderManager>::sInstance
+constexpr std::uint32_t kMovementTypePlayer = 0x25u;          // MR::MovementType_Player
+constexpr std::uint32_t kMovementTypeCamera = 0x02u;          // MR::connectToSceneCamera's
+// The second player's own game camera (second_director): a second CameraDirector next to the game's.
+namespace director {
+constexpr std::uint32_t kSceneObj = 0x31u;        // MR::getCameraDirector(): SceneObjHolder slot
+constexpr std::uint32_t kSize = 0x1F4u;
+constexpr std::uint32_t kName = 0x04u;            // NameObj::mName
+constexpr std::uint32_t kStack = 0x10u;           // CameraManStack* {CameraMan** elements, u32 capacity, u32 count}
+constexpr std::uint32_t kOnlyCamera = 0x14u;
+constexpr std::uint32_t kPoseParam1 = 0x18u;
+constexpr std::uint32_t kPoseParam2 = 0x1Cu;
+constexpr std::uint32_t kHolder = 0x20u;
+constexpr std::uint32_t kChunkHolder = 0x24u;     // shared with the game's (the stage's camera parameters)
+constexpr std::uint32_t kTargetHolder = 0x34u;
+constexpr std::uint32_t kShaker = 0x38u;
+constexpr std::uint32_t kViewInterpolator = 0x3Cu;
+constexpr std::uint32_t kCover = 0x40u;
+constexpr std::uint32_t kRotChecker = 0x44u;
+constexpr std::uint32_t kCameraManGame = 0x48u;
+constexpr std::uint32_t kEventNum = 0x16Cu;
+constexpr std::uint32_t kCoverSize = 0x4Cu;
+// Constructors and sizes as CameraDirector::CameraDirector makes them.
+constexpr std::uint32_t kNew = 0x80409AF8u;       // operator new(u32)
+constexpr std::uint32_t kNewArray = 0x80409B1Cu;  // operator new[](u32)
+constexpr std::uint32_t kOnlyCameraCtor = 0x800B6C68u, kOnlyCameraSize = 0x40u;
+constexpr std::uint32_t kPoseParamCtor = 0x800AB14Cu, kPoseParamSize = 0x58u;
+constexpr std::uint32_t kHolderCtor = 0x800A0D98u, kHolderSize = 0x1Cu;
+constexpr std::uint32_t kTargetHolderCtor = 0x800AF85Cu, kTargetHolderSize = 0x10u;
+constexpr std::uint32_t kTargetHolderSetPlayer = 0x800AF914u;  // CameraTargetHolder::set(const MarioActor*)
+constexpr std::uint32_t kShakerCtor = 0x800AD784u, kShakerSize = 0x54u;
+constexpr std::uint32_t kInterpolatorCtor = 0x800B37D8u, kInterpolatorSize = 0xC0u;
+constexpr std::uint32_t kRotCheckerCtor = 0x800AD084u, kRotCheckerSize = 0x34u;
+constexpr std::uint32_t kManGameCtor = 0x800A4B14u, kManGameSize = 0x78u;  // (holder, chunk holder, name)
+constexpr std::uint32_t kPush = 0x800992A4u;      // CameraDirector::push(CameraMan*)
+constexpr std::uint32_t kStarted = 0x80099E8Cu;   // CameraDirector::started(): no start-position camera
+constexpr std::uint32_t kMovement = 0x800991C0u;  // CameraDirector::movement()
+// CameraContext's view, inverse, projection and lens (+0x0C to +0xC4), saved around the second director's run.
+constexpr std::uint32_t kContextFirst = 0x0Cu;
+constexpr std::uint32_t kContextEnd = 0xC4u;
+}  // namespace director
+constexpr std::uint32_t kPlayerHeapSize = 0x500000u;          // PlayerHeapHolder's heaps, one character's set
+// Room for the second character's model, face and shadow archives next to the first's.
+constexpr std::uint32_t kPartnerHeapExtra = 0x200000u;
+// SingletonHolder<HeapMemoryWatcher>::sInstance; HeapMemoryWatcher::mSceneHeapGDDR (the stage's MEM2 heap).
+constexpr std::uint32_t kHeapMemoryWatcher = 0x806A245Cu;
+// SingletonHolder<GameSystem>::sInstance: +0x24 GameSystemSceneController, whose current stage name is at +0x20.
+constexpr std::uint32_t kGameSystem = 0x806A1228u;
+constexpr std::uint32_t kSceneHeapNapa = 0x14u;
+constexpr std::uint32_t kSceneHeapGddr = 0x18u;
+constexpr std::uint32_t kSolidHeapFreeSize = 0x6Cu;  // JKRSolidHeap::mFreeSize
+// MarioActor::_482: set, MarioActor::draw leaves the player's model out, as in a black hole (MR::hideModel does
+// not; _A61 would also darken the screen, MarioActor::drawPreWipe).
+constexpr std::uint32_t kMarioActorHidden = 0x482u;
+// NameObj::mFlags (u16 at +8), its low byte: bit 0 suspended (NameObj::requestSuspend asks with bit 1, requestResume
+// with bit 2; NameObj::syncWithFlags applies them).
+constexpr std::uint32_t kNameObjFlagsLow = 0x9u;
+constexpr std::uint8_t kNameObjSuspended = 0x01u;
+constexpr std::uint8_t kNameObjRequests = 0x06u;
+// MarioActor's own nerve for ordinary play (NrvMarioActor::MarioActorNrvWait::sInstance).
+constexpr std::uint32_t kMarioActorNrvWait = 0x8069F038u;
+// MarioActor::exeGameOver* (the player down: exeGameOver to exeTimeWait, and exeGameOverBlackHole2).
+constexpr bool in_game_over_step(std::uint32_t pc) {
+    return (pc >= 0x802B8A38u && pc < 0x802B8FE0u) || (pc >= 0x802CA324u && pc < 0x802CA6E0u);
+}
+// PlayerLeft's code (its MR::getPlayerLeft calls).
+constexpr bool in_player_left(std::uint32_t pc) { return pc >= 0x803786D0u && pc < 0x80378B10u; }
+// GameSceneLayoutHolder: +0x14 MarioMeter (+0x0C its HitPointMeter), +0x34 CounterLayoutController (+0x30 its
+// PlayerLeft).
+constexpr std::uint32_t kHolderMarioMeter = 0x14u;
+constexpr std::uint32_t kMarioMeterHitPoint = 0x0Cu;
+constexpr std::uint32_t kHolderCounters = 0x34u;
+constexpr std::uint32_t kCountersPlayerLeft = 0x30u;
+constexpr std::uint32_t kPlayerLeftCount = 0x20u;  // PlayerLeft::mPlayerLeft
+// A player riding a launch star: MarioActor::_924 (the HitSensor they rush with), HitSensor::mHost, and the
+// launchers' vtables (SuperSpinDriver, SpinDriver).
+constexpr std::uint32_t kMarioRushSensor = 0x924u;
+constexpr std::uint32_t kSensorHost = 0x24u;
+constexpr std::uint32_t kSuperSpinDriverVtable = 0x8058FF8Cu;
+constexpr std::uint32_t kSpinDriverVtable = 0x8058C5ACu;
+// Vehicles the first player rides and the second rides along with (docs/MULTIPLAYER.md "Vehicles"): the Star Ball
+// and the manta ray. (Room for each brother's own later: the second is refused only in coop_before_call.)
+constexpr std::uint32_t kTamakoroVtable = 0x805BC798u;  // __vt__8Tamakoro
+constexpr std::uint32_t kSurfRayVtable = 0x805BBFECu;   // __vt__7SurfRay
+constexpr bool is_vehicle(std::uint32_t vtable) { return vtable == kTamakoroVtable || vtable == kSurfRayVtable; }
+// Star-shaped launchers (SuperSpinDriver, SpinDriver): the actor riding them.
+constexpr std::uint32_t kStarBindActor = 0x8Cu;
+// EarthenPipe (Petari EarthenPipe.hpp): its up vector, the top joint's matrix (the mouth at column 3) and the
+// player riding it.
+constexpr std::uint32_t kPipeUp = 0x98u;
+constexpr std::uint32_t kPipeTopMtx = 0xB4u;
+constexpr std::uint32_t kPipeRider = 0xECu;
+
+namespace actor {
+constexpr std::uint32_t kPosition = 0x00Cu;     // LiveActor::mPosition
+constexpr std::uint32_t kRotation = 0x018u;     // LiveActor::mRotation
+constexpr std::uint32_t kMario = 0x230u;        // MarioActor::mMario
+constexpr std::uint32_t kCameraTrans = 0x2F4u;  // MarioActor::mCameraTrans: what the game camera looks at
+}  // namespace actor
+constexpr std::uint32_t kMarioSideVec = 0x310u;  // Mario::mSideVec
+constexpr std::uint32_t kMarioUpVec = 0x1FCu;    // Mario::_1FC, Mario::getUpVec()
+constexpr std::uint32_t kMarioFrontVec = 0x208u;  // Mario::mFrontVec
+constexpr std::uint32_t kMarioState = 0x97Cu;     // Mario: MarioState* of a special state, 0 in ordinary play
+// MarioActor::mModels[6] (J3DModelX*): the power-up models, created when their archive is loaded
+// (MarioActorDraw.cpp init*Mario).
+constexpr std::uint32_t kActorModels = 0xA28u;
+constexpr std::uint32_t kActorTeresaParts = 0x9A4u;  // MarioActor::_9A4: the Boo form's parts
+constexpr std::uint32_t kActorPlayerMode = 0x3D4u;  // MarioActor::mPlayerMode (u16)
+// ShadowController::_67 (u8): the shadow is past the far clip from the camera (updateFarClipping).
+constexpr std::uint32_t kShadowFarClipped = 0x67u;
+
+bool trace_enabled() {
+    static const bool enabled = [] {
+        char* value = nullptr;
+        std::size_t length = 0u;
+        const bool set = _dupenv_s(&value, &length, "GALAXY_TRACE_COOP") == 0 && value != nullptr &&
+                         value[0] != '\0' && value[0] != '0';
+        std::free(value);
+        return set;
+    }();
+    return enabled;
+}
+
+void trace(const char* format, ...) {
+    if (!trace_enabled()) return;
+    std::va_list args;
+    va_start(args, format);
+    std::fprintf(stderr, "[coop] ");
+    std::vfprintf(stderr, format, args);
+    std::fputc('\n', stderr);
+    va_end(args);
+}
+
+// Guest addresses of the strings the archive calls take, found once.
+struct ArchiveNames {
+    bool searched = false;
+    std::array<std::uint32_t, 3> mario{};  // model, face, shadow paths
+    std::array<std::uint32_t, 3> luigi{};
+    const std::array<std::uint32_t, 3>& of(coop::Character character) const {
+        return character == coop::Character::Luigi ? luigi : mario;
+    }
+};
+
+struct State {
+    // Arguments of the calls in flight, kept from before the call for after it. KPADRead and the archive
+    // calls do not nest; the movement categories and init2 calls are not re-entered by the runtime's own
+    // calls (guarded below).
+    std::uint32_t kpad_channel = 0xFFFFFFFFu;
+    std::uint32_t kpad_buffer = 0u;
+    std::uint32_t mount_path = 0u;
+    std::uint32_t mount_heap = 0u;
+    bool mounting_partner = false;
+    std::uint32_t player_archives_is_mario = 1u;
+    std::array<std::uint32_t, 8> init2_actors{};
+    unsigned init2_depth = 0u;
+    // This stage's copy of Luigi's swap table (luigi_swap.txt) in guest memory, or 0 (anime_tables below).
+    std::uint32_t luigi_swap_table = 0u;
+    std::array<std::uint32_t, 8> categories{};
+    unsigned category_depth = 0u;
+
+    // The players. `own` is the character of the game's save (the first player); the second player is
+    // the other one.
+    coop::Character own = coop::Character::Mario;
+    std::uint32_t first = 0u;
+    std::uint32_t second = 0u;
+    std::uint32_t second_mario = 0u;
+    bool creating_second = false;
+    bool moving_second = false;
+    // During the second player's creation the save is asked which character the player is; the answer
+    // is the second player's.
+    bool answer_partner = false;
+
+    ArchiveNames names;
+    // The Observatory's doors and domes (AstroChangeStageCube areas) test the game's player, the first: when
+    // the second player walks into one the players swap places, so the game's own check takes them through.
+    // `entrance_name` is the area class's name in the game's data; `entrance_wait` frames between swaps.
+    coop::Vec3 parked_position{};
+    // The scene's NameObjHolder (every NameObj in the scene, a fixed-size array without a bounds check): the
+    // second player's MarioActor and its parts add their own, so it is made larger (kNameObjHolderExtra);
+    // `holder_count` counts what is added, for the trace.
+    std::uint32_t scene_holder = 0u;
+    std::uint32_t holder_capacity = 0u;
+    std::uint32_t holder_count = 0u;
+    bool second_waiting_input = false;
+    bool second_waiting_demo = false;
+    std::uint32_t entrance_name = 0u;
+    bool entrance_searched = false;
+    unsigned entrance_wait = 0u;
+    coop::KpadSynth kpad;
+    coop::LeashTimer leash;
+    unsigned frames = 0u;
+
+    // Split screen. `follow_view` is the second player's own camera (follow, steered and kept out of walls),
+    // `camera2` what their half draws with (blended in from the first player's as the split eases in);
+    // `layout` the line between the halves. `pass` is 1 or 2 while GameScene::draw3D draws the first or
+    // second half, else 0.
+    coop::SplitState split;
+    coop::FollowCamera follow;
+    coop::CameraMatrices follow_view;
+    coop::CameraMatrices camera2;
+    coop::SplitLayout layout;
+    std::uint32_t steer_buttons = 0u;
+    float screen_width = 640.0f;
+    float screen_height = 456.0f;
+    unsigned pass = 0u;
+    // A camera event the second player set off (a warp, launch star, pipe): the game camera is theirs while
+    // it plays, so their half shows it, and the first player's half holds `last_camera1` (the game camera
+    // before the event), moved with them, until the game camera is back after it (CameraHold).
+    bool event_second = false;
+    unsigned event_inputs = 0u;  // for the trace: what camera_event_is_second last saw
+    // When the game camera changes hands (a second player's event begins or ends), the half it moves to
+    // blends from that half's own camera into it, so the game camera's swing over from the other player is
+    // not seen.
+    coop::CameraHandover handover;
+    coop::CameraHold hold;
+    // The game camera's last view that was the first player's, and where they were then.
+    coop::CameraMatrices last_camera1;
+    std::array<float, 16> last_projection{};
+    coop::Vec3 last_origin{};
+    // The second player's half, eased from the event's camera into their own when their event ends;
+    // `second_view` is what their half drew last frame.
+    coop::CameraHandover second_handover;
+    // At the start of the second player's event the game camera travels over from the first player: their
+    // half keeps its own camera until the game camera has arrived, then eases into it.
+    bool second_awaits_event = false;
+    bool solo_event = false;  // the game camera plays one brother's own event (keep_camera_on_first_player)
+    bool first_event = false;  // the game camera plays the first player's own event (his launch star's flight)
+    // The second player travels with the first (second_player_waits, the first player parked at the origin, a
+    // level start until the first has had control a moment); `controllable_frames` counts frames the first
+    // player has been in ordinary play.
+    bool travelling = false;
+    bool sticky_travel = false;
+    // A cutscene (or the first player's controls held) holds the second player where he stood.
+    bool held_here = false;
+    coop::Vec3 held_at{};
+    bool riding_along = false;  // on the first player's vehicle with him
+    bool boss_gather = false;   // a cutscene or boss music began: bring the other brother in if a boss is by one
+    bool boss_music = false;    // ... and it was MR::startBossBGM
+    bool demo_before = false;   // a cutscene last frame (its start asks gather_for_boss)
+    // Star Bits run with the brother nearer them as the game's player (star_piece_code_begin): nesting, and the
+    // outermost call's swap.
+    std::uint32_t piece_depth = 0u;
+    bool piece_swapped = false;
+    bool piece_spine_swapped = false;
+    // 3D sound (sound_from_nearer_brother): convertAbsToRel's audience state, source and result, for after it.
+    std::array<std::uint32_t, 3> sound_args{};
+    // The star get with both brothers (star_get_update): the star, the brother who did not grab it (0 or 1) and
+    // whether he has been put beside it.
+    std::uint32_t star_get = 0u;
+    unsigned star_get_other = 0u;
+    bool star_get_posed = false;
+    std::uint32_t star_get_anim = 0u;  // "PowerStarGet" in the game's data
+    bool level_start = false;
+    unsigned controllable_frames = 0u;
+    coop::CameraMatrices second_view;
+    // Trace: frames of per-frame camera detail left after a camera change of hands.
+    unsigned camera_trace_frames = 0u;
+    std::uint32_t shadow_controller = 0u;
+    float shadow_clip = 0.0f;
+    std::uint32_t draw_scene = 0u;
+    std::uint32_t clip_position = 0u;
+    float clip_radius = 0.0f;
+    float clip_far = 0.0f;
+    // The agent's requests for the second player (coop_request_second_player_*), done in their turn.
+    bool agent_teleport = false;
+    coop::Vec3 agent_position{};
+    int agent_mode = -1;
+    // Co-op lives (docs/MULTIPLAYER.md, coop::Lives): each player's down state, the second player's lives (the
+    // first's are the game's own), and whether the game's own miss is under way.
+    std::array<coop::DownState, 2> down{};
+    int second_lives = -1;
+    bool game_miss = false;
+    bool skip_death_effects = false;  // the rest of this exeGameOver's calls, for a player down alone
+    std::uint32_t mario_down_name = 0u;  // "マリオダウン" in the game's data
+    bool mario_down_searched = false;
+    // HUD: the second player's life meter and lives counter, and the game's own they follow.
+    std::uint32_t second_meter = 0u;
+    std::uint32_t second_left = 0u;
+    std::uint32_t first_meter = 0u;
+    std::uint32_t first_left = 0u;
+    std::uint32_t hud_call_this = 0u;  // the MeterLayout or PlayerLeft a mirrored call was made on
+    std::uint32_t star_swapped = 0u;  // a launch star whose step runs with the second player as the game's
+    std::uint32_t pipe_swapped = 0u;  // the same for a pipe the second player goes through
+    std::uint32_t pipe_out = 0u;      // the pipe of the exePlayerOut in flight
+    std::uint32_t pipe_traced = 0u;
+    std::uint32_t pipe_traced_step = 0u;
+    // NSMBW-style pipes (pipe_holds): the pipe whose first rider waits inside for the other, and the pipe re-armed
+    // for the other to follow through.
+    struct Pipe {
+        std::uint32_t waiting = 0u;
+        std::uint32_t rider = 0u;
+        std::uint32_t frames = 0u;
+        bool partner_in = false;
+        std::uint32_t follow_pipe = 0u;
+        std::uint32_t follower = 0u;
+        std::uint32_t follow_frames = 0u;
+    } pipe;
+    // Star bunny code run with the brother nearer the bunny as the game's player (nearer_player_code): the
+    // nesting depth of calls into it, whether the outermost one swapped, and to whom it gives back.
+    std::uint32_t nearer_depth = 0u;
+    bool nearer_swapped = false;
+    bool nearer_back_to_second = false;
+    // Frames left of a scene (a talk, a bunny's catch) a brother other than the first alone is in: the second is
+    // not taken along with the first, who the scene holds.
+    std::uint32_t second_scene = 0u;
+    // Multiplayer talks (talk_begin): the brother nearest an NPC talks to it; the other waits in place.
+    struct Talk {
+        std::uint32_t depth = 0u;      // talk calls (54-56) in flight
+        bool swapped = false;          // the outermost made the talker the game's player
+        bool back_to_second = false;
+        bool talker_second = false;    // who the outermost runs as
+        bool locked = false;           // a talk under way, and who has it
+        bool locked_second = false;
+        std::uint32_t candidate_frames = 0u;  // the brother an NPC last asked about, for the talk director
+        bool candidate_second = false;
+        bool held = false;             // a brother held by the game (readyRemoteDemo), and which
+        bool held_second = false;
+        bool other_held = false;       // the other brother held (readyRemoteDemo) with the talker
+        bool held_talker_second = false;
+        bool end_swapped = false;      // endRemoteDemo in flight run as the talker
+        bool end_back_to_second = false;
+        std::uint32_t end_info = 0u;
+        bool calm = false;             // a talk under way without the world frozen (talk_calm)
+        bool answering = false;        // answer_partner set for the second player's talk call
+        std::uint32_t button = 0u;     // MarioActor::checkButtonType's button, for after it
+        std::uint32_t lod = 0u;        // LodCtrl::calcDistanceToCamera's LodCtrl, for after it
+        std::uint32_t pad_channel = 0u;   // testCorePad*A's channel, for after it
+        std::array<std::uint32_t, 5> pane_args{};  // isStarPointerPointingPane's arguments
+    } talk;
+    // MR::isNearPlayer* in flight: its actor and distance.
+    std::uint32_t near_actor = 0u;
+    float near_distance = 0.0f;
+    bool miss_counted = false;
+    std::string last_stage;  // the previous scene's stage, to see a save loaded (on_stage_start)
+    // NameObjArchiveListCollector::addArchive in flight, and the partner archives a collector already has.
+    std::uint32_t archive_collector = 0u;
+    std::uint32_t archive_name = 0u;
+    std::uint32_t partner_archives_collector = 0u;
+    std::vector<std::string> partner_archives;
+    bool second_riding = false;  // the second player on a launch star: the first flies beside them
+    // Hot join (update_presence): whether the second player is in the game. Absent, he sits out as a player out of
+    // lives does (hidden, untouchable, carried beside the first), with no HUD, pointer or controller. Kept across
+    // stages; `present_known` once the boot's co-op setting or the save select has said how a game starts.
+    bool present = false;
+    bool present_known = false;
+    std::uint32_t join_buttons = 0u;   // his controller's buttons last frame
+    unsigned leave_frames = 0u;        // frames − has been held
+    bool join_seen_connected = false;  // his controller has been connected since he dropped in
+    bool drop_in_requested = false;    // online live join: NetCommand::Join came (coop_request_drop_in)
+    bool second_hidden_for_start = false;
+    std::uint32_t star_traced = 0u;
+    bool hud_tried = false;
+    std::uint32_t hit_point_name = 0u;  // "HitPointMeter" in the game's data
+    std::uint32_t second_meter_count = 0u;
+    std::uint32_t ring_names = 0u;  // "PicBase", "PicBaseW" in guest memory
+    float hud_scale_x = 0.0f;
+    float hud_scale_y = 0.0f;
+    float hud_offset_x = 0.0f;
+    float hud_offset_y = 0.0f;
+    // The first player's camera and projection as the game made them, restored after the second half.
+    coop::CameraMatrices camera1;
+    std::array<float, 16> projection{};
+    // The second player's game camera (second_director): its CameraDirector and the view it made this frame.
+    std::uint32_t director2 = 0u;
+    bool director2_view_valid = false;
+    coop::CameraMatrices director2_view;
+    // The camera's lens, for the second player's clipping.
+    float fovy = 45.0f;
+    float aspect = 16.0f / 9.0f;
+    float far_z = 100000.0f;
+    // Star Pointers (docs/MULTIPLAYER.md "Star Pointers"). `camera`, `projection`: what each player's half was
+    // last drawn with (index 0 the first player's), while `split`; the game's pointer camera
+    // (StarPointerTransformHolder) and CameraContext are given a pointer's half for its target tests.
+    struct Pointers {
+        bool split = false;
+        std::array<coop::CameraMatrices, 2> camera{};
+        std::array<std::array<float, 16>, 2> projection{};
+        bool holder_swapped = false;  // isStarPointerPointingCore in flight with a half's camera
+        std::array<float, 12> holder_view{};
+        std::array<float, 16> holder_projection{};
+        bool context_swapped = false;  // GCapture's MR::calcScreenPosition in flight with a half's camera
+        coop::CameraMatrices context_camera{};
+        std::array<float, 16> context_projection{};
+        // Pull Stars: the brother whose pointer has them (GCapture runs with him as the game's player).
+        bool capture_second = false;
+        std::uint32_t capture_depth = 0u;
+        bool capture_swapped = false;
+        bool capture_back_to_second = false;
+        bool bind_refused = false;  // the other brother's bind skipped, for after it
+        bool spine_swapped = false;  // a Pull Star nerve step in flight run as the capturing brother
+        bool spine_back_to_second = false;
+        std::uint32_t gcapture = 0u;
+        std::array<std::uint32_t, 4> pointing_args{};  // MR::isStarPointerPointing's, for after it
+        bool pointing_target = false;  // ... called from GCaptureTarget
+    } pointers;
+    // Bind objects for either brother (bind_spine_begin): Spine::update calls in flight, and the depth of the one
+    // whose nerve step runs with the second player as the game's player.
+    std::uint32_t spine_depth = 0u;
+    std::uint32_t bind_spine_depth = 0u;
+    bool bind_spine_swapped = false;
+    std::uint32_t bind_traced = 0u;
+};
+
+// The first player's half while the game camera is away on the second player's event: the game camera's last view
+// of him, carried along with him. (Not a director of his own: a second CameraDirector run for the game's own player
+// made replays and online play diverge, at audio interrupt timing; the second player's director does not.)
+constexpr float kOwnCameraBackDistance = 2500.0f;  // the game camera this near the first player is back with him
+coop::CameraMatrices first_own_view(const State& s, coop::Vec3 first_position) {
+    return s.hold.view(first_position);
+}
+
+bool split_screen_enabled() {
+    static const bool enabled = [] {
+        char* value = nullptr;
+        std::size_t length = 0u;
+        const bool off = _dupenv_s(&value, &length, "GALAXY_COOP_SPLIT") == 0 && value != nullptr && value[0] == '0';
+        std::free(value);
+        return !off;
+    }();
+    return enabled;
+}
+
+State& state() {
+    static State s;
+    return s;
+}
+
+// native_runtime.cpp puts split screen's line in the GX stream (coop_set_split_clip_sink).
+struct SplitClipSinkSlot {
+    SplitClipSink sink = nullptr;
+    void* user = nullptr;
+};
+SplitClipSinkSlot& split_clip_sink() {
+    static SplitClipSinkSlot slot;
+    return slot;
+}
+// Online play (netplay_session.h): both PCs simulate and draw both players' views alike, and each shows only its
+// own player's, full screen. What reaches the renderer (the clip line) is not guest state, so it may differ.
+bool online_views() { return net_session_requested(); }
+bool local_view_is_second() { return !net_is_host(); }
+
+void send_split_clip(const std::array<float, 3>& plane, unsigned pass,
+                     const std::array<float, 4>& separator = {0.0f, 0.0f, 0.0f, 0.0f}) {
+    const SplitClipSinkSlot& slot = split_clip_sink();
+    if (slot.sink == nullptr) return;
+    if (online_views() && pass != 0u) {
+        // This PC's player's pass whole ({0, 0, 0}: no line); the other's clipped away (a line far off screen).
+        const bool mine = (pass == 2u) == local_view_is_second();
+        const std::array<float, 3> online = mine ? std::array<float, 3>{0.0f, 0.0f, 0.0f}
+                                                 : std::array<float, 3>{1.0f, 0.0f, -1.0e6f};
+        slot.sink(slot.user, online.data(), pass, separator.data());
+        return;
+    }
+    // No line between the halves online.
+    const std::array<float, 4> none{0.0f, 0.0f, 0.0f, 0.0f};
+    slot.sink(slot.user, plane.data(), pass, online_views() ? none.data() : separator.data());
+}
+
+std::uint32_t camera_context(const Guest& guest) {
+    std::uint32_t object = guest.u32(guest.context()->gpr[13] - 0x3A78u);
+    for (const std::uint32_t offset : {0x24u, 0xACu, 0x10u, 0x17u * 4u}) {
+        if (!plausible(object)) return 0u;
+        object = guest.u32(object + offset);
+    }
+    return plausible(object) ? object : 0u;
+}
+
+template <std::size_t N>
+std::array<float, N> read_floats(const Guest& guest, std::uint32_t address) {
+    std::array<float, N> values{};
+    for (std::size_t i = 0; i < N; ++i) values[i] = guest.f32(address + static_cast<std::uint32_t>(4u * i));
+    return values;
+}
+
+template <std::size_t N>
+void write_floats(const Guest& guest, std::uint32_t address, const std::array<float, N>& values) {
+    for (std::size_t i = 0; i < N; ++i) guest.set_f32(address + static_cast<std::uint32_t>(4u * i), values[i]);
+}
+
+void write_camera(const Guest& guest, std::uint32_t context, const coop::CameraMatrices& matrices) {
+    write_floats(guest, context + camera::kView, matrices.view);
+    write_floats(guest, context + camera::kInverse, matrices.inverse);
+}
+
+coop::CameraMatrices read_camera(const Guest& guest, std::uint32_t context) {
+    return {read_floats<12>(guest, context + camera::kView), read_floats<12>(guest, context + camera::kInverse)};
+}
+
+bool finite(const std::array<float, 12>& values) {
+    for (const float value : values) {
+        if (!std::isfinite(value)) return false;
+    }
+    return true;
+}
+
+
+coop::Vec3 player_up(const Guest& guest, std::uint32_t mario) {
+    return coop::normalized(guest.vec(mario + kMarioUpVec), {0.0f, 1.0f, 0.0f});
+}
+
+std::uint8_t character_byte(coop::Character character) {
+    return character == coop::Character::Luigi ? 1u : 0u;
+}
+
+void ensure_archive_names(const Guest& guest, State& s) {
+    if (s.names.searched) return;
+    s.names.searched = true;
+    for (const coop::Character character : {coop::Character::Mario, coop::Character::Luigi}) {
+        const coop::CharacterArchives archives = coop::archives_of(character);
+        auto& names = character == coop::Character::Luigi ? s.names.luigi : s.names.mario;
+        names = {guest.find_string(archives.model_path), guest.find_string(archives.face_path),
+                 guest.find_string(archives.shadow_path)};
+    }
+    trace("archive names: Mario %08X %08X %08X, Luigi %08X %08X %08X", s.names.mario[0], s.names.mario[1],
+          s.names.mario[2], s.names.luigi[0], s.names.luigi[1], s.names.luigi[2]);
+}
+
+// After the game mounts its player's model archive, the other character's model, face and shadow are
+// mounted into the same heap (the stationed-archive loader's thread).
+void mount_partner_archives(const Guest& guest, State& s) {
+    coop::Character own_model = coop::Character::Mario;
+    if (!coop::own_model_archive(guest.string(s.mount_path), own_model)) return;
+    ensure_archive_names(guest, s);
+    const coop::Character partner = coop::partner_of(own_model);
+    SavedContext saved(guest.context());
+    s.mounting_partner = true;
+    for (const std::uint32_t path : s.names.of(partner)) {
+        if (path == 0u) continue;
+        const std::uint32_t mounted = guest.call(fn::kMountArchive, path, s.mount_heap);
+        trace("mounted %s into heap %08X: %08X", guest.string(path).c_str(), s.mount_heap, mounted);
+    }
+    s.mounting_partner = false;
+}
+
+// After the game makes the resource holders of its player's archives, the same for the other character.
+void add_partner_resources(const Guest& guest, State& s) {
+    ensure_archive_names(guest, s);
+    const coop::Character own = s.player_archives_is_mario != 0u ? coop::Character::Mario : coop::Character::Luigi;
+    const std::uint32_t manager = guest.u32(kResourceHolderManager);
+    if (!plausible(manager)) return;
+    SavedContext saved(guest.context());
+    for (const std::uint32_t path : s.names.of(coop::partner_of(own))) {
+        if (path == 0u) continue;
+        const std::uint32_t holder = guest.call(fn::kCreateAndAddStationed, manager, path);
+        trace("resource holder for %s: %08X", guest.string(path).c_str(), holder);
+    }
+}
+
+// Right after the game sets up its player, the second player: the same MarioActor as the other character,
+// beside the first, out of the movement list.
+void create_hud(const Guest& guest, State& s);
+void make_second_director(const Guest& guest, State& s);
+void on_stage_start(const Guest& guest, State& s);
+void tint_second_meter(const Guest& guest, const State& s);
+void sit_out(const Guest& guest, State& s);
+
+// ---- Each brother's own animations (docs/MULTIPLAYER.md "What happens in game") ----
+// MarioAnimator::init makes the player's XanimeResourceTable from the game's one static marioAnimeTable
+// (XanimeGroupInfo[]): XanimeResourceTable::initGroupInfo writes each group's motions (resolved through the swap
+// table, luigiAnimeSwapTable while gIsLuigi is set) into that array, and the table and its XanimePlayers point into
+// it. The second brother's init2 resolved the one array again as his character, under the first brother's feet
+// (Mario played LuigiJumpRoll). So the second brother's table gets a copy of its own: the array is saved before
+// his init2, copied after it, his table and players pointed at the copy, and the array put back as it was.
+// Luigi resolves with the content's own swap table (<mods>/luigi_swap.txt: Galaxy's clips for Luigi where the
+// animation mod changed Mario's), when there is one.
+namespace anime {
+constexpr std::uint32_t kActorAnimator = 0x234u;     // MarioActor::mMarioAnim
+constexpr std::uint32_t kAnimatorTable = 0x08u;      // MarioAnimator::mResourceTable
+constexpr std::uint32_t kAnimatorPlayer = 0x0Cu;     // MarioAnimator::mXanimePlayer
+constexpr std::uint32_t kAnimatorUpper = 0x10u;      // MarioAnimator::mXanimePlayerUpper
+constexpr std::uint32_t kTableGroups = 0x10u;        // XanimeResourceTable::mGroupInfos
+constexpr std::uint32_t kTableSingles = 0x18u;       // XanimeResourceTable::mBckTables
+constexpr std::uint32_t kTableHolder = 0x6Cu;        // XanimeResourceTable::mResourceHolder
+constexpr std::uint32_t kTableSwap = 0x74u;          // XanimeResourceTable::mSwapTable
+constexpr std::uint32_t kGroupSize = 0x4Cu;          // sizeof(XanimeGroupInfo)
+constexpr std::uint32_t kGroupMotions = 0x20u;       // XanimeGroupInfo::_20[4], the resolved J3DAnmTransforms
+// XanimePlayer's group pointers: mDefaultAnimation, mCurrentAnimation, mPrevAnimation, _68.
+constexpr std::array<std::uint32_t, 4> kPlayerGroupFields = {0x5Cu, 0x60u, 0x64u, 0x68u};
+constexpr std::uint32_t kMarioAnimatorInit = 0x802CA78Cu;  // MarioAnimator::init()
+constexpr std::uint32_t kMarioAnimatorInitSize = 0x23Cu;
+constexpr std::uint32_t kTableCtor = 0x8001CA44u;      // XanimeResourceTable::XanimeResourceTable(holder, groups, ... swap)
+constexpr unsigned kMaxGroups = 4096u;
+
+// The static tables MarioAnimator::init passes the table's constructor (r5-r10, then the stack's 8 and 0xC):
+// read once from its code, as its lis/addi pairs leave them.
+struct Tables {
+    bool searched = false;
+    bool ok = false;
+    std::uint32_t groups = 0u, aux = 0u, ofs = 0u, single = 0u, dbl = 0u, triple = 0u, quad = 0u, luigi = 0u;
+};
+Tables s_tables;
+bool s_tables_checked = false;  // re-resolving a table as it is gave it back unchanged (tables_trusted)
+
+// Luigi's swap pairs from the content (coop_load_luigi_swap), lower case as the file has them.
+std::vector<std::pair<std::string, std::string>> s_luigi_swap;
+
+const Tables& tables(const Guest& guest) {
+    if (s_tables.searched) return s_tables;
+    s_tables.searched = true;
+    std::array<std::uint32_t, 32> reg{};
+    std::array<bool, 32> known{};
+    std::uint32_t stack8 = 0u, stackC = 0u;
+    bool have8 = false, haveC = false, called = false;
+    const auto forget = [&](unsigned r) { known[r] = false; };
+    for (std::uint32_t pc = kMarioAnimatorInit; pc < kMarioAnimatorInit + kMarioAnimatorInitSize; pc += 4u) {
+        const std::uint32_t op = guest.u32(pc);
+        const unsigned primary = op >> 26u;
+        const unsigned d = (op >> 21u) & 31u;
+        const unsigned a = (op >> 16u) & 31u;
+        const unsigned b = (op >> 11u) & 31u;
+        const std::uint32_t simm = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(op & 0xFFFFu)));
+        if (primary == 14u || primary == 15u) {  // addi, addis
+            const bool base = a == 0u || known[a];
+            const std::uint32_t value = (a == 0u ? 0u : reg[a]) + (primary == 15u ? (op & 0xFFFFu) << 16u : simm);
+            reg[d] = value;
+            known[d] = base;
+        } else if (primary == 24u) {  // ori
+            reg[a] = reg[d] | (op & 0xFFFFu);
+            known[a] = known[d];
+        } else if (primary == 31u && ((op >> 1u) & 0x3FFu) == 444u && d == b) {  // mr
+            reg[a] = reg[d];
+            known[a] = known[d];
+        } else if (primary == 36u && a == 1u) {  // stw rS, d(r1)
+            if ((op & 0xFFFFu) == 8u) { stack8 = reg[d]; have8 = known[d]; }
+            if ((op & 0xFFFFu) == 0xCu) { stackC = reg[d]; haveC = known[d]; }
+        } else if (primary == 18u && (op & 1u) != 0u) {  // bl
+            std::uint32_t offset = op & 0x03FFFFFCu;
+            if ((offset & 0x02000000u) != 0u) offset |= 0xFC000000u;
+            const std::uint32_t target = ((op & 2u) != 0u ? 0u : pc) + offset;
+            if (target == kTableCtor) {
+                called = true;
+                break;
+            }
+            for (unsigned r : {0u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u}) forget(r);
+        } else if (primary == 31u) {
+            forget(d);
+            forget(a);
+        } else if ((primary >= 7u && primary <= 13u) || (primary >= 32u && primary <= 35u) ||
+                   (primary >= 40u && primary <= 43u) || primary == 46u) {
+            forget(d);  // arithmetic and loads into rD
+        } else if (primary == 20u || primary == 21u || primary == 23u || (primary >= 25u && primary <= 29u)) {
+            forget(a);  // rlwimi, rlwinm, rlwnm, oris, xori, xoris, andi., andis.
+        }
+    }
+    Tables& t = s_tables;
+    t.groups = reg[5], t.aux = reg[6], t.ofs = reg[7], t.single = reg[8], t.dbl = reg[9], t.triple = reg[10];
+    t.quad = stack8;
+    t.luigi = haveC ? stackC : 0u;
+    t.ok = called && have8 && known[5] && known[6] && known[7] && known[8] && known[9] && known[10] &&
+           plausible(t.groups) && plausible(t.aux) && plausible(t.ofs) && plausible(t.single) && plausible(t.dbl) &&
+           plausible(t.triple) && plausible(t.quad);
+    trace("animation tables: %s groups %08X aux %08X ofs %08X single %08X double %08X triple %08X quad %08X luigi %08X",
+          t.ok ? "found" : "NOT found", t.groups, t.aux, t.ofs, t.single, t.dbl, t.triple, t.quad, t.luigi);
+    return t;
+}
+
+std::uint32_t table_of(const Guest& guest, std::uint32_t actor_address) {
+    if (!plausible(actor_address)) return 0u;
+    const std::uint32_t animator = guest.u32(actor_address + kActorAnimator);
+    if (!plausible(animator)) return 0u;
+    const std::uint32_t table = guest.u32(animator + kAnimatorTable);
+    return plausible(table) ? table : 0u;
+}
+
+unsigned group_count(const Guest& guest, std::uint32_t groups) {
+    unsigned n = 0u;
+    while (n < kMaxGroups) {
+        const std::uint32_t name = guest.u32(groups + n * kGroupSize);
+        if (!plausible(name & ~3u) || guest.u8(name) == 0u) break;
+        ++n;
+    }
+    return n;
+}
+
+std::vector<std::uint32_t> read_words(const Guest& guest, std::uint32_t at, std::uint32_t bytes) {
+    std::vector<std::uint32_t> words(bytes / 4u);
+    for (std::uint32_t i = 0; i < words.size(); ++i) words[i] = guest.u32(at + i * 4u);
+    return words;
+}
+
+void write_words(const Guest& guest, std::uint32_t at, const std::vector<std::uint32_t>& words) {
+    for (std::uint32_t i = 0; i < words.size(); ++i) guest.set_u32(at + i * 4u, words[i]);
+}
+
+using SwapPairs = std::vector<std::pair<std::string, std::string>>;
+
+std::string lower(std::string text) {
+    for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return text;
+}
+
+// The bck files of each group (by its name) as the static bck tables list them, and the groups the offset table
+// gives start, loop, end and attribute: read once, they do not change.
+struct BckFiles {
+    bool read = false;
+    std::vector<std::pair<std::string, std::vector<std::string>>> by_group;  // in the tables' order: single first
+    std::vector<std::string> with_offsets;
+};
+BckFiles s_bck_files;
+
+const BckFiles& bck_files(const Guest& guest, const Tables& t) {
+    if (s_bck_files.read) return s_bck_files;
+    s_bck_files.read = true;
+    // XanimeBckTable1 {name, file, hash, hash}; XanimeBckTable2-4 {name, {file, weight}[n]}.
+    const std::array<std::tuple<std::uint32_t, std::uint32_t, unsigned>, 4> kinds = {
+        std::tuple{t.single, 0x10u, 1u}, std::tuple{t.dbl, 0x14u, 2u}, std::tuple{t.triple, 0x1Cu, 3u},
+        std::tuple{t.quad, 0x24u, 4u}};
+    for (const auto& [base, stride, files] : kinds) {
+        for (unsigned i = 0; i < kMaxGroups; ++i) {
+            const std::uint32_t at = base + i * stride;
+            const std::string name = guest.string(guest.u32(at));
+            if (name.empty()) break;
+            std::vector<std::string> list;
+            for (unsigned j = 0; j < files; ++j) list.push_back(guest.string(guest.u32(at + 4u + j * (files == 1u ? 4u : 8u))));
+            s_bck_files.by_group.emplace_back(name, std::move(list));
+        }
+    }
+    for (unsigned i = 0; i < kMaxGroups; ++i) {  // XanimeOfsInfo {name, start, end, loop, attribute}
+        const std::string name = guest.string(guest.u32(t.ofs + i * 0x14u));
+        if (name.empty()) break;
+        s_bck_files.with_offsets.push_back(name);
+    }
+    return s_bck_files;
+}
+
+// XanimeResourceTable::swapBckName with a table read from guest memory (Galaxy's, or the one a table was made with).
+SwapPairs read_swap(const Guest& guest, std::uint32_t swap) {
+    SwapPairs pairs;
+    for (unsigned i = 0; swap != 0u && i < 1024u; ++i) {
+        const std::string original = guest.string(guest.u32(swap + i * 8u));
+        if (original.empty()) break;
+        pairs.emplace_back(original, guest.string(guest.u32(swap + i * 8u + 4u)));
+    }
+    return pairs;
+}
+
+// The groups of `table` as XanimeResourceTable::initGroupInfo resolves them with `swap` (done here rather than by
+// calling the game: only the motions and what initGroupInfo takes from them depend on the swap table). Every
+// field initGroupInfo writes from the motions: _20[], and mStart, mEnd, mLoop and mAttribute where the offset
+// table has none. ResTable::getResIndex finds a motion by its lower-case name.
+std::vector<std::uint32_t> resolved_groups(const Guest& guest, const Tables& t, std::uint32_t table, const SwapPairs& swap) {
+    const std::uint32_t groups = guest.u32(table + kTableGroups);
+    const unsigned n = group_count(guest, groups);
+    std::vector<std::uint32_t> words = read_words(guest, groups, n * kGroupSize);
+    const BckFiles& files = bck_files(guest, t);
+    const std::uint32_t holder = guest.u32(table + kTableHolder);
+    const std::uint32_t motions = plausible(holder) ? guest.u32(holder + 4u) : 0u;  // ResourceHolder::mMotionResTable
+    if (!plausible(motions)) return {};
+    std::vector<std::pair<std::string, std::uint32_t>> resources;  // ResFileInfo {mResource, ..., mName +0x10}
+    const std::uint32_t infos = guest.u32(motions);
+    const std::uint32_t count = std::min(guest.u32(motions + 4u), 8192u);
+    for (std::uint32_t i = 0; plausible(infos) && i < count; ++i) {
+        resources.emplace_back(lower(guest.string(guest.u32(infos + i * 0x18u + 0x10u))), guest.u32(infos + i * 0x18u));
+    }
+    const auto motion = [&](const std::string& file) -> std::uint32_t {
+        std::string name = file;
+        for (const auto& [original, swapped] : swap) {
+            if (lower(original) == lower(file)) {
+                name = swapped;
+                break;
+            }
+        }
+        name = lower(name);
+        for (const auto& [resource_name, resource] : resources) {
+            if (resource_name == name) return resource;
+        }
+        return 0u;
+    };
+    for (unsigned i = 0; i < n; ++i) {
+        std::uint32_t* entry = words.data() + i * (kGroupSize / 4u);
+        const std::string name = guest.string(entry[0]);
+        const auto found = std::find_if(files.by_group.begin(), files.by_group.end(),
+                                        [&](const auto& group) { return group.first == name; });
+        std::array<std::uint32_t, 4> resolved{};
+        if (found != files.by_group.end()) {
+            for (std::size_t j = 0; j < found->second.size(); ++j) resolved[j] = motion(found->second[j]);
+        }
+        for (unsigned j = 0; j < 4u; ++j) entry[kGroupMotions / 4u + j] = resolved[j];
+        if (std::find(files.with_offsets.begin(), files.with_offsets.end(), name) != files.with_offsets.end()) continue;
+        entry[0x0Cu / 4u] = 0u;  // mStart
+        entry[0x14u / 4u] = 0u;  // mLoop
+        if (resolved[0] == 0u) {
+            entry[0x10u / 4u] = 0u;
+            entry[0x18u / 4u] = 0u;
+        } else {  // J3DAnmTransform: attribute (u8 +4), frame max (s16 +6)
+            const std::uint32_t head = guest.u32(resolved[0] + 4u);
+            entry[0x18u / 4u] = head >> 24u;
+            entry[0x10u / 4u] = std::bit_cast<std::uint32_t>(static_cast<float>(static_cast<std::int16_t>(head & 0xFFFFu)));
+        }
+    }
+    return words;
+}
+
+// Whether resolving here gives what the game made: the first table made, with the swap table it was made with,
+// must come out as it is (checked once; on a mismatch the per-brother animations stay off).
+bool tables_trusted(const Guest& guest, const Tables& t, std::uint32_t table) {
+    if (s_tables_checked) return true;
+    if (!t.ok || guest.u32(table + kTableGroups) != t.groups) return false;
+    const unsigned n = group_count(guest, t.groups);
+    if (n == 0u) return false;
+    const std::vector<std::uint32_t> made = read_words(guest, t.groups, n * kGroupSize);
+    const std::vector<std::uint32_t> here = resolved_groups(guest, t, table, read_swap(guest, guest.u32(table + kTableSwap)));
+    if (made != here) {
+        unsigned differ = 0u;
+        for (std::size_t i = 0; i < made.size() && i < here.size(); ++i) differ += made[i] != here[i] ? 1u : 0u;
+        trace("animation tables: resolving here differs from the game (%u words); per-brother animations off", differ);
+        s_tables.ok = false;
+        return false;
+    }
+    s_tables_checked = true;
+    trace("animation tables: %u groups, resolving here matches the game", n);
+    return true;
+}
+
+// A block on the stage's heap (MEM2's when it has room, else MEM1's), or 0.
+std::uint32_t stage_alloc(const Guest& guest, std::uint32_t size) {
+    const std::uint32_t watcher = guest.u32(kHeapMemoryWatcher);
+    if (!plausible(watcher)) return 0u;
+    for (const std::uint32_t field : {kSceneHeapGddr, kSceneHeapNapa}) {
+        const std::uint32_t heap = guest.u32(watcher + field);
+        if (heap == 0u) continue;
+        if (guest.u32(heap + kSolidHeapFreeSize) < size + 0x10000u) continue;
+        const std::uint32_t block = guest.call(fn::kNewOnHeap, size, heap, 4u);
+        if (block != 0u) return block;
+    }
+    return 0u;
+}
+
+// This stage's XanimeSwapTable { const char* original; const char* swapped; }[] from luigi_swap.txt, ended by
+// {"", nullptr}; 0 without the file.
+std::uint32_t luigi_swap_table(const Guest& guest, State& s) {
+    if (s_luigi_swap.empty()) return 0u;
+    if (s.luigi_swap_table != 0u) return s.luigi_swap_table;
+    const std::uint32_t pairs = static_cast<std::uint32_t>(s_luigi_swap.size());
+    std::uint32_t text = 1u;  // the terminator's ""
+    for (const auto& [original, swapped] : s_luigi_swap) {
+        text += static_cast<std::uint32_t>(original.size() + swapped.size() + 2u);
+    }
+    const std::uint32_t entries = (pairs + 1u) * 8u;
+    const std::uint32_t block = stage_alloc(guest, entries + ((text + 3u) & ~3u));
+    if (block == 0u) {
+        trace("Luigi's swap table: no room on the stage's heap");
+        return 0u;
+    }
+    std::uint32_t at = block + entries;
+    const auto put = [&](const std::string& value) {
+        const std::uint32_t start = at;
+        for (const char c : value) guest.set_u8(at++, static_cast<std::uint8_t>(c));
+        guest.set_u8(at++, 0u);
+        return start;
+    };
+    for (std::uint32_t i = 0; i < pairs; ++i) {
+        guest.set_u32(block + i * 8u, put(s_luigi_swap[i].first));
+        guest.set_u32(block + i * 8u + 4u, put(s_luigi_swap[i].second));
+    }
+    guest.set_u32(block + pairs * 8u, put(std::string()));
+    guest.set_u32(block + pairs * 8u + 4u, 0u);
+    s.luigi_swap_table = block;
+    trace("Luigi's swap table: %u pairs at %08X", pairs, block);
+    return block;
+}
+
+// Luigi's table resolved with the content's swap table (Galaxy's own stays without the file).
+void resolve_as_luigi(const Guest& guest, State& s, std::uint32_t actor_address) {
+    const Tables& t = tables(guest);
+    const std::uint32_t table = table_of(guest, actor_address);
+    if (!t.ok || table == 0u) return;
+    const std::uint32_t swap = luigi_swap_table(guest, s);
+    if (swap == 0u) return;
+    const std::uint32_t groups = guest.u32(table + kTableGroups);
+    // As the game made it (Galaxy's swap table): resolving here must give the same.
+    const std::vector<std::uint32_t> made = read_words(guest, groups, group_count(guest, groups) * kGroupSize);
+    if (resolved_groups(guest, t, table, read_swap(guest, guest.u32(table + kTableSwap))) != made) {
+        trace("Luigi %08X: resolving here differs from the game's table; Galaxy's swap table kept", actor_address);
+        return;
+    }
+    const std::vector<std::uint32_t> words = resolved_groups(guest, t, table, s_luigi_swap);
+    if (words.empty()) return;
+    write_words(guest, groups, words);
+    // Its later lookups (XanimeResourceTable::findResMotion: single bcks, track changes) swap with it as well.
+    guest.set_u32(table + kTableSwap, swap);
+    trace("Luigi %08X: %zu groups at %08X resolved with the content's swap table", actor_address,
+          words.size() * 4u / kGroupSize, groups);
+}
+
+// A new stage's first player made: as Luigi, his table with the content's swap table.
+void first_player_animations(const Guest& guest, State& s, std::uint32_t first) {
+    s.luigi_swap_table = 0u;
+    const std::uint32_t table = table_of(guest, first);
+    if (table == 0u) return;
+    const Tables& t = tables(guest);
+    if (!tables_trusted(guest, t, table)) return;
+    if (guest.u8(kIsLuigi) != 0u) resolve_as_luigi(guest, s, first);
+}
+
+// Before the second player's init2: the shared groups as the first player has them.
+std::vector<std::uint32_t> save_shared_groups(const Guest& guest) {
+    const Tables& t = tables(guest);
+    if (!t.ok || !s_tables_checked) return {};
+    return read_words(guest, t.groups, group_count(guest, t.groups) * kGroupSize);
+}
+
+// After it: the second player's own copy of the groups, his table and players pointed at it, and the shared groups
+// put back for the first player.
+void own_groups_for_second(const Guest& guest, State& s, std::uint32_t second, const std::vector<std::uint32_t>& saved) {
+    const Tables& t = tables(guest);
+    const std::uint32_t table = table_of(guest, second);
+    if (saved.empty() || table == 0u || guest.u32(table + kTableGroups) != t.groups) return;
+    const std::uint32_t bytes = static_cast<std::uint32_t>(saved.size() * 4u);
+    const std::uint32_t copy = stage_alloc(guest, bytes);
+    if (copy == 0u) {
+        trace("second player's animations: no room for his groups (%u bytes)", bytes);
+        return;
+    }
+    write_words(guest, copy, read_words(guest, t.groups, bytes));
+    write_words(guest, t.groups, saved);
+    guest.set_u32(table + kTableGroups, copy);
+    const std::uint32_t animator = guest.u32(second + kActorAnimator);
+    for (const std::uint32_t field : {kAnimatorPlayer, kAnimatorUpper}) {
+        const std::uint32_t player = guest.u32(animator + field);
+        if (!plausible(player)) continue;
+        for (const std::uint32_t at : kPlayerGroupFields) {
+            const std::uint32_t group = guest.u32(player + at);
+            if (group >= t.groups && group < t.groups + bytes) guest.set_u32(player + at, group - t.groups + copy);
+        }
+    }
+    trace("second player's animations: %u groups of his own at %08X", bytes / kGroupSize, copy);
+    if (guest.u8(kIsLuigi) != 0u) resolve_as_luigi(guest, s, second);
+}
+}  // namespace anime
+
+void create_second_player(const Guest& guest, State& s, std::uint32_t first) {
+    SavedContext saved(guest.context());
+    s.first = first;
+    s.second = 0u;
+    s.second_mario = 0u;
+    s.kpad.reset();
+    s.leash.reset();
+    s.split.reset();
+    // Until the first player has landed and has control, the second waits where they were placed.
+    s.level_start = true;
+    s.travelling = true;
+    s.sticky_travel = false;
+    s.held_here = false;
+    s.riding_along = false;
+    s.controllable_frames = 0u;
+    s.follow.reset();
+    // A new stage: both players in play (one out of lives comes back), its own HUD.
+    s.down = {};
+    s.game_miss = false;
+    s.miss_counted = false;
+    s.second_meter = s.second_left = s.first_meter = s.first_left = 0u;
+    s.hud_tried = false;
+    s.star_swapped = 0u;
+    s.pipe_swapped = 0u;
+    s.pipe = {};
+    s.nearer_depth = 0u;
+    s.nearer_swapped = false;
+    s.second_scene = 0u;
+    s.talk = {};
+    s.pointers = {};
+    s.second_hidden_for_start = false;
+    const std::uint32_t first_mario = guest.u32(first + actor::kMario);
+    if (!plausible(first_mario)) return;
+    const coop::Vec3 position = guest.vec(first + actor::kPosition);
+    const coop::Vec3 rotation = guest.vec(first + actor::kRotation);
+    const coop::Vec3 side = guest.vec(first_mario + kMarioSideVec);
+    const coop::Vec3 beside = position + side * 120.0f;
+    s.parked_position = beside;
+
+    // The actor's name: the debug name the game gives its own player is unknown, so the archive path does.
+    ensure_archive_names(guest, s);
+    const std::uint32_t name = s.names.of(coop::partner_of(s.own))[0];
+    s.creating_second = true;
+    // The stage heaps' room before and after (a second player takes about 600 KB of MEM1).
+    const std::uint32_t watcher = guest.u32(kHeapMemoryWatcher);
+    const auto free_kb = [&](std::uint32_t field) {
+        const std::uint32_t heap = plausible(watcher) ? guest.u32(watcher + field) : 0u;
+        return heap != 0u ? guest.u32(heap + kSolidHeapFreeSize) / 1024u : 0u;
+    };
+    trace("stage heaps before the second player: MEM1 %u KB free, MEM2 %u KB free", free_kb(kSceneHeapNapa),
+          free_kb(kSceneHeapGddr));
+    const std::uint32_t second = guest.call(fn::kCreateMarioActor, name);
+    if (plausible(second)) {
+        const std::vector<std::uint32_t> shared_groups = anime::save_shared_groups(guest);
+        {
+            Guest::Frame frame(guest);
+            s.answer_partner = true;
+            guest.call(fn::kMarioActorInit2, second, frame.vec(0, beside), frame.vec(1, rotation), 1u);  // 1: 基本
+            s.answer_partner = false;
+        }
+        // gIsLuigi is still the second player's here.
+        anime::own_groups_for_second(guest, s, second, shared_groups);
+    }
+    trace("stage heaps after the second player: MEM1 %u KB free, MEM2 %u KB free", free_kb(kSceneHeapNapa),
+          free_kb(kSceneHeapGddr));
+    s.creating_second = false;
+    // init2 made the new actor the scene's player and set gIsLuigi to its character: back to the first.
+    guest.set_u8(kIsLuigi, character_byte(s.own));
+    const std::uint32_t holder = guest.call(fn::kGetMarioHolder);
+    if (plausible(holder)) guest.call(fn::kSetMarioActor, holder, first);
+    guest.call(fn::kSetCameraTargetToPlayer);
+    if (!plausible(second)) {
+        trace("second player not created (%08X)", second);
+        return;
+    }
+    guest.call(fn::kRequestSuspend, second);
+    s.second = second;
+    s.second_mario = guest.u32(second + actor::kMario);
+    on_stage_start(guest, s);
+    // The second player's HUD is made with the stage's own objects: layouts made once the stage runs are not
+    // moved or drawn.
+    create_hud(guest, s);
+    make_second_director(guest, s);
+    // Hot join: made in every stage, in the game or sitting out as he was (a game starts as the boot's co-op
+    // setting or the save select's Multiplayer switch says).
+    if (!s.present_known) {
+        // A live-joinable game (net_live) plays alone until a joiner drops in.
+        s.present = coop_enabled() && !net_live();
+        s.present_known = true;
+    }
+    coop_set_second_present(s.present);
+    if (!s.present) sit_out(guest, s);
+    trace("players: first %08X (%s), second %08X (%s)", first, s.own == coop::Character::Luigi ? "Luigi" : "Mario",
+          second, s.own == coop::Character::Luigi ? "Mario" : "Luigi");
+}
+
+// Swaps WPadHolder's WPads of channels 0 and 1, so the game's player code (which asks MR::getWPad for
+// channel 0) reads the second player's controller. Swapping twice restores them.
+void swap_pads(const Guest& guest, std::uint32_t pad_holder) {
+    const std::uint32_t pad0 = guest.u32(pad_holder);
+    guest.set_u32(pad_holder, guest.u32(pad_holder + 4u));
+    guest.set_u32(pad_holder + 4u, pad0);
+}
+
+// The players do not pass through each other: when they overlap, each is pushed half the way apart.
+void bump_players(const Guest& guest, const State& s, coop::Vec3 first_position, coop::Vec3 second_position) {
+    const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
+    if (!plausible(first_mario) || !plausible(s.second_mario)) return;
+    coop::Vec3 up = guest.vec(first_mario + kMarioUpVec);
+    const float up_length = coop::length(up);
+    if (!std::isfinite(up_length) || up_length < 0.5f) return;
+    up = up * (1.0f / up_length);
+    const coop::Vec3 push = coop::body_push(first_position, second_position, up);
+    if (push.x == 0.0f && push.y == 0.0f && push.z == 0.0f) return;
+    Guest::Frame frame(guest);
+    guest.call(fn::kMarioPush, s.second_mario, frame.vec(0, push));
+    guest.call(fn::kMarioPush, first_mario, frame.vec(1, push * -1.0f));
+}
+
+// The game camera's player: CameraDirector +0x34 CameraTargetHolder, +0xC its CameraTargetPlayer, whose
+// MarioActor is at +0x10 (Petari CameraDirector.hpp, CameraTargetHolder.hpp, CameraTargetObj.hpp).
+// While the second player moves, the game's player is them, so a warp, launch star, pipe or event camera
+// they set off (MR::setCameraTargetToPlayer, CameraTargetArg::setTarget) points the camera at them. While
+// that event camera plays it stays theirs (event_second: their half shows it); after, the camera is the
+// first player's again.
+bool rides_star(const Guest& guest, std::uint32_t actor_address);
+
+void keep_camera_on_first_player(const Guest& guest, State& s) {
+    const std::uint32_t director = guest.call(fn::kGetCameraDirector);
+    if (!plausible(director)) return;
+    const std::uint32_t holder = guest.u32(director + 0x34u);
+    if (!plausible(holder)) return;
+    const std::uint32_t target = guest.u32(holder + 0xCu);
+    if (!plausible(target)) return;
+    const std::uint32_t actor = guest.u32(target + 0x10u);
+    const bool event = (guest.call(fn::kIsEventCameraActive) & 0xFFu) != 0u;
+    const bool was = s.event_second;
+    // An event set off by the second player's own move points the camera at them; one an object starts for
+    // them (a launch star, a warp pad) points it at the first player, but then only the second player is
+    // in a special state (flying, warping).
+    const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
+    // A brother a launch star has caught is in its event from the catch (before his flight's special state).
+    const bool first_special = (plausible(first_mario) && guest.u32(first_mario + kMarioState) != 0u) ||
+                               rides_star(guest, s.first);
+    const bool second_special = (plausible(s.second_mario) && guest.u32(s.second_mario + kMarioState) != 0u) ||
+                                rides_star(guest, s.second);
+    // At a level start every camera is the first player's (the intro ends where the second player waits).
+    s.event_second = !s.level_start && coop::camera_event_is_second(actor, s.second, event, second_special, first_special);
+    // One brother's own event (his launch star, warp, pipe): the screen splits so the other keeps his own camera.
+    // Only with both in play: a brother down or sitting out (co-op off, nobody dropped in) has no view to keep,
+    // and splitting for him drew the whole flight twice, both halves at full detail, for one screen's picture.
+    s.solo_event = event && !s.level_start && first_special != second_special && !s.down[0].down && !s.down[1].down;
+    s.first_event = s.solo_event && first_special;
+    const unsigned inputs = (event ? 1u : 0u) | (actor == s.second ? 2u : actor == s.first ? 4u : 0u) |
+                            (second_special ? 8u : 0u) | (first_special ? 16u : 0u);
+    if (inputs != s.event_inputs) {
+        trace("camera event %d, camera on %s, special: second %d first %d (split %.2f)", event ? 1 : 0,
+              actor == s.second ? "second" : actor == s.first ? "first" : "other", second_special ? 1 : 0,
+              first_special ? 1 : 0, s.split.amount());
+        s.event_inputs = inputs;
+        s.camera_trace_frames = 120u;
+    }
+    if (s.event_second != was) {
+        trace("second player's camera event %s", s.event_second ? "begins" : "ends");
+        s.camera_trace_frames = 120u;
+        if (s.event_second) {
+            // Their half blends from their own camera into the event's; the first player's half holds the
+            // game camera's view from before the event.
+            // The event camera aims at the first player for its first frames (until it follows the second),
+            // so their half keeps its own view a moment before easing in.
+            s.second_awaits_event = true;
+            s.hold.start(s.last_camera1, s.last_origin, s.last_projection);
+        } else if (!s.event_second && s.split.amount() > 0.0f) {
+            // Their half eases from the event's camera back into their own.
+            s.second_handover.start(s.second_view, true);
+        }
+    }
+    // The first player's half holds on past the event while the second player is still in flight (a launch
+    // star's flight outlasts its event camera, and the game camera follows the flight); once they land it
+    // waits for the game camera to be back.
+    if (!s.event_second && s.hold.active() && !s.hold.returning() && !second_special) {
+        s.hold.release();
+        s.camera_trace_frames = 120u;
+        trace("second player landed: the first player's half waits for the game camera");
+    }
+    if (s.event_second) {
+        // The event's camera follows the second player while it plays.
+        if (actor != s.second) guest.set_u32(target + 0x10u, s.second);
+        return;
+    }
+    const std::uint32_t kept = coop::camera_player(actor, s.first, s.second);
+    if (kept == actor) return;
+    guest.set_u32(target + 0x10u, kept);
+    trace("camera target was the second player (%08X): back to the first (%08X)", actor, kept);
+}
+
+// While split, after both players moved: the second player's own camera (it trails them, turned and raised
+// by their controller, recentred by C, and kept in front of walls), and where the line between the halves
+// runs: square to where the second player is from the first on the first player's screen.
+void update_second_camera(const Guest& guest, State& s, coop::Vec3 first_position, coop::Vec3 second_position) {
+    const std::uint32_t context = camera_context(guest);
+    if (context == 0u || !plausible(s.second_mario)) return;
+    const coop::CameraMatrices first_camera = read_camera(guest, context);
+    if (!finite(first_camera.view) || !finite(first_camera.inverse)) return;
+    const coop::SplitTuning tuning{};
+    const coop::Vec3 up = player_up(guest, s.second_mario);
+    if (!s.follow.started()) {
+        // The split begins: the second player's camera starts as the shared one, moved onto them.
+        const coop::Vec3 midpoint = first_position + (second_position - first_position) * 0.5f;
+        s.follow.start(coop::pose_of(first_camera.inverse).eye, midpoint, second_position, up, tuning);
+        trace("split begins");
+    }
+    const coop::PartnerInput input = coop_partner_input();
+    const coop::CameraSteer steer = coop::camera_steer(input, s.steer_buttons);
+    s.steer_buttons = input.connected ? input.buttons : 0u;
+    if (steer.recentre) s.follow.recentre(second_position, guest.vec(s.second_mario + kMarioFrontVec), tuning);
+    s.follow.steer(steer.turn, steer.raise, tuning);
+    s.follow_view = s.follow.update(second_position, up, tuning);
+
+    // Camera collision: the first wall between the point the camera looks at and its eye.
+    const coop::Vec3 look = s.follow.look();
+    const coop::Vec3 eye = s.follow.eye();
+    {
+        Guest::Frame frame(guest);
+        const std::uint32_t hit = frame.vec(0, eye);
+        const std::uint32_t found =
+            guest.call(fn::kFirstPolyOnLineToMap, hit, frame.scratch(), frame.vec(1, look), frame.vec(2, eye - look));
+        if ((found & 0xFFu) != 0u) {
+            const coop::Vec3 wall = guest.vec(hit);
+            if (std::isfinite(coop::length(wall))) {
+                s.follow_view = coop::look_at(coop::camera_before_wall(look, wall, tuning.wall_margin), s.follow.up(), look);
+            }
+        }
+    }
+
+    // His own game camera (run_second_director) when it has a view: the stage's camera areas, Pull Star framing
+    // and the rest as the first player has them. The follow camera above is the fallback.
+    if (s.director2_view_valid) s.follow_view = s.director2_view;
+
+    // The line follows the first player's view as their half shows it: while it is held (the game camera is
+    // the second player's event or warp camera) the held view, so the line does not swing with that camera.
+    const coop::CameraMatrices layout_camera = s.hold.active() ? first_own_view(s, first_position) : first_camera;
+    const coop::Vec3 a = coop::transform_point(layout_camera.view, first_position);
+    const coop::Vec3 b = coop::transform_point(layout_camera.view, second_position);
+    s.layout.update(b.x - a.x, a.y - b.y);  // screen y runs down
+}
+
+// How far towards the edge of a shared picture the players would be, with the game camera's turn and
+// distance (from the midpoint it looks at while the screen is one, from the first player once split).
+float shared_extent(const Guest& guest, const State& s, coop::Vec3 first_position, coop::Vec3 second_position) {
+    const std::uint32_t context = camera_context(guest);
+    if (context == 0u) return 0.0f;
+    const coop::CameraMatrices camera = read_camera(guest, context);
+    if (!finite(camera.view) || !finite(camera.inverse)) return 0.0f;
+    float fovy = guest.f32(context + camera::kFovy);
+    float aspect = guest.f32(context + camera::kAspect);
+    if (!std::isfinite(fovy) || fovy <= 1.0f || fovy >= 170.0f) fovy = s.fovy;
+    if (!std::isfinite(aspect) || aspect <= 0.1f) aspect = s.aspect;
+    const coop::CameraPose pose = coop::pose_of(camera.inverse);
+    const coop::Vec3 looked_at =
+        s.split.split() ? first_position : first_position + (second_position - first_position) * 0.5f;
+    const float depth = coop::dot(pose.forward, looked_at - pose.eye);
+    return coop::shared_view_extent(camera, first_position, second_position, depth, fovy, aspect);
+}
+
+// One screen again: nothing held.
+void remember_first_camera(const Guest& guest, State& s) {
+    (void)guest;
+    if (s.split.amount() == 0.0f) s.hold.reset();
+}
+
+// After the game moves its players, the second player: one MarioActor::movement with the game's player,
+// character and controller switched to it. Then the shared camera, and the warp back to the first player.
+// The actor a player is bound to (rushes with: MarioActor::_924's host, cleared by MarioActor::endRush), or 0.
+std::uint32_t bound_host(const Guest& guest, std::uint32_t actor_address) {
+    if (!plausible(actor_address)) return 0u;
+    const std::uint32_t sensor = guest.u32(actor_address + kMarioRushSensor);
+    const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
+    return plausible(host) ? host : 0u;
+}
+
+// The vehicle a player rides (its rush partner's host is a Star Ball or manta ray), or 0.
+std::uint32_t ridden_vehicle(const Guest& guest, std::uint32_t actor_address) {
+    const std::uint32_t host = bound_host(guest, actor_address);
+    return host != 0u && is_vehicle(guest.u32(host)) ? host : 0u;
+}
+
+// Whether a player rides a launch star (the launcher they rush with is a SuperSpinDriver or SpinDriver).
+bool rides_star(const Guest& guest, std::uint32_t actor_address) {
+    const std::uint32_t host = bound_host(guest, actor_address);
+    if (host == 0u) return false;
+    const std::uint32_t vtable = guest.u32(host);
+    return vtable == kSuperSpinDriverVtable || vtable == kSpinDriverVtable;
+}
+
+// A power-up archive of the first player's character added to a stage's archive list: the second player's
+// as well, so their power-up models are made (MarioActor::init*Mario, which want the archive loaded) and they
+// can take the power-up.
+constexpr std::array<std::pair<std::string_view, std::string_view>, 7> kPowerUpArchives = {{
+    {"BeeMario", "BeeLuigi"},
+    {"BoneMario", "BoneLuigi"},
+    {"HopperMario", "HopperLuigi"},
+    {"IceMario", "IceLuigi"},
+    {"InvincibleMario", "InvincibleLuigi"},
+    {"TeresaMario", "TeresaLuigi"},
+    {"MarioTornado", "LuigiTornado"},
+}};
+
+void add_partner_archive(const Guest& guest, State& s) {
+    const std::uint32_t collector = s.archive_collector;
+    const std::uint32_t name_address = s.archive_name;
+    s.archive_collector = s.archive_name = 0u;
+    if (!plausible(collector) || !plausible(name_address & ~3u)) return;
+    const std::string name = guest.string(name_address, 64u);
+    const bool own_mario = s.own == coop::Character::Mario;
+    for (const auto& [mario, luigi] : kPowerUpArchives) {
+        const std::string_view own = own_mario ? mario : luigi;
+        const std::string_view partner = own_mario ? luigi : mario;
+        if (name.size() < own.size() || std::string_view(name).substr(0u, own.size()) != own) continue;
+        const std::string wanted = std::string(partner) + name.substr(own.size());  // keeps a ".arc"
+        if (s.partner_archives_collector != collector) {
+            s.partner_archives_collector = collector;
+            s.partner_archives.clear();
+        }
+        if (std::find(s.partner_archives.begin(), s.partner_archives.end(), wanted) != s.partner_archives.end()) return;
+        s.partner_archives.push_back(wanted);
+        const std::uint32_t partner_name = guest.find_string(wanted);
+        if (partner_name == 0u) {
+            trace("partner power-up archive %s: name not in the game's data", wanted.c_str());
+            return;
+        }
+        SavedContext saved(guest.context());
+        guest.call(fn::kAddArchive, collector, partner_name);
+        trace("stage archives: %s with %s", wanted.c_str(), name.c_str());
+        return;
+    }
+}
+
+// Makes the second player (or the first again) the game's player: MarioHolder, gIsLuigi and the channel 0 and 1
+// pads, as move_second_player does for the second player's turn.
+void set_game_player(const Guest& guest, State& s, bool second) {
+    const std::uint32_t holder = guest.call(fn::kGetMarioHolder);
+    if (!plausible(holder)) return;
+    const std::uint32_t pad_holder = guest.call(fn::kGetWPadHolder);
+    const bool pads = plausible(pad_holder) && plausible(guest.u32(pad_holder)) && plausible(guest.u32(pad_holder + 4u));
+    guest.set_u8(kIsLuigi, character_byte(second ? coop::partner_of(s.own) : s.own));
+    guest.call(fn::kSetMarioActor, holder, second ? s.second : s.first);
+    if (pads) swap_pads(guest, pad_holder);
+    s.moving_second = second;
+}
+
+// ---- The second player's game camera (docs/MULTIPLAYER.md "Split screen") ----
+// The game's camera (CameraDirector: its camera men, the stage's camera areas and ground camera codes, every camera
+// type) follows the game's player. The second player gets a second CameraDirector, made as the game makes its own
+// but sharing the stage's camera parameters, rails and registers, with its own cameras, target (him), pose,
+// interpolation and shaker; it runs each frame after the game's, with him as the game's player, and its view is his
+// half's camera. Not made through CameraDirector's constructor: that would join the scene (and run by itself), make
+// a second CameraCover and centre-screen blur.
+
+std::uint32_t director_slot(const Guest& guest) {
+    std::uint32_t object = guest.u32(guest.context()->gpr[13] - 0x3A78u);
+    for (const std::uint32_t offset : {0x24u, 0xACu, 0x10u}) {
+        if (!plausible(object)) return 0u;
+        object = guest.u32(object + offset);
+    }
+    return plausible(object) ? object + director::kSceneObj * 4u : 0u;
+}
+
+bool second_camera_by_director() {
+    static const bool enabled = [] {
+        char* value = nullptr;
+        std::size_t length = 0u;
+        const bool off = _dupenv_s(&value, &length, "GALAXY_COOP_GAME_CAMERA") == 0 && value != nullptr && value[0] == '0';
+        std::free(value);
+        return !off;
+    }();
+    return enabled;
+}
+
+// A director of its own for `player` (made as CameraDirector's constructor makes its parts, the stage's camera
+// parameters, rails and registers shared with the game's), or 0.
+std::uint32_t make_director(const Guest& guest, std::uint32_t player) {
+    SavedContext saved(guest.context());
+    const std::uint32_t slot = director_slot(guest);
+    const std::uint32_t first = slot != 0u ? guest.u32(slot) : 0u;
+    if (!plausible(first)) {
+        trace("own camera: no game camera director yet");
+        return 0u;
+    }
+    const auto make = [&](std::uint32_t size) {
+        const std::uint32_t at = guest.call(director::kNew, size);
+        if (plausible(at)) {
+            for (std::uint32_t i = 0u; i < size; i += 4u) guest.set_u32(at + i, 0u);
+        }
+        return plausible(at) ? at : 0u;
+    };
+    const std::uint32_t second = make(director::kSize);
+    const std::uint32_t stack = make(0xCu);
+    const std::uint32_t elements = guest.call(director::kNewArray, 0x20u);
+    const std::uint32_t only = make(director::kOnlyCameraSize);
+    const std::uint32_t pose1 = make(director::kPoseParamSize);
+    const std::uint32_t pose2 = make(director::kPoseParamSize);
+    const std::uint32_t holder = make(director::kHolderSize);
+    const std::uint32_t target = make(director::kTargetHolderSize);
+    const std::uint32_t shaker = make(director::kShakerSize);
+    const std::uint32_t interpolator = make(director::kInterpolatorSize);
+    const std::uint32_t cover = make(director::kCoverSize);
+    const std::uint32_t rot = make(director::kRotCheckerSize);
+    const std::uint32_t man = make(director::kManGameSize);
+    for (const std::uint32_t at : {second, stack, elements, only, pose1, pose2, holder, target, shaker, interpolator,
+                                   cover, rot, man}) {
+        if (!plausible(at)) {
+            trace("own camera: out of memory");
+            return 0u;
+        }
+    }
+    // The game's director as it stands (vtable, shared holders, flags), then its own parts.
+    for (std::uint32_t i = 0u; i < director::kSize; i += 4u) guest.set_u32(second + i, guest.u32(first + i));
+    const std::uint32_t name = guest.u32(first + director::kName);
+    guest.set_u32(stack + 0u, elements);
+    guest.set_u32(stack + 4u, 8u);
+    guest.set_u32(stack + 8u, 0u);
+    guest.call(director::kOnlyCameraCtor, only, name);
+    guest.call(director::kPoseParamCtor, pose1);
+    guest.call(director::kPoseParamCtor, pose2);
+    guest.call(director::kHolderCtor, holder, name);
+    guest.call(director::kTargetHolderCtor, target);
+    guest.call(director::kTargetHolderSetPlayer, target, player);
+    guest.call(director::kShakerCtor, shaker, name);
+    guest.call(director::kInterpolatorCtor, interpolator);
+    guest.call(director::kRotCheckerCtor, rot);
+    guest.call(director::kManGameCtor, man, holder, guest.u32(first + director::kChunkHolder), name);
+    guest.set_u32(second + director::kStack, stack);
+    guest.set_u32(second + director::kOnlyCamera, only);
+    guest.set_u32(second + director::kPoseParam1, pose1);
+    guest.set_u32(second + director::kPoseParam2, pose2);
+    guest.set_u32(second + director::kHolder, holder);
+    guest.set_u32(second + director::kTargetHolder, target);
+    guest.set_u32(second + director::kShaker, shaker);
+    guest.set_u32(second + director::kViewInterpolator, interpolator);
+    guest.set_u32(second + director::kCover, cover);  // CameraDirector::cover only sets its flags
+    guest.set_u32(second + director::kRotChecker, rot);
+    guest.set_u32(second + director::kCameraManGame, man);
+    guest.set_u32(second + director::kEventNum, 0u);
+    guest.call(director::kPush, second, man);
+    guest.call(director::kStarted, second);
+    trace("own camera: director %08X for %08X (the game's %08X)", second, player, first);
+    return second;
+}
+
+// The second player's (his half's camera), once a stage.
+void make_second_director(const Guest& guest, State& s) {
+    s.director2 = 0u;
+    s.director2_view_valid = false;
+    if (!second_camera_by_director() || !plausible(s.second)) return;
+    s.director2 = make_director(guest, s.second);
+}
+
+// One own director's frame, as `second` or the first player (the game's player meanwhile), with
+// MR::getCameraDirector answering it; CameraContext (which it writes) is the game camera's again after. False if
+// it made no view.
+bool run_director(const Guest& guest, State& s, std::uint32_t own, bool second, coop::CameraMatrices& view) {
+    const std::uint32_t context = camera_context(guest);
+    const std::uint32_t slot = director_slot(guest);
+    if (context == 0u || slot == 0u) return false;
+    SavedContext saved(guest.context());
+    std::array<std::uint32_t, (director::kContextEnd - director::kContextFirst) / 4u> kept{};
+    for (std::size_t i = 0; i < kept.size(); ++i) kept[i] = guest.u32(context + director::kContextFirst + 4u * static_cast<std::uint32_t>(i));
+    const std::uint32_t game_director = guest.u32(slot);
+    guest.set_u32(slot, own);
+    if (second) set_game_player(guest, s, true);
+    guest.call(director::kMovement, own);
+    if (second) set_game_player(guest, s, false);
+    guest.set_u32(slot, game_director);
+    view = read_camera(guest, context);
+    for (std::size_t i = 0; i < kept.size(); ++i) guest.set_u32(context + director::kContextFirst + 4u * static_cast<std::uint32_t>(i), kept[i]);
+    return finite(view.view) && finite(view.inverse);
+}
+
+// After the game's camera has moved (its movement category): the second player's director.
+void run_second_director(const Guest& guest, State& s) {
+    s.director2_view_valid = false;
+    if (!plausible(s.second) || s.down[1].down || s.level_start) return;
+    if (plausible(s.director2)) s.director2_view_valid = run_director(guest, s, s.director2, true, s.director2_view);
+}
+
+// Puts a player (0 the first, 1 the second) at a position, made the game's player for MR::setPlayerPos.
+void place_player(const Guest& guest, State& s, unsigned who, coop::Vec3 at) {
+    SavedContext saved(guest.context());
+    const bool was_second = s.moving_second;
+    const bool second = who == 1u;
+    if (second != was_second) set_game_player(guest, s, second);
+    {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, at));
+    }
+    if (second != was_second) set_game_player(guest, s, was_second);
+}
+
+// ---- NSMBW-style pipes (docs/MULTIPLAYER.md "Pipes") ----
+// An EarthenPipe takes one rider through: Ready, PlayerIn (in, then over to its partner pipe), PlayerOut (out).
+// The first brother in waits inside, his PlayerIn held, until the other reaches the mouth or kPipeWaitFrames
+// pass; once he is out the pipe takes riders again with the other on its mouth, who goes through right behind.
+
+coop::Vec3 pipe_mouth(const Guest& guest, std::uint32_t pipe) {
+    const std::uint32_t mtx = guest.u32(pipe + kPipeTopMtx);
+    if (!plausible(mtx)) return guest.vec(pipe + actor::kPosition);
+    return {guest.f32(mtx + 0x0Cu), guest.f32(mtx + 0x1Cu), guest.f32(mtx + 0x2Cu)};
+}
+
+// Before exePlayerIn: whether its rider, in and still (the enter animation done), waits for the other.
+bool pipe_holds(const Guest& guest, State& s, std::uint32_t pipe, std::uint32_t rider) {
+    if (rider != s.first && rider != s.second) return false;
+    if (s.pipe.follow_pipe == pipe && rider == s.pipe.follower) return false;  // the other's own way through
+    const unsigned other = rider == s.second ? 0u : 1u;
+    if (s.down[other].down) return false;
+    bool inside = false;
+    {
+        SavedContext saved(guest.context());  // the step's own arguments stay
+        inside = (guest.call(fn::kIsBckStopped, rider) & 0xFFu) != 0u;
+    }
+    if (!inside) return false;
+    if (s.pipe.waiting != pipe) {
+        s.pipe.waiting = pipe;
+        s.pipe.rider = rider;
+        s.pipe.frames = 0u;
+        s.pipe.partner_in = false;
+        trace("pipe %08X: the %s player waits inside for the other", pipe, other == 1u ? "first" : "second");
+    }
+    if (s.pipe.partner_in) return false;
+    const coop::Vec3 at = guest.vec((other == 1u ? s.second : s.first) + actor::kPosition);
+    const bool arrived = coop::length(at - pipe_mouth(guest, pipe)) < coop::kPipeJoinDistance;
+    if (!arrived && ++s.pipe.frames < coop::kPipeWaitFrames) return true;
+    s.pipe.partner_in = true;  // either way the other follows through
+    trace("pipe %08X: %s; through", pipe, arrived ? "the other is at the mouth" : "waited long enough");
+    return false;
+}
+
+// After exePlayerOut: once the rider is out, the other goes in after him.
+void pipe_after_exit(const Guest& guest, State& s, std::uint32_t pipe) {
+    if (guest.u32(pipe + kPipeRider) != 0u) return;
+    if (s.pipe.follow_pipe == pipe) {
+        s.pipe.follow_pipe = s.pipe.follower = 0u;
+        trace("pipe %08X: both through", pipe);
+        return;
+    }
+    if (s.pipe.waiting != pipe) return;
+    const unsigned other = s.pipe.rider == s.second ? 0u : 1u;
+    s.pipe.waiting = 0u;
+    const std::uint32_t follower = other == 1u ? s.second : s.first;
+    if (s.down[other].down || !plausible(follower)) return;
+    SavedContext saved(guest.context());
+    guest.call(fn::kSetNerve, pipe, fn::kPipeNrvWait);
+    guest.call(fn::kValidateHitSensors, pipe);
+    place_player(guest, s, other, pipe_mouth(guest, pipe) + guest.vec(pipe + kPipeUp) * 20.0f);
+    s.pipe.follow_pipe = pipe;
+    s.pipe.follower = follower;
+    s.pipe.follow_frames = 0u;
+    trace("pipe %08X: the %s player follows", pipe, other == 1u ? "second" : "first");
+}
+
+// After MR::isNearPlayer*: the other brother near counts too.
+bool near_other_player(const Guest& guest, const State& s) {
+    if (!plausible(s.near_actor) || !plausible(s.first) || !plausible(s.second)) return false;
+    const unsigned other = s.moving_second ? 0u : 1u;
+    if (s.down[other].down) return false;
+    const coop::Vec3 at = guest.vec(s.near_actor + actor::kPosition);
+    const coop::Vec3 player = guest.vec((other == 1u ? s.second : s.first) + actor::kPosition);
+    return std::isfinite(s.near_distance) && coop::length(player - at) < s.near_distance;
+}
+
+// The actors whose code runs as the brother at them (nearer_player_code, and their nerve steps through
+// Spine::update): the star bunnies, and Koopa shells (JetTurtle, GoldenTurtle), which go back to their place when
+// far from the player and are taken by him.
+constexpr std::uint32_t kJetTurtleVtable = 0x80582464u;
+constexpr std::uint32_t kGoldenTurtleVtable = 0x805823E0u;
+bool is_rabbit(std::uint32_t vtable) { return vtable >= 0x8059E000u && vtable < 0x805A2000u; }  // not a constructor's
+bool is_shell(std::uint32_t vtable) { return vtable == kJetTurtleVtable || vtable == kGoldenTurtleVtable; }
+
+// Which brother the code of `actor` runs as: one whose sensor is an argument of the call (the one touching it,
+// taking it), else the nearer.
+bool second_for_actor_code(const Guest& guest, const State& s, std::uint32_t actor) {
+    if (s.down[0].down) return true;
+    for (const unsigned r : {4u, 5u}) {
+        const std::uint32_t sensor = guest.context()->gpr[r];
+        if (!plausible(sensor)) continue;
+        const std::uint32_t host = guest.u32(sensor + kSensorHost);
+        if (host == s.second) return true;
+        if (host == s.first) return false;
+    }
+    const coop::Vec3 at = guest.vec(actor + actor::kPosition);
+    return coop::length(guest.vec(s.second + actor::kPosition) - at) < coop::length(guest.vec(s.first + actor::kPosition) - at);
+}
+
+// A call into a star bunny's or a Koopa shell's code from outside it (its nerve steps, sensor answers, catch): the
+// code runs with the brother at it as the game's player, so the one who comes up to it is the one it talks to,
+// runs from, is caught by (the caught scene binds him) or is taken by, and the other is left where he is.
+void nearer_player_code(const Guest& guest, State& s) {
+    const std::uint32_t actor = guest.context()->gpr[3];
+    if (!plausible(actor) || !plausible(s.first) || !plausible(s.second) || s.down[1].down) return;
+    const std::uint32_t vtable = guest.u32(actor);
+    if (!is_rabbit(vtable) && !is_shell(vtable)) return;
+    const bool second = second_for_actor_code(guest, s, actor);
+    if (second && is_rabbit(vtable)) s.second_scene = 30u;
+    if (second == s.moving_second) return;
+    SavedContext saved(guest.context());
+    s.nearer_back_to_second = s.moving_second;
+    set_game_player(guest, s, second);
+    s.nearer_swapped = true;
+}
+
+// ---- Multiplayer talks (docs/MULTIPLAYER.md "Talks") ----
+// The brother nearest an NPC is the one it offers a talk to (the A prompt is his, and his A starts it); the talk
+// then plays on him: the NPC turns to him, he takes the talk pose, the camera frames him, and lines that ask
+// whether the player is Luigi answer for him. Either brother's A pages the text, and either chooses yes or no.
+// The other brother is held where he stands for the talk (readyRemoteDemo, as the game holds its player) and
+// let go with the talker.
+
+bool second_nearer(const Guest& guest, const State& s, std::uint32_t actor) {
+    if (s.down[1].down) return false;
+    if (s.down[0].down) return true;
+    const coop::Vec3 at = guest.vec(actor + actor::kPosition);
+    return coop::length(guest.vec(s.second + actor::kPosition) - at) <
+           coop::length(guest.vec(s.first + actor::kPosition) - at);
+}
+
+// Before an outermost talk call: run it as `second` (or the first), recording how to give the game back.
+void talk_swap(const Guest& guest, State& s, bool second) {
+    s.talk.talker_second = second;
+    // The text's player name and its Luigi-only lines ask the save's character (MR::isPlayerLuigi asks
+    // GameDataFunction::isDataMario): they answer for the talker.
+    if (second && !s.answer_partner) {
+        s.answer_partner = true;
+        s.talk.answering = true;
+    }
+    if (second) s.second_scene = 30u;
+    if (second == s.moving_second) return;
+    SavedContext saved(guest.context());
+    s.talk.back_to_second = s.moving_second;
+    set_game_player(guest, s, second);
+    s.talk.swapped = true;
+}
+
+// Before MR::tryTalk* (the NPC's own talk calls; `host` the NPC): the talker under way, or the nearer brother.
+void talk_begin(const Guest& guest, State& s, std::uint32_t host) {
+    if (!plausible(s.first) || !plausible(s.second)) return;
+    bool second = false;
+    if (s.talk.locked) {
+        second = s.talk.locked_second;
+    } else if (plausible(host)) {
+        second = second_nearer(guest, s, host);
+        s.talk.candidate_second = second;
+        s.talk.candidate_frames = 2u;
+    } else {
+        return;
+    }
+    talk_swap(guest, s, second);
+}
+
+// Before TalkDirector::movement's steps (the A prompt, the talk's start, paging, its end; `director` its r3): its
+// talker, or else the brother nearer the NPC the director has in hand (its talk state's, else its request's). Not
+// the last NPC that asked: in split screen NPCs near each brother ask every frame.
+void talk_director_begin(const Guest& guest, State& s, std::uint32_t director) {
+    if (!plausible(s.first) || !plausible(s.second)) return;
+    if (s.talk.locked) {
+        s.second_scene = 30u;  // nobody is taken along while a talk is under way
+        talk_swap(guest, s, s.talk.locked_second);
+        return;
+    }
+    std::uint32_t ctrl = 0u;
+    if (plausible(director)) {
+        const std::uint32_t state = guest.u32(director + 0x48u);  // TalkDirector::mTalkState
+        ctrl = plausible(state) ? guest.u32(state + 4u) : 0u;    // TalkState::_04, its TalkMessageCtrl
+        if (!plausible(ctrl)) ctrl = guest.u32(director + 0x3Cu);  // the request in hand
+        if (!plausible(ctrl)) ctrl = guest.u32(director + 0x38u);  // TalkDirector::mMsgCtrl
+    }
+    const std::uint32_t host = plausible(ctrl) ? guest.u32(ctrl + 0xCu) : 0u;  // TalkMessageCtrl::mHostActor
+    if (plausible(host)) {
+        talk_swap(guest, s, second_nearer(guest, s, host));
+    } else if (s.talk.candidate_frames != 0u) {
+        talk_swap(guest, s, s.talk.candidate_second);
+    }
+}
+
+// After the outermost talk call: the game back as it was; a talk that has started is locked to its talker, one
+// that has ended is let go.
+void talk_end(const Guest& guest, State& s) {
+    SavedContext saved(guest.context());
+    if (s.talk.answering) {
+        s.answer_partner = false;
+        s.talk.answering = false;
+    }
+    if (s.talk.swapped) {
+        set_game_player(guest, s, s.talk.back_to_second);
+        s.talk.swapped = false;
+    }
+    const bool talking = (guest.call(fn::kIsSystemTalking) & 0xFFu) != 0u;
+    if (talking && !s.talk.locked) {
+        s.talk.locked = true;
+        s.talk.locked_second = s.talk.talker_second;
+        trace("talk: the %s player talks", s.talk.locked_second ? "second" : "first");
+    } else if (!talking && s.talk.locked) {
+        s.talk.locked = false;
+        trace("talk over");
+    }
+}
+
+// After MarioAccess::readyRemoteDemo inside a talk call: the other brother is held too.
+void talk_hold_other(const Guest& guest, State& s) {
+    if (s.talk.depth == 0u || s.talk.other_held || !plausible(s.first) || !plausible(s.second)) return;
+    SavedContext saved(guest.context());
+    const bool talker = s.moving_second;
+    set_game_player(guest, s, !talker);
+    guest.call(fn::kReadyRemoteDemo);
+    set_game_player(guest, s, talker);
+    s.talk.other_held = true;
+    s.talk.held_talker_second = talker;
+}
+
+// After MarioAccess::endRemoteDemo (run as the talker, see coop_before_call): the other brother let go too.
+void talk_release_other(const Guest& guest, State& s) {
+    SavedContext saved(guest.context());
+    if (s.talk.end_swapped) {
+        set_game_player(guest, s, s.talk.end_back_to_second);
+        s.talk.end_swapped = false;
+    }
+    if (!s.talk.other_held) return;
+    s.talk.other_held = false;
+    const bool was = s.moving_second;
+    set_game_player(guest, s, !s.talk.held_talker_second);
+    guest.call(fn::kEndRemoteDemo, s.talk.end_info);
+    set_game_player(guest, s, was);
+}
+
+// After MR::testCorePadButtonA/TriggerA(0) from TalkStateEvent::talk (paging): the other brother's A too.
+// Channel 1 is the other brother's however the pads are swapped.
+void talk_either_a(const Guest& guest, const State& s, PpcContext* context, std::uint32_t function,
+                   std::uint32_t guest_pc) {
+    if (guest_pc < 0x802A25A0u || guest_pc >= 0x802A2700u || s.talk.pad_channel != 0u) return;
+    if ((context->gpr[3] & 0xFFu) != 0u) return;
+    std::uint32_t other = 0u;
+    {
+        SavedContext saved(context);
+        other = guest.call(function, 1u) & 0xFFu;
+    }
+    context->gpr[3] = other;
+}
+
+// After the yes/no choice's pointer and A tests (ButtonPaneController), during a talk: the other brother's too.
+void talk_either_choice(const Guest& guest, const State& s, PpcContext* context, bool pane, std::uint32_t guest_pc) {
+    if (guest_pc < 0x8034BE84u || guest_pc >= 0x8034C770u || (context->gpr[3] & 0xFFu) != 0u) return;
+    if (pane && s.talk.pane_args[2] != 0u) return;
+    std::uint32_t other = 0u;
+    {
+        SavedContext saved(context);
+        if ((guest.call(fn::kIsSystemTalking) & 0xFFu) == 0u) return;
+        if (pane) {
+            const auto& a = s.talk.pane_args;
+            other = guest.call(fn::kPointingPane, a[0], a[1], 1u, a[3], a[4]) & 0xFFu;
+        } else {
+            const std::uint32_t pad_holder = guest.call(fn::kGetWPadHolder);
+            if (!plausible(pad_holder) || !plausible(guest.u32(pad_holder)) || !plausible(guest.u32(pad_holder + 4u))) return;
+            swap_pads(guest, pad_holder);
+            other = guest.call(fn::kMenuDecide) & 0xFFu;
+            swap_pads(guest, pad_holder);
+        }
+    }
+    context->gpr[3] = other;
+}
+
+// Co-op talks do not freeze the world (docs/MULTIPLAYER.md "Talks"). A normal talk's freeze is its demo, started
+// in TalkDirector::prepTalk (the scene stopped but for the player, the HUD away, the player held), the talker's
+// talk pose and the talk camera; the talk window, its pages, choices and the NPC's event callbacks need none of
+// them. So, by call site: no demo, pose or camera (and none of their ends), the window opens at once, demos the
+// talk sets off (a Power Star appearing, a Luma turning into a launch star) wait for its end as they would have,
+// and A pages instead of jumping. Talks inside a cutscene (pauseTimeKeepDemo) and short balloons are left alone.
+bool talk_calm_skips(State& s, std::uint32_t id, std::uint32_t guest_pc) {
+    switch (id) {
+    case call::kTalkDemoStart:
+        if (guest_pc != 0x8029EF08u) return false;
+        if (!s.talk.calm) trace("talk: the world keeps going");
+        s.talk.calm = true;
+        return true;
+    case call::kStartPlayerTalk: return s.talk.calm && guest_pc == 0x8029EF34u;
+    case call::kEndPlayerTalk: return s.talk.calm && guest_pc == 0x8029EFE4u;
+    case call::kEndDemo:
+        if (!s.talk.calm || guest_pc != 0x8029F01Cu) return false;
+        s.talk.calm = false;  // termTalk's last step: the talk is over
+        return true;
+    case call::kTalkCamera: return s.talk.calm && guest_pc == 0x802A2544u;
+    case call::kTalkCameraEnd: return s.talk.calm && (guest_pc == 0x8029EF90u || guest_pc == 0x8029EFC0u);
+    default: return false;
+    }
+}
+
+// After MR::canStartDemo, from the demo request paths (DemoDirector::tryStartDemoRequested, requestStartDemo,
+// requestStartTimeKeepDemo): not while a calm talk is open, so its demos come after it.
+bool demo_request_site(std::uint32_t guest_pc) {
+    switch (guest_pc) {
+    case 0x800BA61Cu: case 0x800BE10Cu: case 0x800BE23Cu: case 0x800BE370u:
+    case 0x800BE48Cu: case 0x800BE5A8u: case 0x800BE6BCu:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// After LodCtrl::calcDistanceToCamera (its LodCtrl in s.talk.lod; the distance in f1): the distance to the
+// nearer brother, so an object shows its high and middle models around either of them and goes low only where
+// neither is. It is the distance to the player for most objects (MR::calcDistanceToPlayer), the camera depth for
+// the rest, which the other brother's distance stands in for (his camera follows him).
+void lod_distance(const Guest& guest, const State& s, PpcContext* context) {
+    if (!plausible(s.first) || !plausible(s.second) || !plausible(s.talk.lod)) return;
+    const unsigned other = s.moving_second ? 0u : 1u;
+    if (s.down[other].down) return;
+    const std::uint32_t actor = guest.u32(s.talk.lod + 0xCu);  // LodCtrl::mActor
+    if (!plausible(actor)) return;
+    const float near_other = coop::length(guest.vec(actor + actor::kPosition) -
+                                          guest.vec((other == 1u ? s.second : s.first) + actor::kPosition));
+    const double game = std::bit_cast<double>(context->fpr_bits[1]);
+    if (std::isfinite(near_other) && near_other < game) {
+        context->fpr_bits[1] = std::bit_cast<std::uint64_t>(double(near_other));
+    }
+}
+
+// A co-op talk's window stands in the world over its NPC, like the walk-by balloons, and smaller, rather than
+// across the top of the screen (the walk-by balloon itself cannot page or choose). Offset from the NPC's screen
+// point and scale: GALAXY_TALK_WINDOW="dx,dy,scale" overrides them while they are tuned.
+struct TalkWindowTuning {
+    float dx = 60.0f;   // the window's beak lands on the NPC's balloon point
+    float dy = 60.0f;
+    float scale = 0.7f;
+};
+
+TalkWindowTuning talk_window_tuning() {
+    TalkWindowTuning t;
+    char* text = nullptr;
+    std::size_t length = 0u;
+    if (_dupenv_s(&text, &length, "GALAXY_TALK_WINDOW") == 0 && text != nullptr) {
+        float dx = 0.0f, dy = 0.0f, scale = 1.0f;
+        if (sscanf_s(text, "%f,%f,%f", &dx, &dy, &scale) == 3 && std::isfinite(dx) && std::isfinite(dy) &&
+            std::isfinite(scale) && scale > 0.1f && scale <= 2.0f) {
+            t = {dx, dy, scale};
+        }
+        std::free(text);
+    }
+    return t;
+}
+
+// Moves a talk window's anchor (its NPC's balloon point, screen units) so the whole window stays on screen and,
+// in split screen, inside its talker's half. At 0.7 of its size the window spans 208 pixels either side of the
+// point and 5 to 90 above it on an 854 x 480 picture (measured), scaled to the game's screen units.
+void keep_talk_window_in_view(const State& s, bool second, float scale, float& x, float& y) {
+    const float k = scale / 0.7f;
+    const float half_w = 208.0f * k * s.screen_width / 854.0f;
+    const float top = 90.0f * k * s.screen_height / 480.0f;
+    const float bottom = 5.0f * k * s.screen_height / 480.0f;
+    constexpr float kMargin = 8.0f;
+    const bool split = s.split.amount() > 0.5f && s.layout.started();
+    const std::array<float, 3> side = s.layout.plane(second, s.screen_width, s.screen_height);
+    for (int pass = 0; pass < 3; ++pass) {
+        if (split) {
+            // The corner deepest across the line pushes the window back along the line's normal.
+            float least = std::numeric_limits<float>::max();
+            for (const float cx : {x - half_w, x + half_w}) {
+                for (const float cy : {y - top, y - bottom}) {
+                    least = std::min(least, side[0] * cx + side[1] * cy + side[2]);
+                }
+            }
+            if (least < kMargin) {
+                x += side[0] * (kMargin - least);
+                y += side[1] * (kMargin - least);
+            }
+        }
+        x = std::clamp(x, half_w + kMargin, std::max(half_w + kMargin, s.screen_width - half_w - kMargin));
+        y = std::clamp(y, top + kMargin, std::max(top + kMargin, s.screen_height - kMargin));
+    }
+}
+
+// After TalkMessageCtrl::updateBalloonPos from TalkBalloon::updateBalloon (the balloon in r30; the NPC's screen
+// point, at its message control's +0x1C, just computed): a co-op talk's TalkBalloonEvent moves there. Its beak
+// is aimed from the new place right after.
+void talk_window_in_world(const Guest& guest, State& s, PpcContext* context) {
+    if (!s.talk.calm) return;
+    const std::uint32_t balloon = context->gpr[30];
+    if (!plausible(balloon) || guest.u32(balloon) != fn::kTalkBalloonEventVtable) return;
+    const std::uint32_t ctrl = guest.u32(balloon + 0x20u);  // TalkBalloon::mMessageCtrl
+    if (!plausible(ctrl)) return;
+    static const TalkWindowTuning tuning = talk_window_tuning();
+    coop::Vec3 npc = guest.vec(ctrl + 0x1Cu);  // TalkMessageCtrl::_1C: screen x, y, and z (> 0 behind)
+    // In split screen the second player's talk shows over his half: the NPC's balloon point (above its head)
+    // through the camera his half drew with, rather than the game's camera (the first player's).
+    const bool second_talks = s.talk.locked ? s.talk.locked_second : s.talk.talker_second;
+    if (second_talks && s.split.amount() > 0.5f) {
+        const std::uint32_t host = guest.u32(ctrl + 0xCu);
+        if (plausible(host)) {
+            const coop::Vec3 up = coop::pose_of(s.second_view.inverse).up;
+            const coop::Vec3 point = guest.vec(host + actor::kPosition) + up * 180.0f;
+            const coop::Vec3 eye = coop::transform_point(s.second_view.view, point);
+            const float ty = std::tan(s.fovy * 0.5f * 3.14159265f / 180.0f);
+            if (eye.z < -1.0f && ty > 0.0f && s.aspect > 0.0f) {
+                const float nx = (eye.x / -eye.z) / (ty * s.aspect);
+                const float ny = (eye.y / -eye.z) / ty;
+                npc.x = (nx + 1.0f) * 0.5f * s.screen_width;
+                npc.y = (1.0f - ny) * 0.5f * s.screen_height;
+            }
+        }
+    }
+    if (!std::isfinite(npc.x) || !std::isfinite(npc.y)) return;
+    // A half of the screen is narrower: the window is smaller there (0.55 for the default 0.7).
+    const bool split = s.split.amount() > 0.5f && s.layout.started();
+    const float scale = split ? tuning.scale * (0.55f / 0.7f) : tuning.scale;
+    const float shrink = scale / tuning.scale;
+    keep_talk_window_in_view(s, second_talks, scale, npc.x, npc.y);
+    SavedContext saved(context);
+    Guest::Frame frame(guest);
+    // The window scales about its origin, so the beak's offset from it scales too.
+    guest.call(fn::kLayoutSetTrans, balloon,
+               frame.vec(0, {npc.x + tuning.dx * shrink, npc.y + tuning.dy * shrink, 0.0f}));
+    if (scale != 1.0f) {
+        // The root pane (a null name, as MR::setLayoutScaleAtPaneScale passes): the window's animations move its
+        // panes below it.
+        context->fpr_bits[1] = std::bit_cast<std::uint64_t>(double(scale));
+        context->fpr_bits[2] = std::bit_cast<std::uint64_t>(double(scale));
+        guest.call(fn::kSetPaneScale, balloon, 0u);
+    }
+}
+
+// After MR::getPlayerPos in SwitchArea::movement, which turns its switch on with the player inside it: the second
+// player inside, the first not, answers with the second's position. Areas that let star bunnies out of hiding,
+// start boss fights (Dino Piranha's SwitchSphere) and so on then see either brother. Its `this` is in r30 (r31
+// holds a flag), taken by its vtable.
+constexpr std::uint32_t kSwitchAreaVtable = 0x8055154Cu;
+void switch_area_player_pos(const Guest& guest, const State& s, PpcContext* context) {
+    std::uint32_t area = 0u;
+    for (const unsigned r : {30u, 31u, 29u}) {
+        const std::uint32_t candidate = context->gpr[r];
+        if (plausible(candidate) && guest.u32(candidate) == kSwitchAreaVtable) {
+            area = candidate;
+            break;
+        }
+    }
+    if (!plausible(area) || !plausible(s.first) || !plausible(s.second) || s.down[1].down) return;
+    bool first_in = false;
+    bool second_in = false;
+    {
+        SavedContext saved(context);
+        Guest::Frame frame(guest);
+        first_in = (guest.call(fn::kAreaIsInVolume, area, frame.vec(0, guest.vec(s.first + actor::kPosition))) & 0xFFu) != 0u;
+        second_in = !first_in &&
+            (guest.call(fn::kAreaIsInVolume, area, frame.vec(1, guest.vec(s.second + actor::kPosition))) & 0xFFu) != 0u;
+    }
+    if (second_in) context->gpr[3] = s.second + actor::kPosition;
+}
+
+// After MR::getPlayerPos from a star bunny (TrickRabbit, RunawayRabbit and their kin, whose `this` is in
+// r29-r31): the nearer brother's position, so it runs from either.
+void bunny_player_pos(const Guest& guest, const State& s, PpcContext* context, std::uint32_t guest_pc) {
+    const bool trick = guest_pc >= 0x802938E0u && guest_pc < 0x80299824u;
+    const bool runaway = guest_pc >= 0x80284A58u && guest_pc < 0x80286A54u;
+    if (!trick && !runaway) return;
+    if (!plausible(s.first) || !plausible(s.second) || s.down[0].down || s.down[1].down) return;
+    std::uint32_t bunny = 0u;
+    for (unsigned r = 31u; r >= 29u && bunny == 0u; --r) {
+        const std::uint32_t candidate = context->gpr[r];
+        const std::uint32_t vtable = plausible(candidate) ? guest.u32(candidate) : 0u;
+        if (vtable >= 0x8059E000u && vtable < 0x805A2000u) bunny = candidate;  // the rabbits' vtables
+    }
+    if (bunny == 0u) return;
+    const coop::Vec3 at = guest.vec(bunny + actor::kPosition);
+    const float first = coop::length(guest.vec(s.first + actor::kPosition) - at);
+    const float second = coop::length(guest.vec(s.second + actor::kPosition) - at);
+    context->gpr[3] = (second < first ? s.second : s.first) + actor::kPosition;
+}
+
+// ---- Star Pointers (docs/MULTIPLAYER.md "Star Pointers") ----
+// Mario's pointer is channel 0's and the second player's (the orange one) channel 1's, however the WPads are swapped.
+
+// The half a pointer is over (1 the second player's), from where its target tests look
+// (StarPointerController::mPastInfo.mPos, in the game's 2D screen: MR::getScreenWidth by the frame buffer's height).
+std::size_t half_under_pointer(const Guest& guest, const State& s, std::uint32_t channel) {
+    SavedContext saved(guest.context());
+    const std::uint32_t director = guest.call(fn::kGetStarPointerDirector);
+    const std::uint32_t controllers = plausible(director) ? guest.u32(director + 4u) : 0u;
+    if (!plausible(controllers)) return channel;
+    const std::uint32_t controller = controllers + kStarPointerControllerSize * channel;
+    const auto width = static_cast<float>(guest.call(fn::kGetScreenWidth));
+    const auto height = static_cast<float>(guest.call(fn::kGetFrameBufferHeight) & 0xFFFFu);
+    const float x = guest.f32(controller + kPointerPastPos) / width * s.screen_width;
+    const float y = guest.f32(controller + kPointerPastPos + 4u) / height * s.screen_height;
+    if (!std::isfinite(x) || !std::isfinite(y)) return channel;
+    const std::array<float, 3> line = s.layout.plane(true, s.screen_width, s.screen_height);
+    return line[0] * x + line[1] * y + line[2] >= 0.0f ? 1u : 0u;
+}
+
+// Before isStarPointerPointingCore (one pointer's gates and target test, `channel`): while split, the game's pointer
+// camera (StarPointerTransformHolder, the game camera's copy) is the camera of the half the pointer is over, as last
+// drawn, so a target counts where it is seen under the cursor, depth test included. After it, the game's again.
+void pointer_half_begin(const Guest& guest, State& s, std::uint32_t channel) {
+    auto& p = s.pointers;
+    if (!p.split || channel > 1u || p.holder_swapped) return;
+    const std::size_t half = half_under_pointer(guest, s, channel);
+    SavedContext saved(guest.context());
+    const std::uint32_t view = guest.call(fn::kStarPointerViewMtx);
+    const std::uint32_t projection = guest.call(fn::kStarPointerProjMtx);
+    if (!plausible(view) || !plausible(projection)) return;
+    p.holder_view = read_floats<12>(guest, view);
+    p.holder_projection = read_floats<16>(guest, projection);
+    write_floats(guest, view, p.camera[half].view);
+    write_floats(guest, projection, p.projection[half]);
+    p.holder_swapped = true;
+}
+
+void pointer_half_end(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    if (!p.holder_swapped) return;
+    p.holder_swapped = false;
+    SavedContext saved(guest.context());
+    write_floats(guest, guest.call(fn::kStarPointerViewMtx), p.holder_view);
+    write_floats(guest, guest.call(fn::kStarPointerProjMtx), p.holder_projection);
+}
+
+// Around GCapture's MR::calcScreenPosition (which Pull Star is nearest its pointer, from CameraContext): the camera
+// of the half the capturing brother's pointer is over, while split.
+void capture_screen_begin(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    if (!p.split || p.context_swapped) return;
+    const std::size_t half = half_under_pointer(guest, s, p.capture_second ? 1u : 0u);
+    SavedContext saved(guest.context());
+    const std::uint32_t context = camera_context(guest);
+    if (context == 0u) return;
+    p.context_camera = read_camera(guest, context);
+    p.context_projection = read_floats<16>(guest, context + camera::kProjection);
+    write_camera(guest, context, p.camera[half]);
+    write_floats(guest, context + camera::kProjection, p.projection[half]);
+    p.context_swapped = true;
+}
+
+void capture_screen_end(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    if (!p.context_swapped) return;
+    p.context_swapped = false;
+    SavedContext saved(guest.context());
+    const std::uint32_t context = camera_context(guest);
+    if (context == 0u) return;
+    write_camera(guest, context, p.context_camera);
+    write_floats(guest, context + camera::kProjection, p.context_projection);
+}
+
+// The Pull Stars change hands only while GCapture holds nobody (its Wait or CoolDown).
+bool capture_idle(const Guest& guest, const State& s) {
+    const std::uint32_t capture = s.pointers.gcapture;
+    if (!plausible(capture) || guest.u32(capture) != kGCaptureVtable) return true;
+    SavedContext saved(guest.context());
+    return (guest.call(fn::kIsNerve, capture, kGCaptureNrvWait) & 0xFFu) != 0u ||
+           (guest.call(fn::kIsNerve, capture, kGCaptureNrvCoolDown) & 0xFFu) != 0u;
+}
+
+// A call into GCapture's or GCaptureTarget's code from their own (nerve steps, control, sensor answers): it runs
+// with the capturing brother as the game's player (his position, his bind, his A as channel 0's), as star bunnies
+// run with the nearer one. Calls from elsewhere (the player's and the camera's checks) are left as they are.
+void capture_code_begin(const Guest& guest, State& s, std::uint32_t guest_pc) {
+    auto& p = s.pointers;
+    PpcContext* context = guest.context();
+    const std::uint32_t self = context->gpr[3];
+    if (plausible(self) && guest.u32(self) == kGCaptureVtable) p.gcapture = self;
+    ++p.capture_depth;
+    // GCapture::receiveOtherMsg's requestBind(sender): the Pull Star binds whoever's body touches it first. The
+    // brother not capturing (standing next to the other) is refused; requestBind's false tells him so.
+    if (in_capture_receive(guest_pc) && plausible(s.first) && plausible(s.second)) {
+        const std::uint32_t sensor = context->gpr[4];
+        const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
+        const std::uint32_t capturer = p.capture_second ? s.second : s.first;
+        if ((host == s.first || host == s.second) && host != capturer) {
+            p.bind_refused = true;
+            context->pc = kCoopSkipCall;
+            return;
+        }
+    }
+    if (p.capture_depth != 1u) return;
+    if (!in_capture_code(guest_pc) || p.capture_second == s.moving_second || !plausible(s.first) ||
+        !plausible(s.second) || s.down[p.capture_second ? 1u : 0u].down) {
+        return;
+    }
+    SavedContext saved(guest.context());
+    p.capture_back_to_second = s.moving_second;
+    set_game_player(guest, s, p.capture_second);
+    p.capture_swapped = true;
+}
+
+bool second_nearer_piece(const Guest& guest, const State& s, std::uint32_t piece);
+
+// ---- Bind objects for either brother (poles and the like) ----
+// A pole, swing, rope, plant or cannon the player jumps into binds him (MarioActor::_924: its sensor, which he
+// rushes with), and from then on the object's own nerve steps drive "the player" (MarioAccess: his animation, his
+// jump off, his end of the bind, channel 0's stick and A). The second brother's bind came from his own turn, but the
+// object's steps ran with the first as the game's player: the pole's climb and its jump-off moved and animated the
+// first, and the first's A let go of a rider who was never let go (the second, stuck on the pole in his run
+// animation), whose next base-matrix update went to the pole's empty rider and crashed the game. A bound object's
+// nerve step runs with the brother it binds as the game's player. A pole free of either also runs as the brother
+// nearer it, since its grab sensor slides along it to the game's player's height.
+constexpr std::uint32_t kPoleVtable = 0x805BB430u;        // __vt__4Pole
+constexpr std::uint32_t kPoleRider = 0xB8u;               // Pole::mRider
+constexpr std::uint32_t kEarthenPipeVtable = 0x8057EFCCu;  // __vt__11EarthenPipe
+constexpr std::uint32_t kEndBindAndPlayerWait = 0x803F2914u;  // MR::endBindAndPlayerWait(LiveActor*)
+
+// Binds with handling of their own: launch stars (their steps), pipes (pipe_holds), Pull Stars (GCapture), the
+// star get, and vehicles (the first brother's alone, the second rides along).
+bool bind_has_own_handling(std::uint32_t vtable) {
+    return vtable == kSuperSpinDriverVtable || vtable == kSpinDriverVtable || vtable == kEarthenPipeVtable ||
+           vtable == kGCaptureVtable || vtable == kGCaptureTargetVtable || vtable == kPowerStarVtable ||
+           is_vehicle(vtable);
+}
+
+// Whether a nerve step of `actor` (Spine::update) is the second brother's: the object binds him, or it is a pole
+// free of both and he is nearer it.
+bool bind_step_is_second(const Guest& guest, const State& s, std::uint32_t actor, std::uint32_t vtable) {
+    if (!plausible(actor) || !plausible(s.first) || !plausible(s.second) || s.down[1].down ||
+        bind_has_own_handling(vtable)) {
+        return false;
+    }
+    if (bound_host(guest, s.second) == actor) return true;
+    return vtable == kPoleVtable && s.present && !s.level_start && !s.riding_along &&
+           bound_host(guest, s.first) != actor && guest.u32(actor + kPoleRider) == 0u && second_nearer(guest, s, actor);
+}
+
+bool bind_spine_begin(const Guest& guest, State& s, std::uint32_t actor, std::uint32_t vtable) {
+    if (s.bind_spine_swapped || s.moving_second || !bind_step_is_second(guest, s, actor, vtable)) return false;
+    if (s.bind_traced != actor && bound_host(guest, s.second) == actor) {
+        s.bind_traced = actor;
+        trace("bind object %08X (vtable %08X): the second player's, its steps as his", actor, vtable);
+    }
+    SavedContext saved(guest.context());
+    set_game_player(guest, s, true);
+    s.bind_spine_swapped = true;
+    s.bind_spine_depth = s.spine_depth;
+    return true;
+}
+
+bool bind_spine_end(const Guest& guest, State& s) {
+    if (!s.bind_spine_swapped || s.spine_depth != s.bind_spine_depth) return false;
+    s.bind_spine_swapped = false;
+    SavedContext saved(guest.context());
+    set_game_player(guest, s, false);
+    return true;
+}
+
+// In the second brother's turn, before he moves: a pole that let him go while it ran as the first (an enemy's hit on
+// it ends the bind on the game's player) has no rider, and his next base-matrix update would go to it: the bind
+// ends on him here.
+void release_dropped_bind(const Guest& guest, State& s) {
+    const std::uint32_t host = bound_host(guest, s.second);
+    if (host == 0u || guest.u32(host) != kPoleVtable || guest.u32(host + kPoleRider) == s.second) return;
+    SavedContext saved(guest.context());
+    guest.call(kEndBindAndPlayerWait, host);
+    trace("pole %08X let the second player go unseen: his bind ended", host);
+}
+
+// MarioActor::addRushSensor(sensor) for a brother: an object the other brother is bound to holds one rider (a pole
+// would take the second and leave the first bound to it), so it is not his to bind.
+bool rush_target_taken(const Guest& guest, const State& s, std::uint32_t player, std::uint32_t sensor) {
+    if (!plausible(s.first) || !plausible(s.second) || (player != s.first && player != s.second)) return false;
+    const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
+    if (!plausible(host) || bind_has_own_handling(guest.u32(host))) return false;
+    return bound_host(guest, player == s.first ? s.second : s.first) == host;
+}
+
+// Spine::update of GCapture or a GCaptureTarget: its nerve step (exeCapture and the rest, which their nerves reach
+// by a tail branch, unseen by capture_code_begin) runs as the capturing brother too.
+void capture_spine_begin(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    const std::uint32_t spine = guest.context()->gpr[3];
+    const std::uint32_t actor = plausible(spine) ? guest.u32(spine) : 0u;  // Spine::mExecutor
+    const std::uint32_t vtable = plausible(actor) ? guest.u32(actor) : 0u;
+    ++s.spine_depth;
+    if (bind_spine_begin(guest, s, actor, vtable)) return;
+    if (vtable == kStarPieceVtable || is_shell(vtable)) {
+        // A Star Bit's nerve step, as the brother nearer it (star_piece_code_begin), or a Koopa shell's
+        // (nearer_player_code).
+        const bool second = vtable == kStarPieceVtable ? second_nearer_piece(guest, s, actor)
+                                                       : plausible(s.second) && second_nearer(guest, s, actor);
+        if (s.piece_spine_swapped || !second || s.moving_second) return;
+        SavedContext saved(guest.context());
+        set_game_player(guest, s, true);
+        s.piece_spine_swapped = true;
+        return;
+    }
+    if ((vtable != kGCaptureVtable && vtable != kGCaptureTargetVtable) || p.spine_swapped ||
+        p.capture_second == s.moving_second || !plausible(s.first) || !plausible(s.second) ||
+        s.down[p.capture_second ? 1u : 0u].down) {
+        return;
+    }
+    SavedContext saved(guest.context());
+    p.spine_back_to_second = s.moving_second;
+    set_game_player(guest, s, p.capture_second);
+    p.spine_swapped = true;
+}
+
+void capture_spine_end(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    const bool bind_ended = bind_spine_end(guest, s);
+    if (s.spine_depth != 0u) --s.spine_depth;
+    if (bind_ended) return;
+    if (s.piece_spine_swapped) {
+        s.piece_spine_swapped = false;
+        SavedContext saved(guest.context());
+        set_game_player(guest, s, false);
+        return;
+    }
+    if (!p.spine_swapped) return;
+    p.spine_swapped = false;
+    SavedContext saved(guest.context());
+    set_game_player(guest, s, p.spine_back_to_second);
+}
+
+void capture_code_end(const Guest& guest, State& s) {
+    auto& p = s.pointers;
+    if (p.bind_refused) {
+        p.bind_refused = false;
+        guest.context()->gpr[3] = 0u;
+    }
+    if (p.capture_depth == 0u || --p.capture_depth != 0u || !p.capture_swapped) return;
+    SavedContext saved(guest.context());
+    set_game_player(guest, s, p.capture_back_to_second);
+    p.capture_swapped = false;
+}
+
+// After a Pull Star's own pointing test (GCaptureTarget, on the capturing brother's pointer): if it missed and the
+// other brother's pointer is on it while GCapture is free, the Pull Stars are his.
+void capture_pointing_after(const Guest& guest, State& s, PpcContext* context) {
+    auto& p = s.pointers;
+    if ((context->gpr[3] & 0xFFu) != 0u || !plausible(s.first) || !plausible(s.second)) return;
+    const bool other_second = !p.capture_second;
+    if (s.down[other_second ? 1u : 0u].down || !capture_idle(guest, s)) return;
+    std::uint32_t pointed = 0u;
+    {
+        SavedContext saved(context);
+        const auto& a = p.pointing_args;
+        pointed = guest.call(fn::kIsStarPointerPointing, a[0], other_second ? 1u : 0u, a[2], a[3]) & 0xFFu;
+    }
+    if (pointed == 0u) return;
+    p.capture_second = other_second;
+    trace("pull stars: the %s player's pointer", other_second ? "second" : "first");
+    context->gpr[3] = 1u;
+}
+
+// ---- Star Bits near either brother ----
+// A Star Bit tests the pointers only within 150 m of the game's player (StarPiece::tryGotJudge), and once pointed
+// flies to him: its code runs with the brother nearer it as the game's player, so one by the second player far from
+// the first is pointable and flies to him. Calls into its code (hook 86), and its nerve steps (Spine::update, as
+// their nerves reach them by tail branches).
+bool second_nearer_piece(const Guest& guest, const State& s, std::uint32_t piece) {
+    if (!plausible(piece) || guest.u32(piece) != kStarPieceVtable || !plausible(s.first) || !plausible(s.second) ||
+        s.down[1].down || s.moving_second) {
+        return false;
+    }
+    const coop::Vec3 at = guest.vec(piece + actor::kPosition);
+    return coop::length(guest.vec(s.second + actor::kPosition) - at) < coop::length(guest.vec(s.first + actor::kPosition) - at);
+}
+
+void star_piece_code_begin(const Guest& guest, State& s) {
+    if (s.piece_depth++ != 0u || !second_nearer_piece(guest, s, guest.context()->gpr[3])) return;
+    SavedContext saved(guest.context());
+    set_game_player(guest, s, true);
+    s.piece_swapped = true;
+}
+
+void star_piece_code_end(const Guest& guest, State& s) {
+    if (s.piece_depth == 0u || --s.piece_depth != 0u || !s.piece_swapped) return;
+    SavedContext saved(guest.context());
+    set_game_player(guest, s, false);
+    s.piece_swapped = false;
+}
+
+// ---- Star Bit shots (docs/MULTIPLAYER.md "Star Pointers") ----
+// Each pointer has its StarPieceShooter, which the game runs with its one player and one camera: the second
+// player's shot aimed from the first player (MR::getPlayerPos, his gravity), through the shared camera (the
+// pointer's world point, StarPointerController::mWorldPos, and the ray past it) and left from that camera. Here the
+// second pointer's shot aims from the second player and leaves from his camera, and in split screen either
+// pointer aims through the camera and lens of the picture it is over (the one the depth under it was drawn with).
+
+// The StarPieceShooter making the call at hand (its `this`, kept in a saved register).
+std::uint32_t shooter_in_registers(const Guest& guest, const PpcContext* context) {
+    for (unsigned r = 31u; r >= 24u; --r) {
+        const std::uint32_t candidate = context->gpr[r];
+        if (plausible(candidate) && guest.u32(candidate) == kStarPieceShooterVtable) return candidate;
+    }
+    return 0u;
+}
+
+// The picture a pointer is over: its half of the split screen, or online its own player's (each PC shows its
+// player's view on the whole screen).
+std::size_t pointer_picture(const Guest& guest, const State& s, std::uint32_t channel) {
+    return online_views() ? channel : half_under_pointer(guest, s, channel);
+}
+
+// After MR::getPlayerPos in StarPieceShooter::calcShootGoalUsingPointingDepth (r3 the player's position): the second
+// pointer's shot aims from the second player. In split screen the pointer's world point is made again with its
+// picture's camera and lens (coop::star_bit_shot_goal), before the shooter reads it.
+void shot_goal_player_pos(const Guest& guest, const State& s, PpcContext* context) {
+    const std::uint32_t shooter = shooter_in_registers(guest, context);
+    if (shooter == 0u || !plausible(s.first) || !plausible(s.second)) return;
+    const std::uint32_t channel = guest.u32(shooter + kShooterChannel);
+    if (channel > 1u || (channel == 1u && (s.down[1].down || !plausible(s.second_mario)))) return;
+    if (channel == 1u) context->gpr[3] = s.second + actor::kPosition;
+    if (!s.pointers.split || !plausible(context->gpr[3])) return;
+    const coop::Vec3 player = guest.vec(context->gpr[3]);
+    SavedContext saved(context);
+    const std::uint32_t director = guest.call(fn::kGetStarPointerDirector);
+    const std::uint32_t controllers = plausible(director) ? guest.u32(director + 4u) : 0u;
+    if (!plausible(controllers)) return;
+    const std::uint32_t controller = controllers + kStarPointerControllerSize * channel;
+    if (guest.u8(controller + kPointerPastDrawReady) == 0u) return;  // no new depth: the point stands
+    const auto width = static_cast<float>(guest.call(fn::kGetScreenWidth));
+    const auto height = static_cast<float>(guest.call(fn::kGetFrameBufferHeight) & 0xFFFFu);
+    const float ndc_x = guest.f32(controller + kPointerPastPos) / width * 2.0f - 1.0f;
+    const float ndc_y = 1.0f - guest.f32(controller + kPointerPastPos + 4u) / height * 2.0f;
+    float near_z = 0.0f;
+    float far_z = 1.0f;
+    const std::uint32_t peek = guest.u32(director + kPointerPeekZ);
+    if (plausible(peek)) {
+        const float n = guest.f32(peek + kPeekZViewport + 16u);
+        const float f = guest.f32(peek + kPeekZViewport + 20u);
+        if (std::isfinite(n) && std::isfinite(f) && f > n) {
+            near_z = n;
+            far_z = f;
+        }
+    }
+    const std::uint32_t depth_word = guest.u32(controller + kPointerPastDepth) & 0xFFFFFFu;
+    const std::size_t picture = pointer_picture(guest, s, channel);
+    const coop::CameraMatrices& camera = s.pointers.camera[picture];
+    const std::array<float, 16>& projection = s.pointers.projection[picture];
+    if (!finite(camera.inverse) || projection[0] == 0.0f || projection[5] == 0.0f || !std::isfinite(ndc_x) ||
+        !std::isfinite(ndc_y)) {
+        return;
+    }
+    const coop::Vec3 point = coop::unproject_pointer(camera, projection, ndc_x, ndc_y,
+                                                     static_cast<float>(depth_word) / 16777215.0f, near_z, far_z);
+    // The far plane's depth (the sky) shows no point.
+    const bool has_point = depth_word < 0xFFFFFFu && std::isfinite(coop::length(point));
+    const coop::Vec3 goal = coop::star_bit_shot_goal(player, point, has_point, coop::pose_of(camera.inverse).eye,
+                                                     coop::pointer_world_ray(camera, projection, ndc_x, ndc_y));
+    if (std::isfinite(coop::length(goal))) guest.set_vec(controller + kPointerWorldPos, goal);
+}
+
+// The direct call at `pc` (a `bl`): its target.
+std::uint32_t direct_call_target(const Guest& guest, std::uint32_t pc) {
+    const std::uint32_t word = guest.u32(pc);
+    if ((word >> 26u) != 18u) return 0u;
+    std::uint32_t offset = word & 0x03FFFFFCu;
+    if ((offset & 0x02000000u) != 0u) offset |= 0xFC000000u;  // sign
+    return ((word & 2u) != 0u ? 0u : pc) + offset;
+}
+
+// Before StarPiece::throwToTarget(sensor, from, gravity, speed) or throwToTargetCore(target, from, gravity, speed,
+// bool) from StarPieceShooter::shoot, the second pointer's: the Star Bit leaves from the second player's camera in
+// split screen (as the game's shot leaves from its camera) and from above his head on a shared screen, under his
+// gravity. A thrown point stops at the first wall seen from the camera the pointer looked through (the game's
+// test used the shared camera).
+void shot_from_second_player(const Guest& guest, const State& s, PpcContext* context, std::uint32_t guest_pc) {
+    const std::uint32_t shooter = shooter_in_registers(guest, context);
+    if (shooter == 0u || guest.u32(shooter + kShooterChannel) != 1u || !plausible(s.first) || !plausible(s.second) ||
+        !plausible(s.second_mario) || s.down[1].down) {
+        return;
+    }
+    const std::uint32_t target_at = context->gpr[4];
+    const std::uint32_t from_at = context->gpr[5];
+    const std::uint32_t gravity_at = context->gpr[6];
+    if (!plausible(target_at) || !plausible(from_at) || !plausible(gravity_at)) return;
+    const coop::Vec3 luigi = guest.vec(s.second + actor::kPosition);
+    const coop::Vec3 up = player_up(guest, s.second_mario);
+    coop::Vec3 from = luigi + up * kShotAboveHead;
+    if (s.pointers.split && finite(s.pointers.camera[1].inverse)) {
+        const std::array<float, 12>& m = s.pointers.camera[1].inverse;
+        const coop::CameraPose pose = coop::pose_of(m);
+        const coop::Vec3 side = coop::normalized({m[0], m[4], m[8]}, {1.0f, 0.0f, 0.0f});
+        from = pose.eye - side * kShotCameraSide + pose.forward * kShotCameraAhead;
+    }
+    if (!std::isfinite(coop::length(from))) return;
+    guest.set_vec(from_at, from);
+    guest.set_vec(gravity_at, up * -1.0f);
+    // The point aimed at: the sensor locked on to, else the shooter's goal.
+    std::uint32_t sensor = guest.u32(shooter + kShooterSensor);
+    if (!plausible(sensor)) sensor = guest.u32(shooter + kShooterLastSensor);
+    const coop::Vec3 aimed = plausible(sensor) ? guest.vec(sensor + kSensorPosition) : guest.vec(shooter + actor::kPosition);
+    const bool core = direct_call_target(guest, guest_pc) == kThrowToTargetCore;
+    coop::Vec3 to = core ? guest.vec(target_at) : aimed;
+    if (s.pointers.split && core) {
+        // The first wall before it, from the camera the pointer looked through.
+        const coop::Vec3 eye = coop::pose_of(s.pointers.camera[pointer_picture(guest, s, 1u)].inverse).eye;
+        to = aimed;
+        {
+            SavedContext saved(context);
+            Guest::Frame frame(guest);
+            const std::uint32_t hit = frame.vec(0, aimed);
+            const std::uint32_t found = guest.call(fn::kFirstPolyOnLineToMap, hit, frame.scratch(), frame.vec(1, eye),
+                                                   frame.vec(2, aimed - eye));
+            const coop::Vec3 wall = guest.vec(hit);
+            if ((found & 0xFFu) != 0u && std::isfinite(coop::length(wall)) &&
+                coop::length(wall - eye) < coop::length(aimed - eye)) {
+                to = wall;
+            }
+        }
+        if (std::isfinite(coop::length(to))) guest.set_vec(target_at, to);
+    }
+    trace("star bit shot by the second player: from (%.0f %.0f %.0f) to (%.0f %.0f %.0f), he is at (%.0f %.0f %.0f)%s",
+          from.x, from.y, from.z, to.x, to.y, to.z, luigi.x, luigi.y, luigi.z, s.pointers.split ? ", split" : "");
+}
+
+// ---- 3D sound by the nearer brother ----
+// The game hears 3D sounds from its camera (AudCameraWatcher): far from the first player, the second player's
+// surroundings fell silent. After AudDopplerAudienceState::convertAbsToRel (every positioned sound's volume, pan,
+// surround, reverb, priority and cut-off come from its result), a source nearer the second player is placed as it
+// stands from him but around the first, and the result made again: he hears his surroundings as the first does
+// his. Guest state only (the same on both PCs online).
+void sound_from_nearer_brother(const Guest& guest, const State& s) {
+    const std::uint32_t state = s.sound_args[0];
+    const std::uint32_t source = s.sound_args[1];
+    const std::uint32_t out = s.sound_args[2];
+    if (!plausible(state) || !plausible(source) || !plausible(out) || !plausible(s.first) || !plausible(s.second) ||
+        s.down[0].down || s.down[1].down) {
+        return;
+    }
+    const coop::Vec3 first = guest.vec(s.first + actor::kPosition);
+    const coop::Vec3 second = guest.vec(s.second + actor::kPosition);
+    const coop::Vec3 at = guest.vec(source);
+    if (!(coop::length(at - second) < coop::length(at - first))) return;
+    const coop::Vec3 moved = at + (first - second);
+    const coop::Vec3 listener = guest.vec(state + kAudiencePos);
+    float d[3] = {moved.x - listener.x, moved.y - listener.y, moved.z - listener.z};
+    for (float& v : d) {
+        if (std::fabs(v) < 0.002f) v = v < 0.0f ? -0.002f : 0.002f;
+    }
+    const std::array<float, 12> m = read_floats<12>(guest, state + kAudienceMtx);
+    for (std::uint32_t row = 0; row < 3u; ++row) {
+        guest.set_f32(out + kRelPos + 4u * row, m[4u * row] * d[0] + m[4u * row + 1u] * d[1] + m[4u * row + 2u] * d[2]);
+    }
+    const float distance = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    for (std::uint32_t i = 0; i < 3u; ++i) guest.set_f32(out + kRelDir + 4u * i, d[i] / distance);
+    guest.set_f32(out + kRelDist, distance);
+}
+
+// ---- The star get, both brothers ----
+// When either brother takes a Power Star, the other stands beside him for the star get, as the Luigi missions'
+// star get shows both: pinned beside the star (its matrix, the one the taker is pinned to), held (the game's remote
+// demo hold, so he neither moves nor falls), untouchable (no hit sensors: no damage, no death) and playing the
+// star get. One screen meanwhile (move_second_player). Called in the brother's own turn (`who`, 0 or 1).
+void star_get_update(const Guest& guest, State& s, unsigned who) {
+    if (s.star_get == 0u || s.star_get_other != who) return;
+    const std::uint32_t actor_address = who == 0u ? s.first : s.second;
+    if (!plausible(actor_address) || !plausible(s.star_get) || guest.u32(s.star_get) != kPowerStarVtable) return;
+    SavedContext saved(guest.context());
+    std::array<float, 12> m = read_floats<12>(guest, s.star_get + kPowerStarBaseMtx);
+    // Beside the taker: along the star matrix's x axis (column 0), as the Luigi model stands.
+    const float side = who == 1u ? -kStarGetSide : kStarGetSide;
+    m[3] += m[0] * side;
+    m[7] += m[4] * side;
+    m[11] += m[8] * side;
+    Guest::Frame frame(guest);
+    const std::uint32_t mtx = frame.scratch();
+    write_floats(guest, mtx, m);
+    if (!s.star_get_posed) {
+        s.star_get_posed = true;
+        guest.call(fn::kReadyRemoteDemo);
+        guest.call(fn::kInvalidateHitSensors, actor_address);
+        if (s.star_get_anim == 0u) s.star_get_anim = guest.find_string("PowerStarGet");
+        if (s.star_get_anim != 0u) guest.call(fn::kMarioChangeAnimation, actor_address, s.star_get_anim, s.star_get_anim);
+        trace("star get: the %s player stands beside the star", who == 0u ? "first" : "second");
+    }
+    guest.call(fn::kMarioAccessSetBaseMtx, mtx);
+}
+
+// Once a frame (the second player's turn, before he moves): the star get starting or over. The taker is the brother
+// rushing the star (MarioActor::_924's host is it).
+void star_get_watch(const Guest& guest, State& s) {
+    const auto star_of = [&](std::uint32_t actor_address) {
+        const std::uint32_t sensor = plausible(actor_address) ? guest.u32(actor_address + kMarioRushSensor) : 0u;
+        const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
+        return plausible(host) && guest.u32(host) == kPowerStarVtable ? host : 0u;
+    };
+    const bool active = (guest.call(fn::kIsPowerStarGetDemoActive) & 0xFFu) != 0u;
+    if (!active || s.down[0].down || s.down[1].down) {
+        if (s.star_get != 0u) trace("star get over");
+        s.star_get = 0u;
+        s.star_get_posed = false;
+        return;
+    }
+    if (s.star_get != 0u) return;
+    const std::uint32_t by_first = star_of(s.first);
+    const std::uint32_t by_second = by_first != 0u ? 0u : star_of(s.second);
+    if (by_first == 0u && by_second == 0u) return;
+    s.star_get = by_first != 0u ? by_first : by_second;
+    s.star_get_other = by_first != 0u ? 1u : 0u;
+    s.star_get_posed = false;
+    // The star's own step plays the star get on the game's player (MR::startBckPlayer): the second player taking
+    // it plays it himself.
+    if (by_second != 0u) {
+        SavedContext saved(guest.context());
+        if (s.star_get_anim == 0u) s.star_get_anim = guest.find_string("PowerStarGet");
+        if (s.star_get_anim != 0u) guest.call(fn::kMarioChangeAnimation, s.second, s.star_get_anim, s.star_get_anim);
+    }
+    trace("star get by the %s player", by_first != 0u ? "first" : "second");
+}
+
+void pointers_before(std::uint32_t id, const Guest& guest, State& s, PpcContext* context, std::uint32_t guest_pc) {
+    auto& p = s.pointers;
+    // Channel 0 in the Pull Stars' code is the capturing brother's pointer.
+    const bool remap = in_capture_code(guest_pc) && p.capture_second;
+    switch (id) {
+    case call::kPointingCore: pointer_half_begin(guest, s, context->gpr[5]); return;
+    case call::kScreenPosition:
+        if (in_capture_code(guest_pc)) capture_screen_begin(guest, s);
+        return;
+    case call::kCaptureCode: capture_code_begin(guest, s, guest_pc); return;
+    case call::kPointing:
+        for (unsigned i = 0; i < 4u; ++i) p.pointing_args[i] = context->gpr[3 + i];
+        p.pointing_target = in_capture_target(guest_pc);
+        if (remap && context->gpr[4] == 0u) context->gpr[4] = 1u;
+        return;
+    case call::kPointerScreenPos:
+        if (remap && context->gpr[3] == 0u) context->gpr[3] = 1u;
+        return;
+    case call::kStrokeMoment:
+        if (remap && context->gpr[5] == 0u) context->gpr[5] = 1u;
+        return;
+    case call::kSpineUpdate: capture_spine_begin(guest, s); return;
+    default: return;
+    }
+}
+
+void pointers_after(std::uint32_t id, const Guest& guest, State& s, PpcContext* context) {
+    auto& p = s.pointers;
+    switch (id) {
+    case call::kPointingCore: pointer_half_end(guest, s); return;
+    case call::kScreenPosition: capture_screen_end(guest, s); return;
+    case call::kTractTrigger:
+        // A on a Pull Star is the capturing brother's: the other's jump is not taken for it.
+        if (p.capture_second != s.moving_second) context->gpr[3] = 0u;
+        return;
+    case call::kCaptureCode: capture_code_end(guest, s); return;
+    case call::kPointing:
+        if (p.pointing_target) {
+            p.pointing_target = false;
+            capture_pointing_after(guest, s, context);
+        }
+        return;
+    case call::kCoStar:
+        // The second pointer's A is the second player's jump, not Co-Star help: no jump assist for the other
+        // brother, no enemy held, no launch star fired.
+        context->gpr[3] = 0u;
+        return;
+    case call::kSpineUpdate: capture_spine_end(guest, s); return;
+    default: return;
+    }
+}
+
+// ---- Co-op lives, respawn and HUD (docs/MULTIPLAYER.md "Lives") ----
+
+// The second player's lives are kept only while the game runs, as the game keeps the first player's: loading a
+// save starts the first player at 4 (GameDataPlayerStatus::deserialize), and the second with as many.
+void ensure_second_lives(const Guest& guest, State& s) {
+    if (s.second_lives >= 0) return;
+    s.second_lives = std::clamp(static_cast<int>(guest.call(fn::kGetPlayerLeft)), 0, 99);
+    trace("second player's lives: %d (as the first player's)", s.second_lives);
+}
+
+// A save just loaded (the first stage after the file select): the second player's lives start over with the
+// first player's.
+void on_stage_start(const Guest& guest, State& s) {
+    const std::uint32_t system = guest.u32(kGameSystem);
+    const std::uint32_t controller = plausible(system) ? guest.u32(system + 0x24u) : 0u;
+    const std::string stage = plausible(controller) ? guest.string(controller + 0x20u, 31u) : std::string{};
+    if (s.last_stage == "FileSelect" && stage != "FileSelect") s.second_lives = -1;
+    s.last_stage = stage;
+}
+
+// A MarioActor::exeGameOver* step's first frame makes these calls (the BGM lock and queue, the player event, the
+// death camera, the pointer demo). For a player going down while the other plays on, none of them happen: the
+// first decides, and the player's down state skips the rest that frame.
+void on_game_over_call(std::uint32_t id, const Guest& guest, State& s, PpcContext* context, std::uint32_t guest_pc) {
+    // The second player going down alone (a black hole's fall starts its camera through MR::startBlackHoleCamera,
+    // from the camera code): the game camera stays the first player's.
+    if (id == call::kStartDeathCamera && s.moving_second && s.down[1].down && !s.game_miss) {
+        context->pc = kCoopSkipCall;
+        return;
+    }
+    if (!in_game_over_step(guest_pc) || !plausible(s.first) || !plausible(s.second)) return;
+    // The MarioActor going down: exeGameOver* keeps itself in r30 or r31.
+    const std::uint32_t r30 = context->gpr[30];
+    const std::uint32_t r31 = context->gpr[31];
+    const unsigned who = (r30 == s.second || r31 == s.second) ? 1u
+                         : (r30 == s.first || r31 == s.first) ? 0u
+                                                               : (s.moving_second ? 1u : 0u);
+    if (id == call::kSetCubeBgmChangeInvalid || id == call::kStartDeathCamera) {
+        trace("down: call %u from %08X, r30 %08X r31 %08X, second's turn %d: %s", id, guest_pc, r30, r31,
+              s.moving_second ? 1 : 0, who == 0u ? "first" : "second");
+    }
+    coop::DownState& self = s.down[who];
+    const coop::DownState& partner = s.down[1u - who];
+    // Already down alone: a later step of the same fall (a black hole's exeGameOverBlackHole2) neither counts
+    // again nor starts the game's miss.
+    if (self.down && !s.game_miss) {
+        context->pc = kCoopSkipCall;
+        return;
+    }
+    if (!s.game_miss) {
+        // A race lost is the game's to handle (MarioActor::_39D: 1, 2 and 5 are race outcomes).
+        const std::uint32_t actor_address = who == 0u ? s.first : s.second;
+        const std::uint8_t kind = guest.u8(actor_address + 0x39Du);
+        if (kind == 1u || kind == 2u || kind == 5u) return;
+        SavedContext saved(context);
+        ensure_second_lives(guest, s);
+        if (who == 0u) {
+            int lives = static_cast<int>(guest.call(fn::kGetPlayerLeft));
+            const int before = lives;
+            if (coop::go_down_alone(self, partner, lives) && lives < before) guest.call(fn::kDecPlayerLeft);
+        } else {
+            (void)coop::go_down_alone(self, partner, s.second_lives);
+        }
+        if (self.down) {
+            // Lives counters count up by themselves but never down (a miss always reloaded the stage): show it.
+            const std::uint32_t counter = who == 0u ? s.first_left : s.second_left;
+            if (plausible(counter)) {
+                const int lives = who == 0u ? static_cast<int>(guest.call(fn::kGetPlayerLeft)) : s.second_lives;
+                guest.set_u32(counter + kPlayerLeftCount, static_cast<std::uint32_t>(std::max(lives, 0)));
+                guest.call(fn::kPlayerLeftCalls[1], counter);  // PlayerLeft::forceAppear
+            }
+            // The down animation the game's player event would have started (MarioActor::exeGameOver; a fall
+            // into the abyss starts its own).
+            if (guest_pc >= 0x802B8A38u && guest_pc < 0x802B8B64u) guest.call(fn::kChangeGameOverAnimation, actor_address);
+            trace("%s down alone: %s", who == 0u ? "first player" : "second player",
+                  self.out ? "no lives left, out until the stage reloads" : "back beside the other soon");
+        } else {
+            s.game_miss = true;
+            trace("both players down: the game's miss");
+        }
+    }
+    if (self.down && self.frames == 0u) {
+        context->pc = kCoopSkipCall;
+        return;
+    }
+    if (id != call::kStartPlayerEvent || !s.game_miss || s.miss_counted) return;
+    // The game's own miss with both down: each player's life is spent once. The first player's comes off with the
+    // miss (the event's decLeft), so one goes back if they spent theirs going down alone; the second player's
+    // here. Game over only when both are out.
+    s.miss_counted = true;
+    std::uint32_t name = context->gpr[3];
+    {
+        SavedContext saved(context);
+        const int mario = static_cast<int>(guest.call(fn::kGetPlayerLeft));
+        const bool mario_out = who == 0u ? mario == 0 : s.down[0].out;
+        bool luigi_out = s.down[1].out;
+        if (who == 1u) {
+            luigi_out = s.second_lives == 0;
+            if (s.second_lives > 0) --s.second_lives;
+        }
+        if (who == 1u && s.down[0].down && !s.down[0].out) guest.call(fn::kIncPlayerLeft);  // spent alone already
+        if (!(mario_out && luigi_out) && static_cast<int>(guest.call(fn::kGetPlayerLeft)) == 0) {
+            // The game chose its game over from the first player's lives alone: a miss instead.
+            guest.call(fn::kIncPlayerLeft);
+            if (!s.mario_down_searched) {
+                s.mario_down_searched = true;
+                s.mario_down_name = guest.find_string("\x83\x7D\x83\x8A\x83\x49\x83\x5F\x83\x45\x83\x93");  // マリオダウン
+            }
+            if (s.mario_down_name != 0u) name = s.mario_down_name;
+        }
+        trace("the game's miss: lives %d and %d", static_cast<int>(guest.call(fn::kGetPlayerLeft)), s.second_lives);
+    }
+    context->gpr[3] = name;
+}
+
+// Puts a player who was down back in play at `there`: ordinary nerve, full health, visible, touchable. Called in
+// that player's turn (the game's player is them), so MR::setPlayerPosAndWait places them.
+void respawn_player(const Guest& guest, std::uint32_t actor_address, coop::Vec3 there, bool black_hole) {
+    guest.call(fn::kSetNerve, actor_address, kMarioActorNrvWait);
+    guest.set_u32(actor_address + 0x380u, 3u);  // MarioActor::mHealth
+    guest.set_u32(actor_address + 0x3E0u, 3u);  // MarioActor::mMaxHealth
+    guest.set_u8(actor_address + 0x39Du, 0u);   // the down's kind
+    // MarioActor::_B90, set by changeGameOverAnimation: while set the player stays in the down pose (the game
+    // never needed to clear it: a miss reloads the stage).
+    guest.set_u8(actor_address + 0xB90u, 0u);
+    guest.call(fn::kShowModel, actor_address);
+    guest.set_u8(actor_address + kMarioActorHidden, 0u);
+    guest.call(fn::kValidateHitSensors, actor_address);
+    Guest::Frame frame(guest);
+    guest.call(fn::kSetPlayerPosAndWait, frame.vec(0, there));
+    // Out of the down animation into the ordinary stand ("待機").
+    static std::uint32_t idle = 0u;
+    if (idle == 0u) idle = guest.find_string("\x91\xD2\x8B\x40");
+    if (idle != 0u) guest.call(fn::kChangeAnimationNonStop, actor_address, idle);  // as the down was started
+    if (!black_hole) return;
+    // A black hole's fall (MarioActor::exeGameOverBlackHole2) also shrank him and left its effect on him: full size,
+    // and the effect off. (He still stands twisted, his up vector the hole's, until he first moves.)
+    for (const std::uint32_t axis : {0x24u, 0x28u, 0x2Cu}) guest.set_f32(actor_address + axis, 1.0f);  // LiveActor::mScale
+    guest.call(fn::kStopEffectForce, actor_address, fn::kBlackHoleEffect);
+    // And the trail of his colour (red, green) drawn after him from the hole on: all his effects end (the fall
+    // reset his power-up; dust and the rest are emitted afresh as he moves).
+    guest.call(fn::kForceDeleteEffectAll, actor_address);
+}
+
+// ---- Drop in, drop out (docs/MULTIPLAYER.md "Drop in, drop out") ----
+// The second player is made in every stage. Absent, he sits out as a player out of lives does (down and out: hidden,
+// untouchable, carried beside the first, and everything that asks for the other brother passes him over), and his
+// HUD, pointer and controller are off. His controller's + drops him in beside the first; − held a second, or his
+// controller going away, drops him out.
+
+constexpr unsigned kLeaveHoldFrames = 60u;
+
+// The Players panel's Leave (coop_request_drop_out), from the render thread; and which brother joins, for its words.
+std::atomic<bool> s_drop_out_requested{false};
+std::atomic<bool> s_second_is_luigi{true};
+// When a stage last ran the second player's turn (coop_in_stage), steady milliseconds.
+std::atomic<long long> s_stage_seen_ms{0};
+
+void hide_second_hud(const Guest& guest, const State& s) {
+    for (const std::uint32_t layout : {s.second_meter, s.second_left}) {
+        if (plausible(layout) && (guest.call(fn::kIsLayoutDead, layout) & 0xFFu) == 0u) guest.call(fn::kLayoutKill, layout);
+    }
+}
+
+// Out of the game: as a player out of lives (update_down_player carries him along), at once.
+void sit_out(const Guest& guest, State& s) {
+    s.down[1] = coop::DownState{true, true, coop::kDownHideFrames + 1u};
+    if (!plausible(s.second)) return;
+    SavedContext saved(guest.context());
+    guest.call(fn::kHideModel, s.second);
+    guest.set_u8(s.second + kMarioActorHidden, 1u);
+    guest.call(fn::kInvalidateHitSensors, s.second);
+    hide_second_hud(guest, s);
+    s.pointers.capture_second = false;
+    if (s.pipe.rider == s.second) s.pipe = {};  // a pipe he waited in takes the first through alone
+    s.split.reset();
+    s.follow.reset();
+    s.layout.reset();
+    trace("second player sits out (drop in with + on a second controller)");
+}
+
+// In the second player's turn, after his move: + on his controller while he is out drops him in beside the first;
+// − held, or his controller disconnected, drops him out. Not while the first is down, a miss plays or the level
+// starts (a press then waits for the next).
+// Drops the second player in beside the first.
+void drop_in(const Guest& guest, State& s, coop::Vec3 first_position, coop::Vec3 first_side) {
+    s.present = true;
+    s.join_seen_connected = true;
+    s.leave_frames = 0u;
+    s.down[1] = {};
+    coop_set_second_present(true);
+    respawn_player(guest, s.second, first_position + first_side * 120.0f, false);
+    // His HUD back (sit_out killed it): the meter and the lives counter shown again, as a stage starts them.
+    if (plausible(s.second_meter)) {
+        guest.call(fn::kMeterRequests[0], s.second_meter);  // MeterLayout::requestActive
+        guest.call(fn::kShowLayout, s.second_meter);
+    }
+    if (plausible(s.second_left)) guest.call(fn::kPlayerLeftCalls[1], s.second_left);  // PlayerLeft::forceAppear
+    tint_second_meter(guest, s);
+    trace("second player drops in");
+}
+
+void update_presence(const Guest& guest, State& s, coop::Vec3 first_position, coop::Vec3 first_side) {
+    // Online the second player is the other PC's: in for the whole session, or (a live join) from the frame both
+    // PCs carry out NetCommand::Join on.
+    if (net_session_requested()) {
+        if (!s.present && s.drop_in_requested && !s.down[0].down && !s.game_miss && !s.level_start) {
+            s.drop_in_requested = false;
+            drop_in(guest, s, first_position, first_side);
+        }
+        // A live host whose joiner left (netplay_session.cpp live_host_frame): he sits out, the host plays on.
+        if (s.present && s_drop_out_requested.exchange(false, std::memory_order_relaxed)) {
+            s.present = false;
+            coop_set_second_present(false);
+            sit_out(guest, s);
+            trace("second player drops out (the other PC left)");
+        }
+        return;
+    }
+    s_second_is_luigi.store(coop::partner_of(s.own) == coop::Character::Luigi, std::memory_order_relaxed);
+    s_stage_seen_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch()).count(),
+                          std::memory_order_relaxed);
+    const bool leave_asked = s_drop_out_requested.exchange(false, std::memory_order_relaxed);
+    const coop::PartnerInput input = coop_partner_input();
+    const std::uint32_t buttons = input.connected ? input.buttons : 0u;
+    const std::uint32_t pressed = buttons & ~s.join_buttons;
+    s.join_buttons = buttons;
+    namespace b = coop::button;
+    if (!s.present) {
+        if ((pressed & b::kPlus) == 0u || s.down[0].down || s.game_miss || s.level_start) return;
+        drop_in(guest, s, first_position, first_side);
+        return;
+    }
+    s.leave_frames = (buttons & b::kMinus) != 0u ? s.leave_frames + 1u : 0u;
+    if (input.connected) s.join_seen_connected = true;
+    const bool unplugged = !input.connected && s.join_seen_connected;
+    if (s.leave_frames < kLeaveHoldFrames && !unplugged && !leave_asked) return;
+    s.present = false;
+    s.leave_frames = 0u;
+    s.join_seen_connected = false;
+    coop_set_second_present(false);
+    sit_out(guest, s);
+    trace("second player drops out (%s)", leave_asked ? "Players panel" : unplugged ? "controller gone" : "- held");
+}
+
+// The bosses' own actors (their vtables): Bowser, Bowser Jr. and his ship, Kamella, Topmaniac, Bugaboom, Dino
+// Piranha, Major Burrows, Kingfin, Bouldergeist, Kingfin's skeleton, Tarantox, Megaleg, Baron Brr, Fiery Dino Piranha.
+constexpr std::array<std::uint32_t, 15> kBossVtables = {
+    0x80557874u, 0x8059BEF0u, 0x8056BC84u, 0x8055292Cu, 0x805524ECu, 0x80553524u, 0x80554554u, 0x805566A8u,
+    0x8055ABF8u, 0x8055B204u, 0x8055CF8Cu, 0x8055D624u, 0x8055E65Cu, 0x80569074u, 0x80564EF0u};
+constexpr std::uint32_t kGetAllLiveActorGroup = 0x8015CDB8u;  // MR::getAllLiveActorGroup(): +0x10 count, +0x14 list
+constexpr float kBossNear = 8000.0f;          // a brother this near a boss is in its arena
+constexpr float kBossGatherDistance = 1500.0f;
+
+// The live boss nearest either brother within kBossNear, or 0; `first_in` the brother nearer it.
+std::uint32_t boss_near(const Guest& guest, const State& s, coop::Vec3 first, coop::Vec3 second, bool& first_in) {
+    SavedContext saved(guest.context());
+    const std::uint32_t group = guest.call(kGetAllLiveActorGroup);
+    if (!plausible(group)) return 0u;
+    const std::uint32_t count = std::min(guest.u32(group + 0x10u), 4096u);
+    const std::uint32_t list = guest.u32(group + 0x14u);
+    if (!plausible(list)) return 0u;
+    std::uint32_t found = 0u;
+    float best = kBossNear;
+    for (std::uint32_t i = 0u; i < count; ++i) {
+        const std::uint32_t object = guest.u32(list + 4u * i);
+        if (!plausible(object)) continue;
+        const std::uint32_t vtable = guest.u32(object);
+        if (std::find(kBossVtables.begin(), kBossVtables.end(), vtable) == kBossVtables.end()) continue;
+        const coop::Vec3 at = guest.vec(object + actor::kPosition);
+        const float to_first = coop::length(at - first);
+        const float to_second = coop::length(at - second);
+        const float nearest = std::min(to_first, to_second);
+        if (nearest < best) {
+            best = nearest;
+            found = object;
+            first_in = to_first <= to_second;
+        }
+    }
+    (void)s;
+    return found;
+}
+
+// In the second player's turn when a cutscene starts, or a boss's music (MR::startBossBGM): if a boss is by one
+// brother (its intro, its fight) and the other is away, the other is brought beside him into the arena. Other
+// cutscenes take nobody anywhere. Without a boss actor (a boss music call alone), the brother nearer the game
+// camera, which shows the boss, is the one in the arena.
+void gather_for_boss(const Guest& guest, State& s) {
+    if (!s.boss_gather) return;
+    const bool by_music = s.boss_music;
+    s.boss_gather = false;
+    s.boss_music = false;
+    if (s.down[0].down || s.down[1].down || !plausible(s.first) || !plausible(s.second)) return;
+    const coop::Vec3 first = guest.vec(s.first + actor::kPosition);
+    const coop::Vec3 second = guest.vec(s.second + actor::kPosition);
+    if (!(coop::length(first - second) > kBossGatherDistance)) return;
+    bool first_in = true;
+    if (boss_near(guest, s, first, second, first_in) == 0u) {
+        if (!by_music) return;
+        const std::uint32_t context = camera_context(guest);
+        if (context == 0u) return;
+        const coop::Vec3 eye = coop::pose_of(read_camera(guest, context).inverse).eye;
+        first_in = coop::length(eye - first) <= coop::length(eye - second);
+    }
+    const std::uint32_t host_mario = guest.u32((first_in ? s.first : s.second) + actor::kMario);
+    const coop::Vec3 side = plausible(host_mario) ? guest.vec(host_mario + kMarioSideVec) : coop::Vec3{1.0f, 0.0f, 0.0f};
+    const coop::Vec3 beside = (first_in ? first : second) + side * 120.0f;
+    place_player(guest, s, first_in ? 1u : 0u, beside);
+    if (first_in) s.held_at = beside;  // a cutscene's hold keeps him there, not where he was
+    trace("boss fight: the %s player brought into the arena", first_in ? "second" : "first");
+}
+
+// A player back from going down alone: the cameras his fall started end, so the game camera follows him again. A
+// black hole's: its own actor camera (BlackHole::tryStartDemoCamera) or the global "ブラックホール" event
+// (MR::startBlackHoleCamera). The game never ended them (a fall reloaded the stage).
+void end_down_cameras(const Guest& guest, std::uint32_t actor_address, bool forget_hole = true) {
+    SavedContext saved(guest.context());
+    const std::uint32_t hole = guest.u32(actor_address + kMarioActorBlackHole);
+    const std::uint32_t info = plausible(hole) ? guest.u32(hole + kBlackHoleCameraInfo) : 0u;
+    if (plausible(info)) guest.call(fn::kEndActorCamera, hole, info, 1u, 0xFFFFFFFFu);
+    static constexpr char kBlackHoleCamera[] = "\x83\x75\x83\x89\x83\x62\x83\x4E\x83\x7A\x81\x5B\x83\x8B";  // ブラックホール
+    Guest::Frame frame(guest);
+    const std::uint32_t name = frame.scratch();
+    for (std::uint32_t i = 0u; i < sizeof(kBlackHoleCamera); ++i) {
+        guest.set_u8(name + i, static_cast<std::uint8_t>(kBlackHoleCamera[i]));
+    }
+    guest.call(fn::kEndGlobalEventCamera, name, 0xFFFFFFFFu, 1u);
+    if (forget_hole && plausible(hole)) guest.set_u32(actor_address + kMarioActorBlackHole, 0u);
+}
+
+// Once a frame, in a player's own turn: the fallen player vanishes after their fall and comes back beside the
+// other in time; one out of lives is carried along hidden beside the other (the game camera follows the first).
+void update_down_player(const Guest& guest, State& s, unsigned who, coop::Vec3 partner_position,
+                        coop::Vec3 partner_side) {
+    coop::DownState& self = s.down[who];
+    if (!self.down) return;
+    const std::uint32_t actor_address = who == 0u ? s.first : s.second;
+    if (self.frames + 1u == coop::kDownHideFrames) {
+        guest.call(fn::kHideModel, actor_address);
+        guest.set_u8(actor_address + kMarioActorHidden, 1u);
+        guest.call(fn::kInvalidateHitSensors, actor_address);
+    }
+    const coop::Vec3 beside = partner_position + partner_side * 120.0f;
+    if (s.game_miss) return;  // the game's own miss reloads the stage: nobody comes back meanwhile
+    // The second player's black hole fall while the first plays on: the game camera is the first player's, so the
+    // black hole's camera (started from the hole's and the camera's own code, not his turn) never takes it.
+    if (plausible(guest.u32(actor_address + kMarioActorBlackHole))) {
+        if (who == 1u) end_down_cameras(guest, actor_address, false);
+        // The fall also put the HUD away (MR::deactivateDefaultGameLayout), for the one still playing too.
+        if ((guest.call(fn::kIsActiveDefaultGameLayout) & 0xFFu) == 0u) guest.call(fn::kActivateDefaultGameLayout);
+    }
+    if (coop::respawn_due(self, s.down[1u - who])) {
+        const bool black_hole = plausible(guest.u32(actor_address + kMarioActorBlackHole));
+        respawn_player(guest, actor_address, beside, black_hole);
+        end_down_cameras(guest, actor_address);
+        // Their life meter broke and hid itself at zero (MeterLayout::exeZeroMeterBreak): back with the player.
+        const std::uint32_t meter = who == 0u ? s.first_meter : s.second_meter;
+        if (plausible(meter)) guest.call(fn::kShowLayout, meter);
+        if (who == 1u) tint_second_meter(guest, s);
+        trace("%s back beside the other", who == 0u ? "first player" : "second player");
+        return;
+    }
+    if (self.out && self.frames > coop::kDownHideFrames) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, beside));
+    }
+}
+
+// The second player's life meter in their colour, set before each draw (its animations set the colours): the
+// HitPointMeter pictures tinted, the ring and the health pieces on land and in water. Their names are in guest
+// memory (State::ring_names) for MR::getPane.
+constexpr const char* kTintPanes[] = {"PicBase",    "PicBaseW",   "PicPoint1",  "PicPoint2",
+                                      "PicPoint3",  "PicPoint1W", "PicPoint2W", "PicPoint3W"};
+constexpr std::uint32_t kTintPaneCount = 8u;
+constexpr std::uint32_t kTintNameSize = 12u;
+void tint_second_meter(const Guest& guest, const State& s) {
+    if (!plausible(s.second_meter) || !plausible(s.ring_names)) return;
+    for (std::uint32_t i = 0; i < kTintPaneCount; ++i) {
+        const std::uint32_t pane = guest.call(fn::kGetPane, s.second_meter, s.ring_names + i * kTintNameSize);
+        if (!plausible(pane) || guest.u32(pane) != fn::kPictureVtable) continue;
+        for (std::uint32_t corner = 0; corner < 4u; ++corner) {
+            for (std::uint32_t channel = 0; channel < 3u; ++channel) {
+                guest.call(fn::kPictureSetVtxColorElement, pane, corner * 4u + channel, coop::kSecondMeterTint[channel]);
+            }
+        }
+    }
+}
+
+// The second player's life meter and lives counter, made once a stage beside the game's own: the same layouts
+// (HitPointMeter, and PlayerLeft in its Luigi look), fed with the second player's health and lives.
+void create_hud(const Guest& guest, State& s) {
+    if (s.second_meter != 0u || s.hud_tried) return;
+    s.hud_tried = true;  // one try a stage
+    const std::uint32_t holder = guest.call(fn::kGetLayoutHolder);
+    if (!plausible(holder)) return trace("second player's HUD not made: no layout holder");
+    const std::uint32_t mario_meter = guest.u32(holder + kHolderMarioMeter);
+    const std::uint32_t counters = guest.u32(holder + kHolderCounters);
+    if (!plausible(mario_meter) || !plausible(counters)) return trace("second player's HUD not made: no meter or counters");
+    s.first_meter = guest.u32(mario_meter + kMarioMeterHitPoint);
+    s.first_left = guest.u32(counters + kCountersPlayerLeft);
+    if (!plausible(s.first_meter) || !plausible(s.first_left)) return trace("second player's HUD not made: no game meter or lives counter");
+    if (s.hit_point_name == 0u) s.hit_point_name = guest.find_string("HitPointMeter");
+    const std::uint32_t watcher = guest.u32(kHeapMemoryWatcher);
+    const std::uint32_t heap = plausible(watcher) ? guest.u32(watcher + kSceneHeapNapa) : 0u;
+    if (s.hit_point_name == 0u || !plausible(heap)) return trace("second player's HUD not made: name %08X heap %08X", s.hit_point_name, heap);
+    ensure_second_lives(guest, s);
+    const std::uint32_t meter = guest.call(fn::kNewOnHeap, 0x50u, heap, 4u);
+    if (!plausible(meter)) return trace("second player's HUD not made: no memory");
+    for (std::uint32_t at = 0u; at < 0x50u; at += 4u) guest.set_u32(meter + at, 0u);
+    // Screen to layout positions, per axis (layout = scale * screen + offset), from two points: setTrans takes a
+    // screen position, and the game's HUD layouts stand at the layout origin.
+    {
+        Guest::Frame frame(guest);
+        guest.call(fn::kScreenToLayout, frame.scratch(), frame.vec(0, coop::Vec3{0.0f, 0.0f, 0.0f}));
+        const float x0 = guest.f32(frame.scratch());
+        const float y0 = guest.f32(frame.scratch() + 4u);
+        guest.call(fn::kScreenToLayout, frame.scratch(), frame.vec(1, coop::Vec3{100.0f, 100.0f, 0.0f}));
+        s.hud_scale_x = (guest.f32(frame.scratch()) - x0) / 100.0f;
+        s.hud_scale_y = (guest.f32(frame.scratch() + 4u) - y0) / 100.0f;
+        s.hud_offset_x = x0;
+        s.hud_offset_y = y0;
+        trace("HUD layout space: x = %.3f * screen %+.1f, y = %.3f * screen %+.1f", s.hud_scale_x, x0, s.hud_scale_y, y0);
+    }
+    guest.call(fn::kMeterLayoutCtor, meter, s.hit_point_name, s.hit_point_name);
+    guest.call(fn::kInitWithoutIter, meter);
+    guest.call(fn::kMeterInitCount, meter, 3u);
+    // MarioMeter activated the first player's meter as the stage began, before this one was made.
+    guest.call(fn::kMeterRequests[0], meter);  // MeterLayout::requestActive
+    // The second player's meter in their colour (tint_second_meter).
+    s.ring_names = guest.call(fn::kNewOnHeap, kTintPaneCount * kTintNameSize, heap, 4u);
+    if (plausible(s.ring_names)) {
+        for (std::uint32_t i = 0; i < kTintPaneCount; ++i) {
+            const std::string_view name = kTintPanes[i];
+            for (std::uint32_t c = 0; c < kTintNameSize; ++c) {
+                guest.set_u8(s.ring_names + i * kTintNameSize + c, c < name.size() ? static_cast<std::uint8_t>(name[c]) : 0u);
+            }
+        }
+    }
+    s.second_meter = meter;
+    s.second_meter_count = 3u;
+    const std::uint32_t left = guest.call(fn::kNewOnHeap, 0x30u, heap, 4u);
+    if (plausible(left)) {
+        for (std::uint32_t at = 0u; at < 0x30u; at += 4u) guest.set_u32(left + at, 0u);
+        guest.call(fn::kPlayerLeftCtor, left, s.hit_point_name);
+        // In the second player's character, so the counter shows their face; its MR::getPlayerLeft calls get the
+        // second player's lives (call::kGetPlayerLeft).
+        s.second_left = left;
+        guest.set_u8(kIsLuigi, character_byte(coop::partner_of(s.own)));
+        s.answer_partner = true;  // MR::isPlayerLuigi asks GameDataFunction::isDataMario
+        guest.call(fn::kInitWithoutIter, left);
+        s.answer_partner = false;
+        guest.set_u8(kIsLuigi, character_byte(s.own));
+    }
+    tint_second_meter(guest, s);
+    trace("second player's HUD: life meter %08X, lives counter %08X", s.second_meter, s.second_left);
+}
+
+// Once a frame: the second player's life meter shows their health, and their layouts are live while the
+// game's are (the game kills its HUD for a miss or a cutscene with a virtual call no hook sees).
+void update_hud_count(const Guest& guest, State& s) {
+    if (s.second_meter == 0u || !plausible(s.second)) return;
+    if (!s.present) return hide_second_hud(guest, s);  // sitting out (hot join)
+    const auto mirror_alive =[&](std::uint32_t mine, std::uint32_t theirs, std::uint32_t revive) {
+        if (!plausible(mine) || !plausible(theirs)) return;
+        const bool their_dead = (guest.call(fn::kIsLayoutDead, theirs) & 0xFFu) != 0u;
+        const bool my_dead = (guest.call(fn::kIsLayoutDead, mine) & 0xFFu) != 0u;
+        if (their_dead && !my_dead) guest.call(fn::kLayoutKill, mine);
+        if (!their_dead && my_dead) guest.call(revive, mine);
+    };
+    mirror_alive(s.second_meter, s.first_meter, fn::kMeterRequests[0]);    // MeterLayout::requestActive
+    mirror_alive(s.second_left, s.first_left, fn::kPlayerLeftCalls[0]);    // PlayerLeft::appear
+
+    const std::uint32_t health = s.down[1].down ? 0u : guest.u32(s.second + 0x380u);
+    if (health == s.second_meter_count || health > 8u) return;
+    s.second_meter_count = health;
+    guest.call(fn::kMeterSetCount, s.second_meter, health);
+}
+
+// Before the 2D draw: the second player's layouts stand beside the first's, wherever the game has moved those.
+void place_hud(const Guest& guest, const State& s) {
+    const auto follow = [&](std::uint32_t mine, std::uint32_t theirs, float dx, float dy) {
+        if (!plausible(mine) || !plausible(theirs)) return;
+        // The layout position (dx, dy) as the screen position setTrans takes.
+        if (std::fabs(s.hud_scale_x) < 1e-4f || std::fabs(s.hud_scale_y) < 1e-4f) return;
+        const coop::Vec3 at{(dx - s.hud_offset_x) / s.hud_scale_x, (dy - s.hud_offset_y) / s.hud_scale_y, 0.0f};
+        if (!std::isfinite(at.x) || !std::isfinite(at.y)) return;
+        Guest::Frame frame(guest);
+        guest.call(fn::kLayoutSetTrans, mine, frame.vec(0, at));
+    };
+    if (!s.present) {
+        // Sitting out (hot join): the first player's meter and counter where the game keeps them (its HUD layouts
+        // stand at the layout origin).
+        follow(s.first_meter, s.first_meter, 0.0f, 0.0f);
+        follow(s.first_left, s.first_left, 0.0f, 0.0f);
+        return;
+    }
+    follow(s.second_meter, s.first_meter, coop::kSecondMeterOffset[0], coop::kSecondMeterOffset[1]);
+    if (plausible(s.second_meter)) {
+        follow(s.first_meter, s.first_meter, coop::kFirstMeterOffset[0], coop::kFirstMeterOffset[1]);
+    }
+    // The meter's own animations (damage, recovery, breaking) set its colours as it moves: its tint after them.
+    tint_second_meter(guest, s);
+    follow(s.second_left, s.first_left, coop::kSecondLivesOffset[0], coop::kSecondLivesOffset[1]);
+    if (plausible(s.second_left)) {
+        follow(s.first_left, s.first_left, coop::kFirstLivesOffset[0], coop::kFirstLivesOffset[1]);
+    }
+}
+
+void move_second_player(const Guest& guest, State& s) {
+    SavedContext saved(guest.context());
+    const std::uint32_t holder = guest.call(fn::kGetMarioHolder);
+    const std::uint32_t player = plausible(holder) ? guest.call(fn::kGetMarioActor, holder) : 0u;
+    if (player != s.first) {
+        // A different scene's player: this second player went with its scene.
+        trace("player changed (%08X): second player dropped", player);
+        s.first = s.second = s.second_mario = 0u;
+        s.split.reset();
+        s.follow.reset();
+        return;
+    }
+    // The second player moves only here, in their turn: suspended in the game's movement list (NameObj::mFlags
+    // bit 0). A galaxy's start resumes the scene's suspended objects, him with them, and the game then moved him a
+    // second time each frame with the first player's controller (Luigi crept, tied to the keyboard, until the
+    // stage reloaded).
+    if (const std::uint8_t flags = guest.u8(s.second + kNameObjFlagsLow); (flags & kNameObjSuspended) == 0u) {
+        guest.set_u8(s.second + kNameObjFlagsLow, static_cast<std::uint8_t>((flags & ~kNameObjRequests) | kNameObjSuspended));
+        trace("second player was resumed in the game's movement list: suspended again");
+    }
+    const std::uint32_t pad_holder = guest.call(fn::kGetWPadHolder);
+    const bool pads = plausible(pad_holder) && plausible(guest.u32(pad_holder)) && plausible(guest.u32(pad_holder + 4u));
+
+    // While the game has the first player's controls (a dome's Pull Star, the flight into a galaxy) or a
+    // cutscene plays, the second player goes with them, beside them: those sequences change the map
+    // (collision, gravity) around the first player and dropped the second through the floor.
+    const std::uint32_t first_mario = guest.u32(s.first + actor::kMario);
+    // (A first player down has no control either, but the second plays on alone then.)
+    const bool first_held = !s.down[0].down && plausible(first_mario) &&
+                            (guest.call(fn::kIsInputDisable, first_mario) & 0xFFu) != 0u;
+    // A dome's galaxy selector puppets the first player in a time-keep demo (not MR::isDemoActive).
+    const bool demo = (guest.call(fn::kIsDemoActive) & 0xFFu) != 0u ||
+                      (guest.call(fn::kIsTimeKeepDemoActive) & 0xFFu) != 0u;
+    if (first_held != s.second_waiting_input || demo != s.second_waiting_demo) {
+        trace("second player %s (first player's controls held %d, cutscene %d)",
+              first_held || demo ? "waits" : "is free again", first_held ? 1 : 0, demo ? 1 : 0);
+        s.second_waiting_input = first_held;
+        s.second_waiting_demo = demo;
+    }
+    const coop::Vec3 first_now = guest.vec(s.first + actor::kPosition);
+    // A puppeted first player's actor sits at the origin (a dome's galaxy selector).
+    const bool first_parked = !(coop::length(first_now) >= 1.0f);
+    // Once a dome's galaxy selector has puppeted the first player, the rest of the scene is the flight into the
+    // chosen galaxy (the dome floor no longer holds the second player): travel with them until the next scene.
+    if (first_parked && !s.level_start) s.sticky_travel = true;
+    // A brother waiting inside a pipe, or a pipe taking the other through after him (pipe_holds): the other
+    // stays free to walk to it and go through himself, rather than wait and land beside the first.
+    if (s.pipe.follow_pipe != 0u && ++s.pipe.follow_frames > coop::kPipeFollowFrames) {
+        trace("pipe %08X: the other did not go in; given up", s.pipe.follow_pipe);
+        s.pipe.follow_pipe = s.pipe.follower = 0u;
+    }
+    if (s.second_scene != 0u) --s.second_scene;
+    if (s.talk.candidate_frames != 0u) --s.talk.candidate_frames;
+    const bool piping = s.pipe.waiting != 0u || s.pipe.follow_pipe != 0u || s.second_scene != 0u;
+    // Only the flight into a galaxy (from a dome) takes the second player along with the first. A cutscene, or
+    // the game holding the first player's controls, holds the second where he stands instead (he is not brought
+    // to the first, nor left there after it).
+    const bool first_travels = !piping && (first_parked || s.sticky_travel);
+    // (Not for the first player's launch star flight: a launch star takes only its rider, and the other plays on.)
+    const bool held_in_place = !piping && !first_travels && coop::second_player_waits(first_held, demo) &&
+                               !rides_star(guest, s.first);
+    const bool first_busy = first_travels || held_in_place;
+    // A level start lasts through the mission's opening camera and any event camera of the first player's
+    // arrival, not just until they look controllable.
+    const bool arriving = s.level_start && ((guest.call(fn::kIsOpeningCamera) & 0xFFu) != 0u ||
+                                            (guest.call(fn::kIsEventCameraActive) & 0xFFu) != 0u);
+    s.controllable_frames = first_busy || arriving ? 0u : s.controllable_frames + 1u;
+    bool land_beside = false;
+    if (s.level_start && s.controllable_frames >= coop::kLevelStartSettleFrames) {
+        // The first player has landed and has control: the second joins them.
+        s.level_start = false;
+        land_beside = true;
+        trace("level start over: the second player joins the first");
+    }
+    s.travelling = !piping && coop::keep_travelling(s.travelling, s.level_start || first_travels, s.controllable_frames);
+    const bool beside_first = s.travelling;
+    // The first player on a vehicle (Star Ball, manta ray): the second rides along with him, unseen and
+    // untouchable at his side, and gets off beside him when the ride ends.
+    const bool riding_along = !s.down[0].down && !s.down[1].down && !s.level_start && ridden_vehicle(guest, s.first) != 0u;
+    const bool ride_over = s.riding_along && !riding_along;
+    if (riding_along != s.riding_along) {
+        trace(riding_along ? "the first player rides a vehicle: the second rides along" : "ride over: the second gets off");
+        s.riding_along = riding_along;
+    }
+    star_get_watch(guest, s);
+    if (demo && !s.demo_before && !s.level_start) s.boss_gather = true;  // a cutscene starts: a boss's? (gather_for_boss)
+    s.demo_before = demo;
+    const bool hold_here = held_in_place && !beside_first && !riding_along && !s.down[1].down && s.star_get == 0u;
+    if (hold_here && !s.held_here) s.held_at = guest.vec(s.second + actor::kPosition);
+    s.held_here = hold_here;
+
+    const coop::Character partner = coop::partner_of(s.own);
+    s.moving_second = true;
+    guest.set_u8(kIsLuigi, character_byte(partner));
+    guest.call(fn::kSetMarioActor, holder, s.second);
+    if (pads) swap_pads(guest, pad_holder);
+    // While split, the second player's stick is relative to their own camera: the player code reads the
+    // camera's directions from CameraContext.
+    const std::uint32_t camera_ctx =
+        s.split.amount() > 0.0f && s.follow.started() && !s.event_second ? camera_context(guest) : 0u;
+    const coop::CameraMatrices first_camera = camera_ctx != 0u ? read_camera(guest, camera_ctx) : coop::CameraMatrices{};
+    if (camera_ctx != 0u) write_camera(guest, camera_ctx, s.camera2);
+    release_dropped_bind(guest, s);
+    guest.call(fn::kMarioActorMovement, s.second);
+    if (camera_ctx != 0u) write_camera(guest, camera_ctx, first_camera);
+    if (s.agent_mode >= 0) {
+        guest.call(fn::kSetPlayerMode, s.second, static_cast<std::uint32_t>(s.agent_mode), 1u);
+        trace("agent: second player's power-up %d", s.agent_mode);
+        s.agent_mode = -1;
+    }
+    if (s.agent_teleport) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, s.agent_position));
+        s.agent_teleport = false;
+    }
+    // The second player down: they vanish, come back beside the first, or (out of lives) go along hidden.
+    if (plausible(first_mario)) {
+        update_presence(guest, s, first_now, guest.vec(first_mario + kMarioSideVec));
+        gather_for_boss(guest, s);
+        star_get_update(guest, s, 1u);
+        update_down_player(guest, s, 1u, first_now, guest.vec(first_mario + kMarioSideVec));
+    }
+    // While the first player flies in at a level start, the second waits unseen and untouchable, out of the
+    // camera's picture; they appear beside the first as they land.
+    // Riding along on the first player's vehicle, the same.
+    const bool hidden = s.level_start || riding_along;
+    if (hidden != s.second_hidden_for_start && !s.down[1].down) {
+        s.second_hidden_for_start = hidden;
+        guest.call(hidden ? fn::kHideModel : fn::kShowModel, s.second);
+        guest.set_u8(s.second + kMarioActorHidden, hidden ? 1u : 0u);
+        guest.call(hidden ? fn::kInvalidateHitSensors : fn::kValidateHitSensors, s.second);
+    }
+    // Out of the picture: down, waiting for the first player at a level start (still parked meanwhile), or riding
+    // along.
+    const bool second_down = s.down[1].down || s.level_start || riding_along;
+    if ((beside_first || land_beside) && plausible(first_mario) && !s.down[1].down) {
+        // Still the second player's turn: MR::setPlayerPos moves the scene's player. A puppeted first player's
+        // actor sits at the origin, and at a level start the first is still flying in: the second player then
+        // stays where they were.
+        const coop::Vec3 there = s.level_start ? s.parked_position
+                                               : coop::travel_position(first_now, guest.vec(first_mario + kMarioSideVec),
+                                                                       s.parked_position);
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, there));
+    } else if (riding_along) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, first_now));
+    } else if (ride_over && plausible(first_mario)) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, coop::travel_position(first_now, guest.vec(first_mario + kMarioSideVec),
+                                                                         first_now)));
+    } else if (hold_here) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, s.held_at));
+    }
+
+    const coop::Vec3 first_position = guest.vec(s.first + actor::kPosition);
+    const coop::Vec3 second_actual = guest.vec(s.second + actor::kPosition);
+    // A player down is not in the picture: the camera and the split follow the one still playing.
+    const coop::Vec3 second_position = second_down ? first_position : second_actual;
+    if (!beside_first) s.parked_position = second_actual;
+    coop::CameraShare share{};
+    bool too_far = false;
+    if (split_screen_enabled()) {
+        // The camera looks at the midpoint until the split and eases to the first player as it splits.
+        const coop::SplitTuning tuning{};
+        const float distance = coop::length(second_position - first_position);
+        // While the second player's camera event plays the game camera is theirs, so it cannot tell whether
+        // both fit one picture: the screen stays as it is until the event ends.
+        if (s.level_start || s.star_get != 0u) {
+            // The level's intro and the first player's flight in, and the star get: one screen, the game's camera.
+            s.split.reset();
+        } else if (online_views()) {
+            // Online: each PC shows its own player's camera full screen (begin_split_draw), always.
+            s.split.hold_full();
+        } else if (s.solo_event) {
+            // One brother's event: split, his half the event's camera, the other's his own (as far apart).
+            s.split.update(10.0f, distance, tuning);
+        } else if (!s.event_second) {
+            s.split.update(shared_extent(guest, s, first_position, second_position), distance, tuning);
+        }
+        if (s.split.amount() == 0.0f) {
+            s.follow.reset();
+            s.layout.reset();
+        }
+        if (std::isfinite(distance)) share.offset = (second_position - first_position) * (0.5f * (1.0f - s.split.eased()));
+        // No tether while split: each brother may explore the whole level alone (only a lost position brings
+        // the second back).
+        too_far = !std::isfinite(distance);
+    } else {
+        share = coop::shared_camera(first_position, second_position);
+        too_far = share.out_of_range;
+    }
+    // The second player at a door or dome the first player is not at: swap places (MR::setPlayerPos moves the
+    // scene's player, the second now and the first below).
+    bool swap_places = false;
+    if (beside_first || second_down || s.down[0].down) {
+        // Travelling with the first player: no doors, and no bringing back (the first may be parked); nor for
+        // a player down.
+        s.leash.reset();
+    } else if (s.entrance_wait > 0u) {
+        --s.entrance_wait;
+    } else {
+        if (!s.entrance_searched) {
+            s.entrance_searched = true;
+            s.entrance_name = guest.find_string("AstroChangeStageCube");
+            trace("entrance area name at %08X", s.entrance_name);
+        }
+        if (s.entrance_name != 0u) {
+            Guest::Frame frame(guest);
+            const bool second_in = (guest.call(fn::kIsInAreaObj, s.entrance_name, frame.vec(0, second_position)) & 0xFFu) != 0u;
+            const bool first_in = second_in &&
+                (guest.call(fn::kIsInAreaObj, s.entrance_name, frame.vec(1, first_position)) & 0xFFu) != 0u;
+            swap_places = coop::swap_for_entrance(second_in, first_in);
+        }
+    }
+    if (swap_places) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, first_position));
+        s.entrance_wait = 120u;
+        trace("second player at an entrance: the players swap places");
+    } else if (!piping && !beside_first && s.leash.update(too_far, coop::CameraTuning{}.warp_frames)) {
+        // Still the second player's turn: MR::setPlayerPos moves the scene's player.
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, first_position));
+        trace("second player brought back to the first");
+    }
+
+    if (pads) swap_pads(guest, pad_holder);
+    guest.call(fn::kSetMarioActor, holder, s.first);
+    guest.set_u8(kIsLuigi, character_byte(s.own));
+    s.moving_second = false;
+    if (swap_places) {
+        Guest::Frame frame(guest);
+        guest.call(fn::kSetPlayerPos, frame.vec(0, second_position));
+    }
+    star_get_update(guest, s, 0u);  // the first player beside the star the second took (his turn: the game's)
+    // A launch star takes only its rider: the other brother stays where he is (split screen shows both).
+    const bool second_rides = !second_down && !s.down[0].down && rides_star(guest, s.second);
+    if (second_rides != s.second_riding) {
+        s.second_riding = second_rides;
+        trace(second_rides ? "second player on a launch star" : "launch star flight over");
+    }
+    // The first player down, in their turn (the game's player is theirs again).
+    if (plausible(s.second_mario)) {
+        update_down_player(guest, s, 0u, second_actual, guest.vec(s.second_mario + kMarioSideVec));
+    }
+    create_hud(guest, s);
+    update_hud_count(guest, s);
+
+    keep_camera_on_first_player(guest, s);
+    if (!s.down[0].down && !second_down) bump_players(guest, s, first_position, second_position);
+    if (s.split.amount() > 0.0f) update_second_camera(guest, s, first_position, second_position);
+    remember_first_camera(guest, s);
+
+    // The game camera looks at the first player's camera point; move it towards the second player.
+    const coop::Vec3 look = guest.vec(s.first + actor::kCameraTrans);
+    guest.set_vec(s.first + actor::kCameraTrans, look + share.offset);
+
+    if (trace_enabled() && (++s.frames % 120u) == 0u) {
+        trace("first (%.0f %.0f %.0f) second (%.0f %.0f %.0f) camera offset (%.0f %.0f %.0f)%s", first_position.x,
+              first_position.y, first_position.z, second_position.x, second_position.y, second_position.z,
+              share.offset.x, share.offset.y, share.offset.z, too_far ? " out of range" : "");
+        if (s.split.amount() > 0.0f) {
+            trace("split %.2f, line at %.0f degrees", s.split.amount(), s.layout.angle() * 57.2958f);
+        }
+    }
+}
+
+// The lens of a player's half: the game's, except the first player's while their view is held (the game's
+// lens is the other player's event camera's then) and as it eases back, and the second player's while their
+// half waits for the event camera.
+std::array<float, 16> half_lens(const State& s, bool second) {
+    if (!second && s.hold.active()) return s.hold.projection();
+    if (second && s.second_awaits_event && s.hold.active()) return s.hold.projection();
+    return s.handover.projection(s.projection, second);
+}
+
+// The projection of a player's half: centred on the middle of their side of the line as the split eases in.
+std::array<float, 16> half_projection(const State& s, bool second) {
+    std::array<float, 16> projection = half_lens(s, second);
+    if (online_views()) return projection;  // each view full screen, the same on both PCs
+    const std::array<float, 2> centre = s.layout.centre(second, s.screen_width, s.screen_height);
+    coop::split_projection(projection, centre[0], centre[1], s.split.eased());
+    return projection;
+}
+
+// While the second player's camera event plays, the halves swap cameras: the game camera (theirs) draws
+// first, in their half, and the first player's held view second.
+bool events_swapped(const State& s) { return s.event_second && s.hold.active(); }
+// Whether the pass being drawn is the second player's half.
+bool second_half(const State& s) { return (s.pass == 2u) != events_swapped(s); }
+
+// Before GameScene::draw3D: when split, the first pass, with the game camera: the first player's half (or
+// the second's while their camera event plays). The other camera is blended in from the game's as the
+// split eases in; the renderer keeps each pass to its side of the line.
+void begin_split_draw(const Guest& guest, State& s) {
+    s.pass = 0u;
+    s.pointers.split = false;
+    if (!split_screen_enabled() || s.split.amount() == 0.0f || !plausible(s.second) || !plausible(s.second_mario) ||
+        !plausible(s.first) || !s.follow.started() || !s.layout.started()) {
+        return;
+    }
+    const std::uint32_t context = camera_context(guest);
+    if (context == 0u) return;
+    s.camera1 = read_camera(guest, context);
+    s.projection = read_floats<16>(guest, context + camera::kProjection);
+    if (!finite(s.camera1.view) || !finite(s.camera1.inverse)) return;
+    const float fovy = guest.f32(context + camera::kFovy);
+    const float aspect = guest.f32(context + camera::kAspect);
+    const float far_z = guest.f32(context + camera::kFarZ);
+    if (std::isfinite(fovy) && fovy > 1.0f && fovy < 170.0f) s.fovy = fovy;
+    if (std::isfinite(aspect) && aspect > 0.1f) s.aspect = aspect;
+    if (std::isfinite(far_z) && far_z > 1.0f) s.far_z = far_z;
+    {
+        SavedContext saved(guest.context());
+        const auto width = static_cast<float>(guest.call(fn::kGetFrameBufferWidth) & 0xFFFFu);
+        const auto height = static_cast<float>(guest.call(fn::kGetFrameBufferHeight) & 0xFFFFu);
+        if (width >= 320.0f && width <= 1024.0f) s.screen_width = width;
+        if (height >= 240.0f && height <= 640.0f) s.screen_height = height;
+    }
+    const coop::Vec3 first_position = guest.vec(s.first + actor::kPosition);
+    const coop::Vec3 second_position = guest.vec(s.second + actor::kPosition);
+    if (!events_swapped(s)) {
+        // A game camera set up at the second player's warp while aiming at the first player is not the first
+        // player's: their half holds its last good view until the game camera is back with them. Not while the
+        // first player is in his own flight: the game camera, lagging behind near the second player, is his.
+        if (!s.level_start && !s.first_event &&
+            coop::camera_is_second_players(coop::pose_of(s.camera1.inverse).eye, first_position, second_position)) {
+            if (!s.hold.active()) {
+                s.hold.start(s.last_camera1, s.last_origin, s.last_projection);
+                trace("the game camera is at the second player: the first player's half holds");
+            } else {
+                s.hold.rearm();
+            }
+        } else if (!s.hold.active() && !s.handover.active()) {
+            s.last_camera1 = s.camera1;
+            s.last_projection = s.projection;
+            s.last_origin = first_position;
+        }
+    }
+    // Pans from the first player's view at the split to the second player's own.
+    s.camera2 = events_swapped(s) ? first_own_view(s, first_position)
+                                  : coop::blend_cameras(s.camera1, s.follow_view, s.split.eased());
+    if (!events_swapped(s) && s.second_handover.active()) {
+        s.camera2 = s.second_handover.camera(s.camera2, true);
+        s.second_handover.advance();
+    }
+
+    s.pass = 1u;
+    s.draw_scene = guest.context()->gpr[3];
+    // The game camera's half draws with it, except while it changes hands: after the second player's event
+    // the first player's half holds its view until the game camera is back, then eases into it; at the start
+    // of the event the second player's half eases from its own camera into the event's.
+    coop::CameraMatrices game_half = s.camera1;
+    if (events_swapped(s) && s.second_awaits_event) {
+        const coop::Vec3 eye = coop::pose_of(s.camera1.inverse).eye;
+        if (coop::length(eye - second_position) < coop::length(eye - first_position)) {
+            const std::array<float, 16> lens = s.hold.projection();
+            s.handover.start(s.follow_view, true, &lens);
+            s.second_awaits_event = false;
+            trace("the event camera has reached the second player");
+        } else {
+            game_half = s.follow_view;
+        }
+    }
+    if (s.hold.active() && !events_swapped(s)) {
+        // The first player's half, held through the second player's flight and until the game camera is back.
+        const coop::CameraMatrices held = first_own_view(s, first_position);
+        // His half has no reason to give up on the game camera's slow way back: it keeps waiting while that is
+        // still far from him.
+        if (s.hold.returning() && !s.first_event &&
+            coop::length(coop::pose_of(s.camera1.inverse).eye - first_position) > kOwnCameraBackDistance) {
+            s.hold.rearm();
+        }
+        if (s.first_event) {
+            // His own event (a launch star he rides): the game camera is his, wherever it is.
+            const std::array<float, 16> held_lens = s.hold.projection();
+            s.hold.reset();
+            s.handover.start(held, false, &held_lens);
+            trace("the first player's own event: his half takes the game camera");
+        } else if (s.hold.returning() && s.hold.back(s.camera1, first_position)) {
+            const std::array<float, 16> held_lens = s.hold.projection();
+            s.handover.start(held, false, &held_lens);
+            trace("the game camera is back with the first player");
+        } else {
+            game_half = held;
+        }
+    }
+    if (s.handover.active()) {
+        game_half = s.handover.camera(game_half, second_half(s));
+        s.handover.advance();
+    }
+    if (game_half.view != s.camera1.view) {
+        SavedContext saved(guest.context());
+        write_camera(guest, context, game_half);
+        guest.call(fn::kLoadViewMtx);
+        guest.call(fn::kCalcViewAndEntry);
+    }
+    s.second_view = second_half(s) ? game_half : s.camera2;
+    if (s.camera_trace_frames > 0u && trace_enabled()) {
+        --s.camera_trace_frames;
+        const coop::Vec3 game_eye = coop::pose_of(s.camera1.inverse).eye;
+        const coop::Vec3 drawn_eye = coop::pose_of(game_half.inverse).eye;
+        const coop::Vec3 other_eye = coop::pose_of(s.camera2.inverse).eye;
+        const coop::Vec3 drawn_fwd = coop::pose_of(game_half.inverse).forward;
+        const coop::Vec3 other_fwd = coop::pose_of(s.camera2.inverse).forward;
+        trace("cam f%u pass1=%s ev=%d hold=%d/%d ho=%d ho2=%d line=%.0f game(%.0f %.0f %.0f) "
+              "pass1(%.0f %.0f %.0f >%.2f %.2f %.2f) pass2(%.0f %.0f %.0f >%.2f %.2f %.2f) fov00=%.3f",
+              120u - s.camera_trace_frames, second_half(s) ? "second" : "first", s.event_second ? 1 : 0,
+              s.hold.active() ? 1 : 0, s.hold.returning() ? 1 : 0, s.handover.active() ? 1 : 0,
+              s.second_handover.active() ? 1 : 0, s.layout.angle() * 57.2958f, game_eye.x, game_eye.y, game_eye.z,
+              drawn_eye.x, drawn_eye.y, drawn_eye.z, drawn_fwd.x, drawn_fwd.y, drawn_fwd.z, other_eye.x, other_eye.y,
+              other_eye.z, other_fwd.x, other_fwd.y, other_fwd.z, s.projection[0]);
+    }
+    write_floats(guest, context + camera::kProjection, half_projection(s, second_half(s)));
+    s.pointers.camera[second_half(s) ? 1u : 0u] = game_half;
+    s.pointers.projection[second_half(s) ? 1u : 0u] = half_projection(s, second_half(s));
+    // The renderer keeps EFB copies per view: per player, so each half's effects see only its own picture
+    // whichever pass draws it.
+    send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), second_half(s) ? 2u : 1u);
+}
+
+// After the first half: the second, with the second player's camera, then the first player's camera back for
+// the 2D layer and the next frame.
+void finish_split_draw(const Guest& guest, State& s) {
+    if (s.pass != 1u) return;
+    SavedContext saved(guest.context());
+    const std::uint32_t context = camera_context(guest);
+    if (context == 0u) {
+        s.pass = 0u;
+        return;
+    }
+    s.pass = 2u;
+    write_camera(guest, context, s.camera2);
+    write_floats(guest, context + camera::kProjection, half_projection(s, second_half(s)));
+    s.pointers.camera[second_half(s) ? 1u : 0u] = s.camera2;
+    s.pointers.projection[second_half(s) ? 1u : 0u] = half_projection(s, second_half(s));
+    s.pointers.split = true;
+    guest.call(fn::kLoadViewMtx);
+    guest.call(fn::kCalcViewAndEntry);
+    send_split_clip(s.layout.plane(second_half(s), s.screen_width, s.screen_height), second_half(s) ? 2u : 1u);
+    guest.call(fn::kGameSceneDraw3D, s.draw_scene);
+    // The whole screen again for the 2D layer (HUD), and the black line between the halves, fading in with
+    // the split.
+    const std::array<float, 3> line = s.layout.plane(true, s.screen_width, s.screen_height);
+    send_split_clip({0.0f, 0.0f, 0.0f}, 0u, {line[0], line[1], line[2], s.split.eased()});
+    write_camera(guest, context, s.camera1);
+    write_floats(guest, context + camera::kProjection, s.projection);
+    guest.call(fn::kLoadViewMtx);
+    s.pass = 0u;
+    guest.call(fn::kSetDefaultViewportAndScissor);
+}
+
+double fpr(const PpcContext* context, unsigned index) { return std::bit_cast<double>(context->fpr_bits[index]); }
+
+// After ShadowController::updateFarClipping: a shadow past the far clip from the first player's camera is
+// drawn again if it is near enough to the second player's, so their side of a split screen has shadows.
+void keep_second_player_shadow(const Guest& guest, State& s) {
+    const std::uint32_t controller = s.shadow_controller;
+    s.shadow_controller = 0u;
+    if (!plausible(controller) || guest.u8(controller + kShadowFarClipped) == 0u) return;
+    SavedContext saved(guest.context());
+    Guest::Frame frame(guest);
+    const std::uint32_t drop = frame.vec(0, {});
+    guest.call(fn::kShadowGetDropPos, controller, drop);
+    const coop::Vec3 position = guest.vec(drop);
+    const float depth = -coop::transform_point(s.camera2.view, position).z;
+    if (std::isfinite(depth) && depth < s.shadow_clip) guest.set_u8(controller + kShadowFarClipped, 0u);
+}
+
+void fill_partner_kpad(const Guest& guest, State& s) {
+    if (!plausible(s.kpad_buffer)) return;
+    // Sitting out (hot join): a still Remote, and not a connected one (below), so no pointer of his shows.
+    const coop::KpadStatusBytes bytes = s.kpad.next(s.present ? coop_partner_input() : coop::PartnerInput{});
+    for (std::size_t at = 0; at < bytes.size(); at += 4u) {
+        guest.set_u32(s.kpad_buffer + static_cast<std::uint32_t>(at),
+                      (static_cast<std::uint32_t>(bytes[at]) << 24u) | (static_cast<std::uint32_t>(bytes[at + 1u]) << 16u) |
+                          (static_cast<std::uint32_t>(bytes[at + 2u]) << 8u) | bytes[at + 3u]);
+    }
+    // The orange Star Pointer (port 1) moves, shows and collects only on a connected Remote: WPad::mIsConnected
+    // (+0x35, MR::isConnectedWPad), which only WPAD's connect callback sets. Both of WPadHolder's pads, as
+    // swap_pads may have them either way round.
+    const std::uint32_t holder = guest.call(fn::kGetWPadHolder);
+    for (std::uint32_t at = 0u; plausible(holder) && at < 8u; at += 4u) {
+        const std::uint32_t pad = guest.u32(holder + at);
+        if (plausible(pad)) guest.set_u8(pad + 0x35u, at == 0u || s.present ? 1u : 0u);
+    }
+    guest.context()->gpr[3] = 1u;  // one status read (after the call above, which returns in r3)
+}
+
+}  // namespace
+
+// JKRSolidHeap::allocFromHead/allocFromTail(this, size, align): an allocation the stage's MEM1 heap cannot hold
+// comes from its MEM2 heap (coop::scene_heap_overflows). Solid heaps are freed whole with the stage, so the
+// borrowed block goes when the MEM2 heap does. With or without co-op: it only replaces a crash.
+void borrow_from_mem2(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
+                      std::uint32_t guest_pc) {
+    const Guest guest(context, memory, services, guest_pc);
+    const std::uint32_t heap = context->gpr[3];
+    const std::uint32_t watcher = guest.u32(kHeapMemoryWatcher);
+    if (heap == 0u || !plausible(watcher) || heap != guest.u32(watcher + kSceneHeapNapa)) return;
+    const std::uint32_t mem2 = guest.u32(watcher + kSceneHeapGddr);
+    if (mem2 < 0x90000000u || mem2 >= 0x94000000u) return;
+    const std::uint32_t size = context->gpr[4];
+    const auto align = static_cast<std::uint32_t>(std::abs(static_cast<std::int32_t>(context->gpr[5])));
+    const std::uint32_t mem1_free = guest.u32(heap + kSolidHeapFreeSize);
+    const std::uint32_t mem2_free = guest.u32(mem2 + kSolidHeapFreeSize);
+    if (!coop::scene_heap_overflows(mem1_free, mem2_free, size, align)) return;
+    context->gpr[3] = mem2;
+    static unsigned logged = 0u;
+    if (logged++ < 8u) {
+        std::fprintf(stderr, "[heap] the stage's MEM1 heap is full (%u bytes left): %u bytes from its MEM2 heap (%u KB left)\n",
+                     mem1_free, size, mem2_free / 1024u);
+    }
+}
+
+// The save-select screen's switches (docs/MULTIPLAYER.md), read from the first player's controller: Wii 1 turns
+// co-op on or off for the save about to be chosen, + the Odyssey moveset (on release, and only pressed alone: - and
+// + together open the settings). The renderer draws the panel; co-op stays as chosen once a save loads.
+struct FileSelectMenu {
+    std::uint32_t kpad_buffer = 0u;  // KPADRead's status buffer for channel 0, between its before and after hooks
+    std::uint32_t hold = 0u;
+    bool plus_alone = false;
+    bool shown = false;
+};
+FileSelectMenu s_menu;
+
+void file_select_frame(const Guest& guest, std::uint32_t samples) {
+    const std::uint32_t system = guest.u32(kGameSystem);
+    const std::uint32_t controller = plausible(system) ? guest.u32(system + 0x24u) : 0u;
+    const bool shown = plausible(controller) && guest.string(controller + 0x00u, 31u) == "Game" &&
+                       guest.string(controller + 0x20u, 31u) == "FileSelect";
+    if (shown != s_menu.shown) {
+        s_menu.shown = shown;
+        set_file_select_options_shown(shown);
+        s_menu.hold = 0u;
+        s_menu.plus_alone = false;
+    }
+    if (!shown) return;
+    RuntimeSettings settings = get_runtime_settings();
+    if (!coop_enabled() != !settings.coop) set_coop_session(settings.coop);
+    // Hot join: the Multiplayer switch says whether the save starts with the second player in the game.
+    if (coop_hot_join()) {
+        State& s = state();
+        s.present = settings.coop && !net_live();
+        s.present_known = true;
+        coop_set_second_present(s.present);
+    }
+    if (samples == 0u || samples > 0x10u) return;
+    const std::uint32_t hold = guest.u32(s_menu.kpad_buffer);  // KPADStatus::hold, the newest sample
+    const std::uint32_t pressed = hold & ~s_menu.hold;
+    const std::uint32_t released = s_menu.hold & ~hold;
+    s_menu.hold = hold;
+    namespace b = coop::button;
+    bool changed = false;
+    if ((pressed & b::kOne) != 0u) {
+        settings.coop = !settings.coop;
+        set_coop_session(settings.coop);
+        changed = true;
+        trace("save select: multiplayer %s", settings.coop ? "on" : "off");
+    }
+    if ((pressed & b::kPlus) != 0u) s_menu.plus_alone = (hold & b::kMinus) == 0u;
+    if ((hold & b::kMinus) != 0u) s_menu.plus_alone = false;
+    if ((released & b::kPlus) != 0u && s_menu.plus_alone) {
+        s_menu.plus_alone = false;
+        settings.moveset.enabled = !settings.moveset.enabled;
+        changed = true;
+        trace("save select: odyssey moves %s", settings.moveset.enabled ? "on" : "off");
+    }
+    if (!changed) return;
+    set_runtime_settings(settings);
+    if (!save_runtime_settings_to_file()) trace("save select: the settings file could not be written");
+}
+
+void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
+                      std::uint32_t guest_pc) {
+    if (id == call::kSolidHeapAllocHead || id == call::kSolidHeapAllocTail) {
+        if (services != nullptr) borrow_from_mem2(context, memory, services, guest_pc);
+        return;
+    }
+    if (id == call::kKpadRead) netplay_kpad_before(context, memory, guest_pc);
+    // KPADRead(chan, ...): the agent's frame, at the first player's controller read.
+    if (id == call::kKpadRead && context->gpr[3] == 0u && services != nullptr && services->call_guest != nullptr) {
+        agent_frame(context, memory, services, guest_pc);
+        rejoin_frame(context, memory, services, guest_pc);
+        s_menu.kpad_buffer = context->gpr[4];
+    }
+    if (id == call::kMarioActorInit2 && services != nullptr && services->call_guest != nullptr) {
+        // With or without co-op: Luigi's animations (anime::first_player_animations) as well as the second player.
+        State& s = state();
+        if (s.init2_depth < s.init2_actors.size()) s.init2_actors[s.init2_depth] = context->gpr[3];
+        ++s.init2_depth;
+        return;
+    }
+    if (services == nullptr || services->call_guest == nullptr || !coop_available()) return;
+    State& s = state();
+    (void)memory;
+    (void)guest_pc;
+    if (id >= call::kStartPlayerEvent && id <= call::kClearBgmQueue) {
+        on_game_over_call(id, Guest(context, memory, services, guest_pc), s, context, guest_pc);
+        return;
+    }
+    if (id == call::kMarioInit2D || id == call::kMarioUpdate2D) {
+        // The second player's 2D updates write the one life meter (theirs is fed by update_hud_count).
+        if (plausible(s.second) && context->gpr[3] == s.second) context->pc = kCoopSkipCall;
+        return;
+    }
+    if (id >= call::kMeterRequestFirst && id <= call::kPlayerLeftLast) {
+        s.hud_call_this = context->gpr[3];
+        return;
+    }
+    if (id >= call::kStarStepFirst && id <= call::kStarStepLast) {
+        // A launch star the second player rides: its step runs with them as the game's player (its animations,
+        // its end of the ride and its jump off are the rider's).
+        const Guest guest(context, memory, services, guest_pc);
+        const std::uint32_t star = context->gpr[3];
+        if (!s.moving_second && plausible(s.second) && plausible(star) && guest.u32(star + kStarBindActor) == s.second) {
+            SavedContext saved(context);
+            set_game_player(guest, s, true);
+            if (s.star_swapped == 0u && s.star_traced != star) {
+                s.star_traced = star;
+                trace("launch star %08X: the second player rides it", star);
+            }
+            s.star_swapped = star;
+        }
+        return;
+    }
+    if (id >= call::kPipeStepFirst && id <= call::kPipeStepLast) {
+        // A pipe step: the first brother in waits inside for the other (exePlayerIn skipped); the second
+        // player's run with him as the game's player, as launch stars do.
+        const Guest guest(context, memory, services, guest_pc);
+        const std::uint32_t pipe = context->gpr[3];
+        if (!plausible(pipe) || !plausible(s.first) || !plausible(s.second)) return;
+        const std::uint32_t rider = guest.u32(pipe + kPipeRider);
+        if (pipe != s.pipe_traced || id != s.pipe_traced_step) {
+            s.pipe_traced = pipe;
+            s.pipe_traced_step = id;
+            trace("pipe %08X step %u, rider %s", pipe, id - call::kPipeStepFirst,
+                  rider == s.first ? "first" : rider == s.second ? "second" : "none");
+        }
+        if (id == call::kPipePlayerOut) s.pipe_out = pipe;  // for after it (its r3 is gone by then)
+        if (id == call::kPipePlayerIn && pipe_holds(guest, s, pipe, rider)) {
+            context->pc = kCoopSkipCall;
+            return;
+        }
+        if (!s.moving_second && rider == s.second) {
+            SavedContext saved(context);
+            set_game_player(guest, s, true);
+            s.pipe_swapped = pipe;
+        }
+        return;
+    }
+    if (id == call::kIsNearPlayer || id == call::kIsNearPlayerAnyTime) {
+        s.near_actor = context->gpr[3];
+        s.near_distance = static_cast<float>(fpr(context, 1));
+        return;
+    }
+    if (id == call::kNearerPlayerCode) {
+        if (s.nearer_depth++ == 0u) nearer_player_code(Guest(context, memory, services, guest_pc), s);
+        return;
+    }
+    if (id == call::kTryTalk || id == call::kTryTalkNpc ||
+        (id == call::kTalkDirectorStep && guest_pc >= 0x8029E8ECu && guest_pc < 0x8029E920u)) {
+        if (s.talk.depth++ != 0u) return;
+        const Guest guest(context, memory, services, guest_pc);
+        if (id == call::kTalkDirectorStep) {
+            talk_director_begin(guest, s, context->gpr[3]);
+        } else {
+            const std::uint32_t arg = context->gpr[3];  // TalkMessageCtrl (its NPC at +0xC), or the NPC
+            talk_begin(guest, s, id == call::kTryTalkNpc ? arg : plausible(arg) ? guest.u32(arg + 0xCu) : 0u);
+        }
+        return;
+    }
+    if (id == call::kTalkDirectorStep) return;
+    if (id == call::kEndRemoteDemo) {
+        // A talk's hold may end later (DemoDirector), with the first player as the game's: it ends on the talker.
+        s.talk.end_info = context->gpr[3];
+        // Any hold ends on the brother it was put on (a demo the second player started may end with the first
+        // as the game's player), and a talk's on its talker.
+        if (s.talk.held && s.talk.held_second != s.moving_second && plausible(s.first) && plausible(s.second)) {
+            const Guest guest(context, memory, services, guest_pc);
+            SavedContext saved(context);
+            s.talk.end_back_to_second = s.moving_second;
+            set_game_player(guest, s, s.talk.held_second);
+            s.talk.end_swapped = true;
+        }
+        s.talk.held = false;
+        return;
+    }
+    if (id == call::kReadyRemoteDemo) return;
+    if (id == call::kPadButtonA || id == call::kPadTriggerA) {
+        s.talk.pad_channel = context->gpr[3];
+        return;
+    }
+    if (id == call::kPointingPane) {
+        for (unsigned i = 0; i < 5u; ++i) s.talk.pane_args[i] = context->gpr[3 + i];
+        return;
+    }
+    if (id == call::kMenuDecide) return;
+    if (id >= call::kTalkDemoStart && id <= call::kTalkCameraEnd) {
+        if (talk_calm_skips(s, id, guest_pc)) context->pc = kCoopSkipCall;
+        return;
+    }
+    if (id == call::kCheckButton) {
+        s.talk.button = context->gpr[4];
+        return;
+    }
+    if (id == call::kCameraNearlyEnd || id == call::kCanStartDemo) return;
+    if (id == call::kLodDistance) {
+        s.talk.lod = context->gpr[3];
+        return;
+    }
+    if (id == call::kBalloonPos) return;
+    if (id >= call::kPointingCore && id <= call::kSpineUpdate) {
+        pointers_before(id, Guest(context, memory, services, guest_pc), s, context, guest_pc);
+        return;
+    }
+    if (id == call::kPointerDecoration) {
+        // Online each PC shows only its own brother's cursor: around the other's (its decoration, layout and
+        // number, the rest of StarPointerLayout::draw) the renderer clips everything away. A host-side marker in
+        // the GX stream, as split screen's line: guest drawing and state are the same on both PCs. Its own
+        // cursor's draw clears it, and the next frame's scene marker (begin_split_draw) at the latest.
+        if (online_views() && guest_pc >= 0x803882F8u && guest_pc < 0x8038839Cu) {
+            const Guest guest(context, memory, services, guest_pc);
+            const std::uint32_t channel = guest.u32(context->gpr[3] + kPointerLayoutChannel);
+            const bool mine = (channel == 1u) == local_view_is_second();
+            const SplitClipSinkSlot& slot = split_clip_sink();
+            if (slot.sink != nullptr) {
+                const std::array<float, 3> plane = mine ? std::array<float, 3>{0.0f, 0.0f, 0.0f}
+                                                        : std::array<float, 3>{1.0f, 0.0f, -1.0e6f};
+                const std::array<float, 4> none{0.0f, 0.0f, 0.0f, 0.0f};
+                slot.sink(slot.user, plane.data(), mine ? 0u : (local_view_is_second() ? 2u : 1u), none.data());
+            }
+        }
+        return;
+    }
+    if (id == call::kStartBossBgm) return;
+    if (id == call::kStarPieceCode) {
+        const Guest guest(context, memory, services, guest_pc);
+        if (in_shooter_shoot(guest_pc)) shot_from_second_player(guest, s, context, guest_pc);
+        star_piece_code_begin(guest, s);
+        return;
+    }
+    if (id == call::kOneUp) {
+        // A life won by the second player is his: a 1-Up mushroom (BenefitItemObj::exeCatch, the item in r31) he is
+        // nearer, or his own stomp chain (MarioActor::doTrampleJump in his turn). Others (the Observatory's Toads,
+        // 50 Star Bits) stay the first player's.
+        const Guest guest(context, memory, services, guest_pc);
+        bool his = false;
+        if (plausible(s.first) && plausible(s.second) && !s.down[1].down) {
+            if (guest_pc >= 0x801B4B10u && guest_pc < 0x801B4BA4u && plausible(context->gpr[31])) {
+                const coop::Vec3 at = guest.vec(context->gpr[31] + actor::kPosition);
+                his = coop::length(guest.vec(s.second + actor::kPosition) - at) <
+                      coop::length(guest.vec(s.first + actor::kPosition) - at);
+            } else if (guest_pc >= 0x802BEA74u && guest_pc < 0x802BEC98u) {
+                his = s.moving_second;
+            }
+        }
+        if (his) {
+            {
+                // The calls below write the context (its pc too): the skip is set after them.
+                SavedContext saved(context);
+                ensure_second_lives(guest, s);
+                s.second_lives = std::min(s.second_lives + 1, 99);
+                if (plausible(s.second_left)) {
+                    guest.set_u32(s.second_left + kPlayerLeftCount, static_cast<std::uint32_t>(s.second_lives));
+                    guest.call(fn::kPlayerLeftCalls[1], s.second_left);  // PlayerLeft::forceAppear
+                }
+            }
+            context->pc = kCoopSkipCall;
+            trace("1-Up for the second player: %d lives", s.second_lives);
+        }
+        return;
+    }
+    if (id == call::kSoundRelPos) {
+        s.sound_args = {context->gpr[3], context->gpr[4], context->gpr[5]};
+        return;
+    }
+    if (id == call::kClipFrustumFar) {
+        // ClippingJudge::isJudgedToClipFrustum(this, const TVec3f& position, f32 radius): the far plane's test.
+        s.clip_position = s.split.amount() > 0.0f && s.follow.started() ? context->gpr[4] : 0u;
+        s.clip_radius = static_cast<float>(fpr(context, 1));
+        s.clip_far = s.far_z;
+        return;
+    }
+    if (id == call::kAddRushSensor) {
+        // A vehicle is the first player's to mount; the second rides along with him (move_second_player).
+        const Guest guest(context, memory, services, guest_pc);
+        const std::uint32_t sensor = context->gpr[4];
+        const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
+        if (plausible(s.second) && context->gpr[3] == s.second && plausible(host) && is_vehicle(guest.u32(host))) {
+            context->pc = kCoopSkipCall;
+            return;
+        }
+        // Nor is an object the other brother is bound to (a pole holds one rider).
+        if (rush_target_taken(guest, s, context->gpr[3], sensor)) context->pc = kCoopSkipCall;
+        return;
+    }
+    if (id == call::kGetPlayerPos) return;
+    if (id == call::kAddArchive) {
+        s.archive_collector = context->gpr[3];
+        s.archive_name = context->gpr[4];
+        return;
+    }
+    if (id >= call::kAttackFirst && id <= call::kAttackLast) {
+        // MarioActor::attackSensor's attacks and pushes on another player: a landing on the partner was a
+        // stomp, and its bounce landed on them again, forever. The players push each other aside instead
+        // (bump_players).
+        const Guest guest(context, memory, services, guest_pc);
+        const std::uint32_t sensor = context->gpr[4];
+        const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
+        if (plausible(s.second) && host != context->gpr[3] && (host == s.first || host == s.second)) {
+            context->pc = kCoopSkipCall;
+        }
+        return;
+    }
+    if (id == call::kGetPlayerLeft) return;
+    switch (id) {
+    case call::kKpadRead:
+        s.kpad_channel = context->gpr[3];
+        s.kpad_buffer = context->gpr[4];
+        return;
+    case call::kCategoryListExecuteMovement:
+        if (s.category_depth < s.categories.size()) s.categories[s.category_depth] = context->gpr[3];
+        ++s.category_depth;
+        return;
+    case call::kMountArchive:
+        if (!s.mounting_partner) {
+            s.mount_path = context->gpr[3];
+            s.mount_heap = context->gpr[4];
+        }
+        return;
+    case call::kCreateAndAddPlayerArchives:
+        s.player_archives_is_mario = context->gpr[4] & 0xFFu;
+        return;
+    case call::kPlayerHeapCreateHeap:
+        // Both characters' player archives share PlayerHeapHolder's heaps (the stationed-archive loader
+        // shrinks them to fit once loaded).
+        if (context->gpr[3] == kPlayerHeapSize) context->gpr[3] = kPlayerHeapSize + kPartnerHeapExtra;
+        return;
+    case call::kGameSceneDraw3D: {
+        const Guest guest(context, memory, services, guest_pc);
+        {
+            SavedContext saved(context);
+            place_hud(guest, s);
+        }
+        begin_split_draw(guest, s);
+        return;
+    }
+    case call::kClipFrustum:
+        // ClippingJudge::isJudgedToClipFrustum(this, const TVec3f& position, f32 radius, s32 level).
+        s.clip_position = s.split.amount() > 0.0f && s.follow.started() ? context->gpr[4] : 0u;
+        s.clip_radius = static_cast<float>(fpr(context, 1));
+        s.clip_far = coop::clip_level_distance(context->gpr[5], s.far_z);
+        return;
+    case call::kNameObjHolderCtor:
+        // NameObjHolder::NameObjHolder(this, int num): the scene's (num 0x1300) gets room for the second player.
+        if (context->gpr[4] >= coop::kSceneNameObjHolderMin) {
+            s.scene_holder = context->gpr[3];
+            s.holder_capacity = context->gpr[4];
+            s.holder_count = 0u;
+            context->gpr[4] = coop::scene_name_obj_capacity(context->gpr[4]);
+            trace("scene object table: %u entries (game's %u)", context->gpr[4], s.holder_capacity);
+        }
+        return;
+    case call::kNameObjHolderAdd:
+        // NameObjHolder::add(this, NameObj*).
+        if (context->gpr[3] == s.scene_holder && s.scene_holder != 0u && ++s.holder_count == s.holder_capacity + 1u) {
+            trace("scene object table past the game's %u entries (the extra room is in use)", s.holder_capacity);
+        }
+        return;
+    case call::kSetPlayerMode:
+        // MarioActor::setPlayerMode(this, u16 mode, bool): the second player stays as they are rather than
+        // take a power-up whose model was not loaded for their character (the game loads only the first
+        // player's character's power-up archives; the empty model crashed).
+        // Nor do both players become Boos: the second's Boo parts draw in the first's Boo draw buffer, which
+        // holds one (DrawBuffer::add overran it). Either way the player keeps the form they have.
+        if (plausible(s.second) && (context->gpr[3] == s.second || context->gpr[3] == s.first)) {
+            const std::uint32_t player = context->gpr[3];
+            const std::uint32_t other = player == s.second ? s.first : s.second;
+            const auto mode = static_cast<std::uint16_t>(context->gpr[4] & 0xFFFFu);
+            const int slot = coop::power_up_model_slot(mode);
+            const Guest guest(context, memory, services, guest_pc);
+            const bool missing = player == s.second &&
+                                 (slot == coop::kTeresaParts ? guest.u32(s.second + kActorTeresaParts) == 0u
+                                  : slot >= 0 ? guest.u32(s.second + kActorModels + 4u * static_cast<std::uint32_t>(slot)) == 0u
+                                              : false);
+            const bool both_boo = slot == coop::kTeresaParts && (guest.u32(other + kActorPlayerMode) >> 16u) == mode;
+            if (missing || both_boo) {
+                const std::uint32_t current = guest.u32(player + kActorPlayerMode) >> 16u;
+                trace("%s player's power-up %u not taken (%s)", player == s.second ? "second" : "first", mode,
+                      missing ? "no model" : "the other is a Boo");
+                context->gpr[4] = current;
+            }
+        }
+        return;
+    case call::kShadowFarClipping:
+        // ShadowController::updateFarClipping(this, f32 clip).
+        s.shadow_controller = s.split.amount() > 0.0f && s.follow.started() ? context->gpr[3] : 0u;
+        s.shadow_clip = static_cast<float>(fpr(context, 1));
+        return;
+    default:
+        return;
+    }
+}
+
+void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
+                     std::uint32_t guest_pc) {
+    // Netplay's recording or replay of the frame's controller data (netplay.h), once a channel's is final: the
+    // second player's after co-op has written it (below).
+    if (id == call::kKpadRead && !(coop_enabled() && netplay_pending_channel() == 1u)) {
+        netplay_kpad_after(context, memory, services, guest_pc);
+    }
+    if (id == call::kKpadRead && s_menu.kpad_buffer != 0u && services != nullptr && services->call_guest != nullptr) {
+        file_select_frame(Guest(context, memory, services, guest_pc), context->gpr[3]);
+        s_menu.kpad_buffer = 0u;
+    }
+    if (id == call::kMarioActorInit2 && services != nullptr && services->call_guest != nullptr) {
+        State& s = state();
+        if (s.init2_depth == 0u) return;
+        --s.init2_depth;
+        const std::uint32_t actor = s.init2_depth < s.init2_actors.size() ? s.init2_actors[s.init2_depth] : 0u;
+        if (s.creating_second || !plausible(actor)) return;
+        const Guest guest(context, memory, services, guest_pc);
+        {
+            SavedContext saved(context);
+            anime::first_player_animations(guest, s, actor);
+        }
+        if (coop_available()) create_second_player(guest, s, actor);
+        return;
+    }
+    if (services == nullptr || services->call_guest == nullptr || !coop_available()) return;
+    State& s = state();
+    const Guest guest(context, memory, services, guest_pc);
+    if (id >= call::kMeterRequestFirst && id <= call::kPlayerLeftLast) {
+        // The game's own life meter or lives counter: the second player's does the same.
+        const bool meter = id <= call::kMeterRequestLast;
+        const std::uint32_t theirs = meter ? s.first_meter : s.first_left;
+        const std::uint32_t mine = meter ? s.second_meter : s.second_left;
+        if (theirs != 0u && mine != 0u && s.hud_call_this == theirs && s.present) {
+            SavedContext saved(context);
+            guest.call(meter ? fn::kMeterRequests[id - call::kMeterRequestFirst] : fn::kPlayerLeftCalls[id - call::kPlayerLeftFirst],
+                       mine);
+        }
+        s.hud_call_this = 0u;
+        return;
+    }
+    if (id == call::kGetPlayerLeft) {
+        // The second player's lives counter asks for their lives (PlayerLeft keeps itself in r30 or r31).
+        if (s.second_left != 0u && s.second_lives >= 0 && in_player_left(guest_pc) &&
+            (context->gpr[30] == s.second_left || context->gpr[31] == s.second_left)) {
+            context->gpr[3] = static_cast<std::uint32_t>(s.second_lives);
+        }
+        return;
+    }
+    if (id == call::kIncPlayerLife) return;  // a coin heals the brother who took it (the game's player then) only
+    if (id == call::kAddArchive) {
+        add_partner_archive(guest, s);
+        return;
+    }
+    if (id >= call::kStarStepFirst && id <= call::kStarStepLast) {
+        if (s.star_swapped != 0u) {
+            SavedContext saved(context);
+            set_game_player(guest, s, false);
+            s.star_swapped = 0u;
+        }
+        return;
+    }
+    if (id >= call::kPipeStepFirst && id <= call::kPipeStepLast) {
+        if (s.pipe_swapped != 0u) {
+            SavedContext saved(context);
+            set_game_player(guest, s, false);
+            s.pipe_swapped = 0u;
+        }
+        if (id == call::kPipePlayerOut && s.pipe_out != 0u) {
+            pipe_after_exit(guest, s, s.pipe_out);
+            s.pipe_out = 0u;
+        }
+        return;
+    }
+    if (id == call::kTryTalk || id == call::kTryTalkNpc ||
+        (id == call::kTalkDirectorStep && guest_pc >= 0x8029E8ECu && guest_pc < 0x8029E920u)) {
+        if (s.talk.depth == 0u || --s.talk.depth != 0u) return;
+        talk_end(guest, s);
+        return;
+    }
+    if (id == call::kTalkDirectorStep) return;
+    if (id == call::kReadyRemoteDemo) {
+        s.talk.held = true;
+        s.talk.held_second = s.moving_second;
+        talk_hold_other(guest, s);
+        return;
+    }
+    if (id == call::kEndRemoteDemo) {
+        talk_release_other(guest, s);
+        return;
+    }
+    if (id == call::kPadButtonA || id == call::kPadTriggerA) {
+        // The second pointer's Co-Star grip (StarPointerLayout's Grip and Hold, with their sound) is not shown: its
+        // A is the second player's jump.
+        if (in_star_pointer_layout(guest_pc) && s.talk.pad_channel == 1u) {
+            context->gpr[3] = 0u;
+            return;
+        }
+        talk_either_a(guest, s, context, id == call::kPadButtonA ? fn::kTestPadButtonA : fn::kTestPadTriggerA, guest_pc);
+        return;
+    }
+    if (id == call::kPointingPane || id == call::kMenuDecide) {
+        talk_either_choice(guest, s, context, id == call::kPointingPane, guest_pc);
+        return;
+    }
+    if (id >= call::kTalkDemoStart && id <= call::kTalkCameraEnd) return;
+    if (id == call::kCameraNearlyEnd) {
+        if (s.talk.calm && guest_pc == 0x8029D968u) context->gpr[3] = 1u;  // no talk camera to wait for
+        return;
+    }
+    if (id == call::kCanStartDemo) {
+        if (s.talk.calm && demo_request_site(guest_pc)) context->gpr[3] = 0u;
+        return;
+    }
+    if (id == call::kCheckButton) {
+        if (s.talk.calm && s.talk.button == 3u) context->gpr[3] = 0u;  // A (MarioModule::checkTrgA's 3) pages
+        return;
+    }
+    if (id == call::kLodDistance) {
+        lod_distance(guest, s, context);
+        return;
+    }
+    if (id == call::kBalloonPos) {
+        if (guest_pc == 0x8029CFA0u) talk_window_in_world(guest, s, context);
+        return;
+    }
+    if (id >= call::kPointingCore && id <= call::kSpineUpdate) {
+        pointers_after(id, guest, s, context);
+        return;
+    }
+    if (id == call::kAddRushSensor || id == call::kPointerDecoration || id == call::kOneUp) return;
+    if (id == call::kStarPieceCode) {
+        star_piece_code_end(guest, s);
+        return;
+    }
+    if (id == call::kSoundRelPos) {
+        sound_from_nearer_brother(guest, s);
+        s.sound_args = {};
+        return;
+    }
+    if (id == call::kStartBossBgm) {
+        s.boss_gather = true;  // done in the second player's turn (gather_for_boss)
+        s.boss_music = true;
+        return;
+    }
+    if (id == call::kNearerPlayerCode) {
+        if (s.nearer_depth == 0u || --s.nearer_depth != 0u || !s.nearer_swapped) return;
+        SavedContext saved(context);
+        set_game_player(guest, s, s.nearer_back_to_second);
+        s.nearer_swapped = false;
+        return;
+    }
+    if (id == call::kIsNearPlayer || id == call::kIsNearPlayerAnyTime) {
+        if ((context->gpr[3] & 0xFFu) == 0u && near_other_player(guest, s)) context->gpr[3] = 1u;
+        s.near_actor = 0u;
+        return;
+    }
+    if (id == call::kGetPlayerPos) {
+        if (guest_pc >= 0x8002574Cu && guest_pc < 0x80025814u) {
+            switch_area_player_pos(guest, s, context);  // SwitchArea::movement
+        } else if (in_shoot_goal(guest_pc)) {
+            shot_goal_player_pos(guest, s, context);
+        } else {
+            bunny_player_pos(guest, s, context, guest_pc);
+        }
+        return;
+    }
+    switch (id) {
+    case call::kKpadRead:
+        if (s.kpad_channel == 1u) fill_partner_kpad(guest, s);
+        if (netplay_pending_channel() == 1u) netplay_kpad_after(context, memory, services, guest_pc);
+        s.kpad_channel = 0xFFFFFFFFu;
+        return;
+    case call::kGameDataHolderIsDataMario:
+    case call::kGameDataFunctionIsDataMario:
+        if (s.answer_partner) {
+            context->gpr[3] = coop::partner_of(s.own) == coop::Character::Mario ? 1u : 0u;
+        } else {
+            s.own = (context->gpr[3] & 0xFFu) != 0u ? coop::Character::Mario : coop::Character::Luigi;
+        }
+        return;
+    case call::kCategoryListExecuteMovement: {
+        if (s.category_depth == 0u) return;
+        --s.category_depth;
+        const std::uint32_t category = s.category_depth < s.categories.size() ? s.categories[s.category_depth] : 0u;
+        if (s.moving_second || !plausible(s.first) || !plausible(s.second)) return;
+        if (category == kMovementTypeCamera) {
+            run_second_director(guest, s);
+            return;
+        }
+        if (category != kMovementTypePlayer) return;
+        move_second_player(guest, s);
+        return;
+    }
+    case call::kMountArchive:
+        if (!s.mounting_partner) mount_partner_archives(guest, s);
+        return;
+    case call::kCreateAndAddPlayerArchives:
+        add_partner_resources(guest, s);
+        return;
+    case call::kGameSceneDraw3D:
+        finish_split_draw(guest, s);
+        return;
+    case call::kClipFrustum:
+    case call::kClipFrustumFar:
+        // Out of the first player's view but in the second's: not clipped, so it moves and is drawn.
+        if (s.clip_position != 0u && (context->gpr[3] & 0xFFu) != 0u && plausible(s.clip_position)) {
+            const coop::Vec3 position = guest.vec(s.clip_position);
+            if (coop::sphere_in_view(s.camera2.view, position, s.clip_radius, s.fovy, s.aspect, s.clip_far)) {
+                context->gpr[3] = 0u;
+            }
+        }
+        s.clip_position = 0u;
+        return;
+    case call::kShadowFarClipping:
+        if (s.shadow_controller != 0u) keep_second_player_shadow(guest, s);
+        return;
+    default:
+        return;
+    }
+}
+
+unsigned coop_split_pass() noexcept { return state().pass; }
+
+void coop_set_split_clip_sink(SplitClipSink sink, void* user) noexcept {
+    split_clip_sink() = {sink, user};
+}
+
+bool coop_is_second_player_mario(std::uint32_t mario) noexcept {
+    const State& s = state();
+    return mario != 0u && mario == s.second_mario;
+}
+
+
+std::uint32_t coop_second_player(std::uint32_t first) noexcept {
+    const State& s = state();
+    return first != 0u && s.first == first ? s.second : 0u;
+}
+
+void coop_request_second_player_teleport(coop::Vec3 position) noexcept {
+    State& s = state();
+    s.agent_position = position;
+    s.agent_teleport = true;
+}
+
+void coop_request_second_player_mode(std::uint16_t mode) noexcept {
+    state().agent_mode = mode;
+}
+
+void coop_request_drop_in() noexcept {
+    state().drop_in_requested = true;
+}
+
+void coop_request_drop_out() noexcept {
+    s_drop_out_requested.store(true, std::memory_order_relaxed);
+}
+
+bool coop_second_is_luigi() noexcept {
+    return s_second_is_luigi.load(std::memory_order_relaxed);
+}
+
+bool coop_in_stage() noexcept {
+    const long long seen = s_stage_seen_ms.load(std::memory_order_relaxed);
+    const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch()).count();
+    return seen != 0 && now - seen < 250;
+}
+
+int coop_second_lives() noexcept {
+    return state().second_lives;
+}
+
+coop::DownState coop_down_state(unsigned player) noexcept {
+    return player < 2u ? state().down[player] : coop::DownState{};
+}
+
+struct CoopRollbackState {
+    State state;
+    FileSelectMenu menu;
+};
+
+void coop_load_luigi_swap(const std::filesystem::path& content_root) {
+    anime::s_luigi_swap.clear();
+    // The animation mod's folder, as GuestAddressSpace::load_disc_mod_overrides_from_env picks it.
+    std::filesystem::path folder;
+    std::error_code error;
+    const auto exists = [&error](const std::filesystem::path& path) { return std::filesystem::is_regular_file(path, error); };
+    wchar_t* value = nullptr;
+    std::size_t length = 0u;
+    if (_wdupenv_s(&value, &length, L"GALAXY_DISC_MOD_MANIFEST") == 0 && value != nullptr && value[0] != L'\0') {
+        folder = std::filesystem::path(value).parent_path();
+    } else if (custom_animations_for_boot()) {
+        const std::filesystem::path mods = content_root / L"mods";
+        const bool model = custom_model_for_boot() && exists(mods / L"model" / L"manifest.txt");
+        folder = model && exists(mods / L"animations-model" / L"manifest.txt") ? mods / L"animations-model"
+                                                                              : mods / L"animations";
+    }
+    std::free(value);
+    if (folder.empty()) return;
+    std::ifstream file(folder / L"luigi_swap.txt");
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream fields(line);
+        std::string original, swapped;
+        if (!(fields >> original >> swapped)) continue;
+        anime::s_luigi_swap.emplace_back(std::move(original), std::move(swapped));
+    }
+    if (!anime::s_luigi_swap.empty()) {
+        std::fprintf(stderr, "[anim] Luigi's swap table: %zu pairs from %s\n", anime::s_luigi_swap.size(),
+                     (folder / L"luigi_swap.txt").string().c_str());
+    }
+}
+
+std::shared_ptr<CoopRollbackState> coop_rollback_save() {
+    auto saved = std::make_shared<CoopRollbackState>();
+    saved->state = state();
+    saved->menu = s_menu;
+    return saved;
+}
+
+void coop_rollback_restore(const CoopRollbackState& saved) {
+    state() = saved.state;
+    s_menu = saved.menu;
+}
+
+}  // namespace galaxy

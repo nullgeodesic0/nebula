@@ -119,6 +119,23 @@ public:
     [[nodiscard]] bool saturated() const noexcept {
         return saturated_.load(std::memory_order_acquire);
     }
+    // Rollback (simulation thread only): the monotonic guards, which must go back with the guest's clock.
+    struct State {
+        std::uint64_t discarded_host_ticks{};
+        std::uint64_t last_counter{};
+        std::uint64_t last_ticks{};
+        std::uint64_t committed_guest_ticks{};
+    };
+    [[nodiscard]] State save_state() const noexcept {
+        return {discarded_host_ticks_.load(), last_counter_.load(), last_ticks_.load(),
+                committed_guest_ticks_.load()};
+    }
+    void restore_state(const State& state) noexcept {
+        discarded_host_ticks_.store(state.discarded_host_ticks);
+        last_counter_.store(state.last_counter);
+        last_ticks_.store(state.last_ticks);
+        committed_guest_ticks_.store(state.committed_guest_ticks);
+    }
 
 private:
     [[nodiscard]] std::optional<std::uint64_t>
@@ -422,6 +439,35 @@ public:
         std::uint64_t expected_generation) noexcept;
     void clear_replaceable(EventKind kind) noexcept;
 
+    // Rollback (simulation thread only, with no publisher running): everything pending.
+    struct State {
+        std::array<std::uint64_t, kEventKindCount> counts{};
+        std::array<std::uint64_t, kEventKindCount> replaceable_generations{};
+        std::array<PeriodicBatch, kEventKindCount> periodic_batches{};
+        std::array<std::uint64_t, kEventKindCount> periodic_period_ticks{};
+        std::uint32_t mask{};
+    };
+    [[nodiscard]] State save_state() const noexcept {
+        State state;
+        for (std::size_t i = 0; i < kEventKindCount; ++i) {
+            state.counts[i] = counts_[i].load();
+            state.replaceable_generations[i] = replaceable_generations_[i].load();
+        }
+        state.periodic_batches = periodic_batches_;
+        state.periodic_period_ticks = periodic_period_ticks_;
+        state.mask = mask_.load();
+        return state;
+    }
+    void restore_state(const State& state) noexcept {
+        for (std::size_t i = 0; i < kEventKindCount; ++i) {
+            counts_[i].store(state.counts[i]);
+            replaceable_generations_[i].store(state.replaceable_generations[i]);
+        }
+        periodic_batches_ = state.periodic_batches;
+        periodic_period_ticks_ = state.periodic_period_ticks;
+        mask_.store(state.mask);
+    }
+
 private:
     static std::size_t index(EventKind kind) noexcept;
     void lock_slot(std::size_t slot) noexcept;
@@ -630,6 +676,23 @@ public:
 
     void start();
     void stop() noexcept;
+    // Deterministic mode (netplay): no worker thread. The simulation thread publishes due deadlines itself with
+    // poll(), at points that depend only on what the game has executed, so a deadline reaches the game at the
+    // same place on every machine. Set before start().
+    void set_synchronous(bool synchronous) noexcept { synchronous_ = synchronous; }
+    [[nodiscard]] bool synchronous() const noexcept { return synchronous_; }
+    // Synchronous mode: publishes every deadline due at `now_ticks`; returns the next one, if any.
+    std::optional<std::uint64_t> poll(std::uint64_t now_ticks);
+    // Rollback (synchronous mode): the whole schedule.
+    [[nodiscard]] DeadlineSchedule save_schedule() const {
+        std::lock_guard lock(mutex_);
+        return schedule_;
+    }
+    void restore_schedule(const DeadlineSchedule& schedule) {
+        std::lock_guard lock(mutex_);
+        schedule_ = schedule;
+        poll_next_due_.store(0u, std::memory_order_relaxed);
+    }
     [[nodiscard]] bool failed() const noexcept {
         return failed_.load(std::memory_order_acquire);
     }
@@ -670,6 +733,8 @@ private:
     RuntimeTimeline& timeline_;
     PendingEventLatch& latch_;
     DeadlineSchedule schedule_{};
+    // Synchronous mode: the next deadline poll() returned (0: unknown); any schedule change clears it.
+    std::atomic<std::uint64_t> poll_next_due_{0u};
     mutable std::mutex mutex_{};
     // The deadline the worker is currently sleeping toward (all ones while it
     // waits for a signal only). A new or replaced deadline wakes it only when
@@ -681,6 +746,7 @@ private:
     // coarse condition-variable timeout.
     void* wake_event_{};
     std::thread worker_{};
+    bool synchronous_{};
     bool started_{};
     bool stopping_{};
     std::atomic_bool failed_{false};

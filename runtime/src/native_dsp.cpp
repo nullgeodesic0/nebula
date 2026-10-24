@@ -1181,6 +1181,38 @@ bool DspAramMirrorBoundary::worker_flush_outbound(
     return true;
 }
 
+bool DspAramMirrorBoundary::save_rollback_state(RollbackState& out) const {
+    std::lock_guard lock(mutex_);
+    if (state_.load(std::memory_order_acquire) != State::Active || storage_ == nullptr ||
+        (storage_->inbound.occupied && !storage_->inbound.applied)) {
+        return false;
+    }
+    const Storage& s = *storage_;
+    out.mirror.assign(s.mirror.get(), s.mirror.get() + kMirrorSizeBytes);
+    out.dirty_page_flags.assign(s.dirty_page_flags.get(), s.dirty_page_flags.get() + kDirtyPageCount);
+    out.dirty_byte_words.assign(s.dirty_byte_words.get(),
+                                s.dirty_byte_words.get() + static_cast<std::size_t>(kDirtyPageCount) * 2u);
+    out.dirty_page_indices.assign(s.dirty_page_indices.get(), s.dirty_page_indices.get() + kDirtyPageCount);
+    out.outbound_dirty_page_count = outbound_dirty_page_count_;
+    return true;
+}
+
+bool DspAramMirrorBoundary::restore_rollback_state(const RollbackState& in) {
+    std::lock_guard lock(mutex_);
+    if (state_.load(std::memory_order_acquire) != State::Active || storage_ == nullptr ||
+        in.mirror.size() != kMirrorSizeBytes || (storage_->inbound.occupied && !storage_->inbound.applied)) {
+        return false;
+    }
+    Storage& s = *storage_;
+    std::memcpy(s.mirror.get(), in.mirror.data(), kMirrorSizeBytes);
+    std::memcpy(s.dirty_page_flags.get(), in.dirty_page_flags.data(), kDirtyPageCount);
+    std::memcpy(s.dirty_byte_words.get(), in.dirty_byte_words.data(), in.dirty_byte_words.size() * sizeof(std::uint64_t));
+    std::memcpy(s.dirty_page_indices.get(), in.dirty_page_indices.data(), kDirtyPageCount * sizeof(std::uint32_t));
+    outbound_dirty_page_count_ = in.outbound_dirty_page_count;
+    published_outbound_dirty_page_count_.store(in.outbound_dirty_page_count, std::memory_order_release);
+    return true;
+}
+
 DspAramMirrorBoundary::Snapshot
 DspAramMirrorBoundary::snapshot() const noexcept {
     const std::lock_guard lock(mutex_);
@@ -2001,6 +2033,45 @@ void NativeDspWorker::resolve_resume_locked() {
 bool NativeDspWorker::is_halted() const {
     std::lock_guard lock(mutex_);
     return state_ == WorkerState::Halted;
+}
+
+void NativeDspCoprocessor::save_rollback_state(RollbackState& out) const {
+    out.context = context_;
+    out.cpu_mail_generation = cpu_mail_generation_.load(std::memory_order_acquire);
+    out.external_interrupt_vector = external_interrupt_vector_.load(std::memory_order_acquire);
+}
+
+void NativeDspCoprocessor::restore_rollback_state(const RollbackState& in) {
+    const DspContext& from = in.context;
+    context_.ar = from.ar;
+    context_.ix = from.ix;
+    context_.wr = from.wr;
+    context_.ax = from.ax;
+    context_.ac = from.ac;
+    context_.prod = from.prod;
+    context_.st = from.st;
+    context_.stack = from.stack;
+    context_.stack_pointers = from.stack_pointers;
+    context_.cr = from.cr;
+    context_.sr = from.sr;
+    context_.pc = from.pc;
+    context_.iram = from.iram;
+    context_.dram = from.dram;
+    context_.ifx = from.ifx;
+    context_.dsp_mailbox = from.dsp_mailbox;
+    context_.cpu_mailbox = from.cpu_mailbox;
+    context_.audio_bus_state = from.audio_bus_state;
+    context_.halted = from.halted;
+    context_.accelerator_reads_stopped = from.accelerator_reads_stopped;
+    // cpu_mail_generation_ keeps counting forward: it names mailbox publications (the worker dedupes wakes by it),
+    // it is not DSP state.
+    external_interrupt_vector_.store(in.external_interrupt_vector, std::memory_order_release);
+}
+
+bool NativeDspWorker::halted_and_idle() const {
+    std::lock_guard lock(mutex_);
+    return state_ == WorkerState::Halted && !pending_resume_.has_value() &&
+           !pending_external_interrupt_pc_.has_value();
 }
 
 std::optional<DspDiagnosticSnapshot> NativeDspWorker::halted_snapshot() const {

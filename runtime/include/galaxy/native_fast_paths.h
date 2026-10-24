@@ -503,8 +503,12 @@ GALAXY_ALWAYS_INLINE void psq_load_hw(
         services, guest_pc);
 }
 
+// Quantized stores (u8/u16/s8/s16 with the GQR scale) and binary32 stores to the write-gather
+// pipe go lane by lane through store<T>, like other translated stores. They use the same
+// quantization helpers as the exact path. Out of line: inlined, the lane lambda's captures were
+// spilled to the stack ahead of every binary32 fast store.
 template <bool Hw>
-GALAXY_ALWAYS_INLINE void psq_store_impl(
+GALAXY_NOINLINE void psq_store_lanes(
     std::byte* base, const PpcContext* context, std::uint32_t source,
     GuestMemoryV1* memory, std::uint32_t address, std::uint32_t gqr_index,
     bool one_element, bool d_form, const NativeServicesV1* services,
@@ -514,31 +518,6 @@ GALAXY_ALWAYS_INLINE void psq_store_impl(
     constexpr std::uint32_t kHid2Lsqe = 0x80000000u;
     constexpr std::uint32_t kHid2Pse = 0x20000000u;
     const std::uint32_t required = kHid2Pse | (d_form ? kHid2Lsqe : 0u);
-    // Under fastmem the gather pipe must not take the fault path (it is the
-    // hottest device store there is); the exact helper appends it in place.
-    if (base != nullptr && type == 0u &&
-        (!GALAXY_FASTMEM_ACTIVE || (address & 0x3FFFF000u) != 0x0C008000u) &&
-        hid2_admits(context, required)) GALAXY_LIKELY {
-        if (one_element) {
-            if (flat_span(address, 4u)) GALAXY_LIKELY {
-                const std::uint32_t first = byte_swap_u32(
-                    narrow_paired_lane<Hw>(context->fpr_bits[source]));
-                guest_flat_store_raw<std::uint32_t>(base, address, first);
-                return;
-            }
-        } else if (flat_span(address, 8u)) GALAXY_LIKELY {
-            const std::uint32_t first = byte_swap_u32(
-                narrow_paired_lane<Hw>(context->fpr_bits[source]));
-            const std::uint32_t second = byte_swap_u32(
-                narrow_paired_lane<Hw>(context->ps1_bits[source]));
-            guest_flat_store_raw<std::uint32_t>(base, address, first);
-            guest_flat_store_raw<std::uint32_t>(base, address + 4u, second);
-            return;
-        }
-    }
-    // Quantized stores (u8/u16/s8/s16 with the GQR scale) and binary32 stores to the write-gather
-    // pipe go lane by lane through store<T>, like other translated stores. They use the same
-    // quantization helpers as the exact path.
     if (base != nullptr && hid2_admits(context, required) &&
         (type == 0u || (type >= 4u && type <= 7u))) GALAXY_LIKELY {
         const std::int32_t scale = psq_store_scale(gqr);
@@ -579,6 +558,43 @@ GALAXY_ALWAYS_INLINE void psq_store_impl(
     }
     galaxy::psq_store(
         context, source, memory, address, gqr_index, one_element, d_form,
+        services, guest_pc);
+}
+
+template <bool Hw>
+GALAXY_ALWAYS_INLINE void psq_store_impl(
+    std::byte* base, const PpcContext* context, std::uint32_t source,
+    GuestMemoryV1* memory, std::uint32_t address, std::uint32_t gqr_index,
+    bool one_element, bool d_form, const NativeServicesV1* services,
+    std::uint32_t guest_pc) {
+    const std::uint32_t type = psq_store_type(context->gqr[gqr_index]);
+    constexpr std::uint32_t kHid2Lsqe = 0x80000000u;
+    constexpr std::uint32_t kHid2Pse = 0x20000000u;
+    const std::uint32_t required = kHid2Pse | (d_form ? kHid2Lsqe : 0u);
+    // Under fastmem the gather pipe must not take the fault path (it is the
+    // hottest device store there is); the exact helper appends it in place.
+    if (base != nullptr && type == 0u &&
+        (!GALAXY_FASTMEM_ACTIVE || (address & 0x3FFFF000u) != 0x0C008000u) &&
+        hid2_admits(context, required)) GALAXY_LIKELY {
+        if (one_element) {
+            if (flat_span(address, 4u)) GALAXY_LIKELY {
+                const std::uint32_t first = byte_swap_u32(
+                    narrow_paired_lane<Hw>(context->fpr_bits[source]));
+                guest_flat_store_raw<std::uint32_t>(base, address, first);
+                return;
+            }
+        } else if (flat_span(address, 8u)) GALAXY_LIKELY {
+            const std::uint32_t first = byte_swap_u32(
+                narrow_paired_lane<Hw>(context->fpr_bits[source]));
+            const std::uint32_t second = byte_swap_u32(
+                narrow_paired_lane<Hw>(context->ps1_bits[source]));
+            guest_flat_store_raw<std::uint32_t>(base, address, first);
+            guest_flat_store_raw<std::uint32_t>(base, address + 4u, second);
+            return;
+        }
+    }
+    psq_store_lanes<Hw>(
+        base, context, source, memory, address, gqr_index, one_element, d_form,
         services, guest_pc);
 }
 

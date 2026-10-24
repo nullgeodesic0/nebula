@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NebulaRuntime VERSION 1.0.1 LANGUAGES C CXX)
+project(NebulaRuntime VERSION 1.0.1 LANGUAGES C CXX ASM_MASM)
 # The mods importer's archive libraries (zlib, liblzma, libarchive), built once per build tree.
 include(cmake/archive_deps.cmake)
 
@@ -301,7 +301,7 @@ elseif(EXISTS "${galaxy_generated_dsp_source}")
     target_sources(galaxy_native_dsp PRIVATE "${galaxy_generated_dsp_source}")
     target_compile_definitions(galaxy_native_dsp PUBLIC GALAXY_HAVE_NATIVE_DSP=1)
     message(STATUS
-        "Nebula: native DSP ucode present â€” GALAXY_HAVE_NATIVE_DSP=1")
+        "Nebula: native DSP ucode present Ã¢â‚¬â€ GALAXY_HAVE_NATIVE_DSP=1")
 else()
     message(STATUS
         "Nebula: no generated DSP ucode "
@@ -339,7 +339,9 @@ target_link_libraries(
 add_library(galaxy_runtime_settings STATIC
     runtime/src/runtime_settings.cpp
     runtime/src/input_bindings.cpp
-    runtime/src/achievements.cpp)
+    runtime/src/achievements.cpp
+    runtime/src/player_devices.cpp
+    runtime/src/game_menu_probe.cpp)
 target_link_libraries(
     galaxy_runtime_settings
     PUBLIC galaxy_runtime_abi galaxy_atomic_file)
@@ -470,6 +472,7 @@ target_link_libraries(
 add_library(galaxy_native_input STATIC
     runtime/src/controller_roster.cpp
     runtime/src/generic_hid.cpp
+    runtime/src/button_prompts.cpp
     runtime/src/native_input.cpp
     runtime/src/playstation_controller.cpp
     runtime/src/pointer_control.cpp
@@ -478,7 +481,7 @@ add_library(galaxy_native_input STATIC
     runtime/src/switch_controller.cpp
     runtime/src/tilt.cpp
     runtime/src/wiimote_speaker.cpp)
-target_link_libraries(galaxy_native_input PUBLIC galaxy_runtime_abi)
+target_link_libraries(galaxy_native_input PUBLIC galaxy_runtime_abi gdi32)
 if(MSVC)
     target_compile_options(galaxy_native_input PRIVATE /GS- /GR- /Oi /favor:INTEL64)
 endif()
@@ -532,6 +535,7 @@ add_library(galaxy_native_host STATIC
     runtime/src/crash_report.cpp
     runtime/src/discord_presence.cpp
     runtime/src/controller_hid.cpp
+    runtime/src/coop_input.cpp
     runtime/src/flat_guest_memory.cpp)
 target_link_libraries(
     galaxy_native_host
@@ -573,6 +577,7 @@ add_library(galaxy_native_host_test_support STATIC
     runtime/src/crash_report.cpp
     runtime/src/discord_presence.cpp
     runtime/src/controller_hid.cpp
+    runtime/src/coop_input.cpp
     runtime/src/flat_guest_memory.cpp)
 target_link_libraries(
     galaxy_native_host_test_support
@@ -682,6 +687,17 @@ endfunction()
 galaxy_post_shader(post_fullscreen_vs PASS_RESAMPLE - none vs_5_0 VSMain)
 galaxy_post_shader(post_resample_ps PASS_RESAMPLE - none ps_5_0 PSMain)
 galaxy_post_shader(post_fxaa_ps PASS_FXAA - none ps_5_0 PSMain)
+galaxy_post_shader(post_bloom_down_ps PASS_BLOOM_DOWN - none ps_5_0 PSMain)
+galaxy_post_shader(post_bloom_up_ps PASS_BLOOM_UP - none ps_5_0 PSMain)
+galaxy_post_shader(post_enhance_ps PASS_ENHANCE - none ps_5_0 PSMain)
+galaxy_post_shader(post_ssao_ao_ps PASS_SSAO_AO - none ps_5_0 PSMain)
+galaxy_post_shader(post_ssao_blur_ps PASS_SSAO_BLUR - none ps_5_0 PSMain)
+galaxy_post_shader(post_ssao_apply_ps PASS_SSAO_APPLY - none ps_5_0 PSMain)
+galaxy_post_shader(post_dof_focus_ps PASS_DOF_FOCUS - none ps_5_0 PSMain)
+galaxy_post_shader(post_dof_blur_ps PASS_DOF_BLUR - none ps_5_0 PSMain)
+galaxy_post_shader(post_dof_apply_ps PASS_DOF_APPLY - none ps_5_0 PSMain)
+galaxy_post_shader(post_motion_blur_ps PASS_MOTION_BLUR - none ps_5_0 PSMain)
+galaxy_post_shader(post_ssr_ps PASS_SSR - none ps_5_0 PSMain)
 galaxy_post_shader(post_fsr_easu_ps PASS_FSR_EASU - fsr ps_5_0 PSMain)
 galaxy_post_shader(post_fsr_rcas_ps PASS_FSR_RCAS - fsr ps_5_0 PSMain)
 galaxy_post_shader(post_fsr_rcas_scaled_ps PASS_FSR_RCAS_SCALED - fsr ps_5_0 PSMain)
@@ -926,6 +942,14 @@ add_library(galaxy_gx STATIC
     runtime/src/frame_telemetry.cpp
     runtime/src/perf_hint.cpp
     runtime/src/gx/game_asset_extract.cpp
+    runtime/src/gx/game_disc.cpp
+    runtime/src/gx/game_font.cpp
+    runtime/src/gx/menu_kit.cpp
+    runtime/src/gx/menu_kit_raster.cpp
+    runtime/src/gx/host_menus.cpp
+    runtime/src/gx/font_sdf.cpp
+    runtime/src/gx/menu_glyphs.cpp
+    runtime/src/gx/menu_screens.cpp
 )
 # AMD FidelityFX FSR 3.1 (MIT): the FidelityFX SDK 1.1.4 `sdk` directory
 # after its own build (bin/ffx_sdk holds the static libraries with the
@@ -986,11 +1010,65 @@ add_executable(galaxy_game_asset_extract_tests
 target_include_directories(galaxy_game_asset_extract_tests PRIVATE runtime/include)
 target_compile_features(galaxy_game_asset_extract_tests PRIVATE cxx_std_20)
 
+add_executable(galaxy_game_menu_assets_tests
+    runtime/src/gx/game_menu_assets_tests.cpp
+    runtime/src/gx/game_disc.cpp
+    runtime/src/gx/game_font.cpp
+    runtime/src/gx/game_asset_extract.cpp)
+target_include_directories(galaxy_game_menu_assets_tests PRIVATE runtime/include)
+target_compile_features(galaxy_game_menu_assets_tests PRIVATE cxx_std_20)
+
+set(galaxy_menu_kit_sources
+    runtime/src/gx/menu_kit.cpp
+    runtime/src/gx/menu_kit_raster.cpp
+    runtime/src/gx/menu_screens.cpp
+    runtime/src/gx/font_sdf.cpp
+    runtime/src/gx/game_disc.cpp
+    runtime/src/gx/game_font.cpp
+    runtime/src/gx/game_asset_extract.cpp)
+add_executable(galaxy_menu_kit_tests runtime/src/gx/menu_kit_tests.cpp ${galaxy_menu_kit_sources})
+target_include_directories(galaxy_menu_kit_tests PRIVATE runtime/include)
+target_compile_features(galaxy_menu_kit_tests PRIVATE cxx_std_20)
+# Not a test: draws the menu kit over a screenshot to compare with the game's own menus.
+add_executable(galaxy_menu_kit_preview tools/dev/menu_kit_preview.cpp ${galaxy_menu_kit_sources})
+target_include_directories(galaxy_menu_kit_preview PRIVATE runtime/include)
+target_compile_features(galaxy_menu_kit_preview PRIVATE cxx_std_20)
+
+# The game's menu sounds, synthesised on the host from the disc (runtime/include/galaxy/menu_sounds.h).
+add_library(galaxy_menu_sounds STATIC runtime/src/menu_sounds.cpp)
+target_include_directories(galaxy_menu_sounds PUBLIC runtime/include)
+target_compile_features(galaxy_menu_sounds PUBLIC cxx_std_20)
+target_link_libraries(galaxy_menu_sounds PUBLIC galaxy_jaudio_mixer galaxy_runtime_settings xaudio2 ole32)
+# The host menus' sounds (menu_sounds.h).
+target_link_libraries(galaxy_gx PUBLIC galaxy_menu_sounds)
+# One player and no online session for whatever links the GX layer or the native host without the game runtime
+# (tests, NebulaNative); NebulaRuntime's own sources define these first.
+add_library(galaxy_coop_stubs STATIC runtime/src/coop_stubs.cpp)
+target_include_directories(galaxy_coop_stubs PUBLIC runtime/include)
+target_compile_features(galaxy_coop_stubs PUBLIC cxx_std_20)
+target_link_libraries(galaxy_gx PUBLIC galaxy_coop_stubs)
+target_link_libraries(galaxy_native_host PUBLIC galaxy_coop_stubs)
+target_link_libraries(galaxy_native_host_test_support PUBLIC galaxy_coop_stubs)
+set(galaxy_menu_sounds_disc_sources runtime/src/gx/game_disc.cpp runtime/src/gx/game_asset_extract.cpp)
+add_executable(galaxy_menu_sounds_tests runtime/src/menu_sounds_tests.cpp ${galaxy_menu_sounds_disc_sources})
+target_link_libraries(galaxy_menu_sounds_tests PRIVATE galaxy_menu_sounds)
+# Not a test: writes each rendered sound to a WAV for listening (outside the repository).
+add_executable(galaxy_menu_sounds_dump tools/dev/menu_sounds_dump.cpp ${galaxy_menu_sounds_disc_sources})
+target_link_libraries(galaxy_menu_sounds_dump PRIVATE galaxy_menu_sounds)
+
 add_executable(NebulaRuntime
     runtime/src/native_runtime.cpp
     runtime/src/native_thp_video.cpp
     runtime/src/coop_scheduler.cpp
     runtime/src/site_hooks.cpp
+    runtime/src/odyssey_moveset.cpp
+    runtime/src/coop_guest.cpp
+    runtime/src/netplay.cpp
+    runtime/src/netplay_session.cpp
+    runtime/src/net_lobby.cpp
+    runtime/src/agent_guest.cpp
+    runtime/src/voice_replacement.cpp
+    runtime/src/hot_join.cpp
 )
 # Exported releases pass their source identity; working checkouts report Git
 # identity/dirty state at build time. This is runtime provenance, not a label
@@ -1072,6 +1150,7 @@ target_link_libraries(
         galaxy_jaudio_mixer)
 target_link_libraries(NebulaRuntime PRIVATE galaxy_runtime_instance)
 target_link_libraries(NebulaRuntime PRIVATE galaxy_output_relay)
+target_link_libraries(NebulaRuntime PRIVATE galaxy_menu_sounds)
 target_link_libraries(NebulaRuntime PRIVATE xinput9_1_0)
 target_link_libraries(NebulaRuntime PRIVATE dbghelp)
 if(MSVC)
@@ -1109,6 +1188,10 @@ if(MSVC)
     # address space only; pages commit on demand.
     target_compile_options(NebulaRuntime PRIVATE /GS- /GR- /Oi /favor:INTEL64)
     target_link_options(NebulaRuntime PRIVATE /STACK:268435456,1048576)
+    # The cooperative scheduler's context switch (coop_context_x64.asm), in a library of its own so that the
+    # C++ options above never reach the assembler.
+    add_library(galaxy_coop_context STATIC runtime/src/coop_context_x64.asm)
+    target_link_libraries(NebulaRuntime PRIVATE galaxy_coop_context)
 endif()
 option(NEBULA_HOST_IPO "Optimize public host/runtime Release targets across source files" ON)
 set(nebula_host_ipo_effective OFF)
@@ -1235,6 +1318,15 @@ target_link_libraries(galaxy_wiimote_speaker_tests PRIVATE galaxy_native_input)
 add_executable(galaxy_layout_aspect_tests runtime/src/layout_aspect_tests.cpp)
 target_link_libraries(galaxy_layout_aspect_tests PRIVATE galaxy_runtime_abi)
 
+add_executable(galaxy_motion_style_tests runtime/src/motion_style_tests.cpp)
+target_link_libraries(galaxy_motion_style_tests PRIVATE galaxy_runtime_abi)
+
+add_executable(galaxy_odyssey_moveset_tests runtime/src/odyssey_moveset_tests.cpp)
+target_link_libraries(galaxy_odyssey_moveset_tests PRIVATE galaxy_runtime_abi)
+
+add_executable(galaxy_coop_tests runtime/src/coop_tests.cpp)
+target_link_libraries(galaxy_coop_tests PRIVATE galaxy_runtime_abi)
+
 add_executable(
     galaxy_native_input_causality_tests
     runtime/src/native_input_causality_tests.cpp)
@@ -1342,6 +1434,12 @@ add_executable(galaxy_texture_pack_tests runtime/src/gx/texture_pack_tests.cpp)
 target_link_libraries(galaxy_texture_pack_tests PRIVATE galaxy_gx)
 add_executable(galaxy_movie_replacement_tests runtime/src/gx/movie_replacement_tests.cpp)
 target_link_libraries(galaxy_movie_replacement_tests PRIVATE galaxy_gx)
+add_executable(galaxy_split_effects_tests
+    runtime/src/gx/split_effects_tests.cpp)
+target_include_directories(galaxy_split_effects_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/runtime/include)
+
+add_executable(galaxy_player_devices_tests runtime/src/player_devices_tests.cpp)
+target_link_libraries(galaxy_player_devices_tests PRIVATE galaxy_runtime_settings)
 
 add_executable(galaxy_xfb_present_selection_tests
     runtime/src/gx/xfb_present_selection_tests.cpp)
@@ -1386,6 +1484,8 @@ add_executable(galaxy_controls_tests runtime/src/controls_tests.cpp)
 target_link_libraries(galaxy_controls_tests PRIVATE galaxy_runtime_settings galaxy_native_input)
 add_executable(galaxy_pad_controller_tests runtime/src/pad_controller_tests.cpp)
 target_link_libraries(galaxy_pad_controller_tests PRIVATE galaxy_runtime_settings galaxy_native_input)
+add_executable(galaxy_button_prompts_tests runtime/src/button_prompts_tests.cpp)
+target_link_libraries(galaxy_button_prompts_tests PRIVATE galaxy_runtime_settings galaxy_native_input)
 
 if(MSVC)
     foreach(
@@ -1438,6 +1538,11 @@ if(MSVC)
         galaxy_verify_asset_extract
         galaxy_verify_thp_native
         galaxy_game_asset_extract_tests
+        galaxy_game_menu_assets_tests
+        galaxy_menu_kit_tests
+        galaxy_menu_sounds
+        galaxy_menu_sounds_tests
+        galaxy_menu_sounds_dump
         NebulaRuntime
         galaxy_native_api_tests
         galaxy_native_fast_float_tests
@@ -1485,6 +1590,8 @@ if(MSVC)
         galaxy_texture_pack_tests
         galaxy_movie_replacement_tests
         galaxy_xfb_present_selection_tests
+        galaxy_split_effects_tests
+        galaxy_player_devices_tests
         galaxy_efb_conversion_tests
         galaxy_line_point_raster_tests
         galaxy_xf_lighting_tests
@@ -1495,6 +1602,10 @@ if(MSVC)
         galaxy_post_process_tests
         galaxy_controls_tests
         galaxy_pad_controller_tests
+        galaxy_button_prompts_tests
+        galaxy_motion_style_tests
+        galaxy_odyssey_moveset_tests
+        galaxy_coop_tests
     )
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
     endforeach()
@@ -1551,6 +1662,9 @@ galaxy_add_native_test(
 galaxy_add_native_test(native_input_reports galaxy_native_input_tests)
 galaxy_add_native_test(wiimote_speaker galaxy_wiimote_speaker_tests)
 galaxy_add_native_test(layout_aspect_geometry galaxy_layout_aspect_tests)
+galaxy_add_native_test(motion_style galaxy_motion_style_tests)
+galaxy_add_native_test(odyssey_moveset galaxy_odyssey_moveset_tests)
+galaxy_add_native_test(coop galaxy_coop_tests)
 galaxy_add_native_test(diagnostic_stick_lease galaxy_diagnostic_stick_lease_tests)
 galaxy_add_native_test(simulation_cache_affinity galaxy_simulation_cache_affinity_tests)
 galaxy_add_native_test(
@@ -1586,6 +1700,8 @@ galaxy_add_native_test(rt_material_table galaxy_rt_materials_tests)
 galaxy_add_native_test(mii_import galaxy_mii_import_tests)
 galaxy_add_native_test(mods galaxy_mods_tests)
 galaxy_add_native_test(xfb_present_selection galaxy_xfb_present_selection_tests)
+galaxy_add_native_test(split_screen_effects galaxy_split_effects_tests)
+galaxy_add_native_test(player_devices galaxy_player_devices_tests)
 galaxy_add_native_test(efb_content_key_identity galaxy_efb_conversion_tests --content-key-hash)
 galaxy_add_native_test(efb_conversion_pipeline galaxy_efb_conversion_tests)
 galaxy_add_native_test(efb_oversized_content_retirement galaxy_efb_conversion_tests --oversized-content-cache)
@@ -1593,6 +1709,9 @@ galaxy_add_native_test(efb_decoded_allocation_budget galaxy_efb_conversion_tests
 galaxy_add_native_test(line_point_raster galaxy_line_point_raster_tests)
 galaxy_add_native_test(xf_lighting galaxy_xf_lighting_tests)
 galaxy_add_native_test(cosmetic_game_asset_extract galaxy_game_asset_extract_tests)
+galaxy_add_native_test(game_menu_assets galaxy_game_menu_assets_tests)
+galaxy_add_native_test(menu_kit galaxy_menu_kit_tests)
+galaxy_add_native_test(menu_sounds galaxy_menu_sounds_tests)
 galaxy_add_native_test(sorted_dirty_ranges galaxy_sorted_dirty_ranges_tests)
 galaxy_add_native_test(same_context_rfi galaxy_same_context_rfi_tests)
 galaxy_add_native_test(pipeline_cache_persistence galaxy_pipeline_cache_persistence_tests)
@@ -1602,6 +1721,7 @@ galaxy_add_native_test(
 galaxy_add_native_test(post_process galaxy_post_process_tests)
 galaxy_add_native_test(controls_bindings_switch_hid galaxy_controls_tests)
 galaxy_add_native_test(pad_controller_reports galaxy_pad_controller_tests)
+galaxy_add_native_test(button_prompts galaxy_button_prompts_tests)
 galaxy_add_native_test(shader_gen_compiles galaxy_shader_gen_tests)
 galaxy_add_native_test(fifo_parser_streaming galaxy_fifo_parser_tests)
 galaxy_add_native_test(vertex_loader_defaults galaxy_vertex_loader_tests)

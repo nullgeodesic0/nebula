@@ -1,13 +1,18 @@
 #pragma once
 
 // Cooperative guest scheduler (GALAXY_COOP=1): every guest OSThread runs on
-// its own host fiber of the simulation thread, and SelectThread is host code
+// its own fiber of the simulation thread, and SelectThread is host code
 // that keeps the RVL SDK's run queues in guest RAM exactly as the SDK does. A
-// thread switch is one SwitchToFiber; nothing unwinds and nothing is resumed
+// thread switch is one context switch; nothing unwinds and nothing is resumed
 // through OSLoadContext. Interrupt-level work (VI, alarms, device callbacks)
 // runs as plain calls on the current fiber with the scheduler disabled, and
 // the end-of-interrupt reschedule runs once the runtime callback that
 // delivered it has returned, which is the SDK's __OSDispatchInterrupt order.
+//
+// The fibers are the scheduler's own (coop_context_x64.asm), not Windows fibers: each runs on a stack from a
+// pool the scheduler allocates, slot by slot, and a parked fiber is completely described by its stack bytes and
+// stack pointer. The guest's boot thread runs on one too (run_boot), so the simulation thread's own stack, with
+// the runtime's state on it, is never part of a fiber. That is what lets rollback snapshot the guest threads.
 
 #include <cstdint>
 #include <exception>
@@ -118,6 +123,8 @@ public:
         void (*call_guest)(void* user, std::uint32_t function, PpcContext* context) = nullptr;
         // Parks the running chain's state in `parked` and installs `resumed`.
         void (*exchange_chain)(void* user, ChainState& parked, const ChainState& resumed) = nullptr;
+        // Optional: save() has just captured, every fiber parked, on the simulation thread's own context.
+        void (*captured)(void* user) = nullptr;
     };
 
     Scheduler(Host host, GuestRam ram, PpcContext* shared_context);
@@ -125,8 +132,46 @@ public:
     Scheduler& operator=(const Scheduler&) = delete;
     ~Scheduler();
 
-    // Converts the simulation thread to the boot fiber. Call once, on it.
-    void attach_boot_fiber();
+    // A guest thread's fiber.
+    struct Fiber {
+        int slot = -1;  // its stack in stacks_; -1 until it first runs
+        ThreadRegisters saved{};
+        ChainState chain{};
+        bool started = false;
+        bool boot = false;
+    };
+
+    // Runs `entry(argument)`, the guest's boot thread, on the boot fiber and returns or rethrows how it ended.
+    // Call once, on the simulation thread.
+    void run_boot(void (*entry)(void*), void* argument);
+
+    // Rollback: every fiber's stack and the scheduler's own state. The rest of the machine (guest RAM, devices,
+    // the runtime) is the caller's to save alongside.
+    struct Snapshot {
+        struct StackImage {
+            int slot = -1;
+            void* sp = nullptr;
+            std::vector<std::byte> bytes;  // [sp, top)
+        };
+        std::vector<StackImage> stacks;
+        std::unordered_map<std::uint32_t, Fiber> fibers;
+        int current_slot = -1;
+        std::uint32_t running_thread = 0u;
+        std::uint32_t boot_thread = 0u;
+        ChainState unowned_chain{};
+        std::vector<int> retired;
+        std::uint64_t switches = 0u, fibers_created = 0u, idle_entries = 0u, idle_passes = 0u;
+        bool valid = false;
+    };
+    // Called on a fiber: parks it, captures every fiber into `out` from the simulation thread's own context and
+    // resumes it. Returns false then; returns true when it is resumed instead by restore(out) later.
+    bool save(Snapshot& out);
+    // Called on a fiber: puts every fiber back as `in` captured it and resumes the fiber that called save(in),
+    // inside that call (which returns true). This call does not return.
+    [[noreturn]] void restore(const Snapshot& in);
+    // Hot join, before restore(in) of another process's snapshot: every stack slot `in` uses exists here, at the
+    // same place and size (the pool is at fixed addresses). Throws if one cannot be.
+    void adopt_stacks(const Snapshot& in);
 
     // SDK SelectThread(yield) on the shared register file. Returns with r3 = 0,
     // the SDK's value whether or not this thread was switched away and back.
@@ -144,15 +189,23 @@ public:
     [[nodiscard]] std::uint32_t running_thread() const noexcept { return running_thread_; }
 
 private:
-    struct Fiber {
-        void* handle = nullptr;
-        ThreadRegisters saved{};
-        ChainState chain{};
-        bool started = false;
-        bool boot = false;
+    // kNoSlot: the simulation thread's own context (before run_boot, and after the boot fiber ends).
+    static constexpr int kNoSlot = -1;
+
+    enum class HostRequest : std::uint8_t { None, Save, Restore };
+
+    struct Stack {
+        std::byte* base = nullptr;  // allocation base (a no-access guard page, then the stack)
+        std::byte* top = nullptr;   // one past the highest byte
+        void* sp = nullptr;         // the parked context's stack pointer
+        bool in_use = false;
     };
 
-    static void __stdcall fiber_entry(void* parameter);
+    static void fiber_entry(void* parameter);
+    static void boot_entry(void* parameter);
+    int acquire_stack(std::size_t size);
+    void add_stack(std::size_t size);
+    void switch_context(int to_slot);
     void switch_to(std::uint32_t next);
     [[noreturn]] void return_to_boot() noexcept;
     ChainState& running_chain() noexcept;
@@ -166,15 +219,29 @@ private:
     GuestRam ram_;
     PpcContext* context_;
     std::unordered_map<std::uint32_t, Fiber> fibers_;
-    void* boot_handle_ = nullptr;
+    std::vector<Stack> stacks_;
+    void* host_sp_ = nullptr;      // the simulation thread's context while a fiber runs
+    int current_slot_ = kNoSlot;   // the context executing now
+    int boot_slot_ = kNoSlot;
+    void (*boot_function_)(void*) = nullptr;
+    void* boot_argument_ = nullptr;
+    std::exception_ptr boot_result_{};
+    // A fiber's request for the simulation thread's context (save / restore), and its operands.
+    HostRequest host_request_ = HostRequest::None;
+    int requester_slot_ = kNoSlot;
+    Snapshot* save_target_ = nullptr;
+    const Snapshot* restore_source_ = nullptr;
+    bool resumed_by_restore_ = false;
+    void host_save(Snapshot& out);
+    int host_restore(const Snapshot& in);
     std::uint32_t boot_thread_ = 0u;
     // Chain of a fiber no thread owns yet (the boot fiber before its first
     // SelectThread).
     ChainState unowned_chain_{};
     std::uint32_t running_thread_ = 0u;
     unsigned int mxcsr_ = 0u;
-    // Fibers of exited or recreated threads; deleted from another fiber.
-    std::vector<void*> retired_;
+    // Stacks of exited or recreated threads' fibers; released from another fiber.
+    std::vector<int> retired_;
     std::exception_ptr fiber_error_{};
     std::uint64_t switches_ = 0u;
     std::uint64_t fibers_created_ = 0u;

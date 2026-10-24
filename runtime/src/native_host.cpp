@@ -3,9 +3,16 @@
 
 #include "galaxy/ai_dma_timing.h"
 #include "galaxy/native_audio_anomaly.h"
+#include "galaxy/netplay.h"
+#include "galaxy/netplay_session.h"
 #include "galaxy/native_audio_queue.h"
 #include "galaxy/jaudio_host_mixer.h"
+#include "galaxy/agent.h"
+#include "galaxy/button_prompts.h"
 #include "galaxy/controller_hid.h"
+#include "galaxy/coop.h"
+#include "galaxy/coop_guest.h"
+#include "galaxy/player_devices.h"
 #include "galaxy/input_bindings.h"
 #include "galaxy/native_input.h"
 #include "galaxy/native_settings_pad.h"
@@ -7995,6 +8002,86 @@ void apply_diagnostic_stick_command_file(NativeInputScriptOverlay& overlay) {
     }
 }
 
+// Co-op: the second player's Star Pointer, the game's orange one on Wii Remote channel 1 (coop.h KpadSynth). It
+// moves as the first player's does (pointer_control.h): the gyro aims it while the stick bound to the pointer
+// keeps turning their camera, or else that stick aims it and the D-pad turns the camera; recenter centres it,
+// and a still pointer hides.
+void update_partner_pointer(galaxy::coop::PartnerInput& input, const LivePad& pad,
+                            const galaxy::input::LogicalInput& logic, const galaxy::input::SchemeTuning& tuning,
+                            bool gyro_pointing) {
+    static float s_x = 0.0f;
+    static float s_y = 0.0f;
+    static std::uint64_t s_clock_us = 0u;
+    static galaxy::input::RecenterHold s_recenter{};
+    static galaxy::input::PointerRestHide s_rest_hide{};
+    const std::uint64_t now_us = controller_hid_now_us();
+    const float dt = s_clock_us == 0u || now_us <= s_clock_us
+        ? 0.0f : std::min(static_cast<float>(now_us - s_clock_us) * 1e-6f, 0.05f);
+    s_clock_us = now_us;
+    const galaxy::input::RecenterHold::Output recenter =
+        s_recenter.update(logic.held(galaxy::input::WiiTarget::PointerRecenter));
+    bool pushed = false;
+    float limit = galaxy::input::kStickPointerLimit;
+    if (gyro_pointing) {
+        limit = galaxy::input::kGyroPointerLimit;
+        s_x += pad.gyro_x;
+        s_y -= tuning.invert_pointer_y ? -pad.gyro_y : pad.gyro_y;
+    } else {
+        const float speed = pad.sample.scheme == galaxy::input::ControlScheme::Xbox
+            ? xinput_pointer_speed_or(tuning.pointer_speed) : tuning.pointer_speed;
+        const float stick_y = tuning.invert_pointer_y ? -logic.pointer_y : logic.pointer_y;
+        const galaxy::input::StickVector velocity =
+            galaxy::input::stick_pointer_velocity({logic.pointer_x, stick_y}, speed);
+        pushed = velocity.x != 0.0f || velocity.y != 0.0f;
+        s_x += velocity.x * dt;
+        s_y -= velocity.y * dt;
+        input.camera_x = 0.0f;
+        input.camera_y = 0.0f;
+    }
+    s_x = std::clamp(s_x, -limit, limit);
+    s_y = std::clamp(s_y, -limit, limit);
+    if (recenter.pinned) {
+        s_x = 0.0f;
+        s_y = 0.0f;
+    }
+    const bool hidden = s_rest_hide.update(s_x, s_y, now_us, true, recenter.pinned || recenter.released || pushed,
+                                           gyro_pointing, tuning.pointer_hide_seconds, tuning.pointer_hide_radius);
+    input.pointer_valid = !hidden && std::fabs(s_x) <= galaxy::input::kPointerVisibleLimit &&
+                          std::fabs(s_y) <= galaxy::input::kPointerVisibleLimit;
+    input.pointer_x = s_x;
+    input.pointer_y = s_y;
+}
+
+// The agent's controller for the first player (agent.h, docs/AGENT_TESTING.md).
+void apply_agent_pad(NativeInputScriptOverlay& overlay) {
+    const agent::Pad pad = agent_pad(0u);
+    if (!pad.active) return;
+    namespace b = coop::button;
+    galaxy::input::WiimoteButtons& buttons = overlay.buttons;
+    buttons.left = buttons.left || (pad.buttons & b::kLeft) != 0u;
+    buttons.right = buttons.right || (pad.buttons & b::kRight) != 0u;
+    buttons.down = buttons.down || (pad.buttons & b::kDown) != 0u;
+    buttons.up = buttons.up || (pad.buttons & b::kUp) != 0u;
+    buttons.plus = buttons.plus || (pad.buttons & b::kPlus) != 0u;
+    buttons.two = buttons.two || (pad.buttons & b::kTwo) != 0u;
+    buttons.one = buttons.one || (pad.buttons & b::kOne) != 0u;
+    buttons.b = buttons.b || (pad.buttons & b::kB) != 0u;
+    buttons.a = buttons.a || (pad.buttons & b::kA) != 0u;
+    buttons.minus = buttons.minus || (pad.buttons & b::kMinus) != 0u;
+    buttons.home = buttons.home || (pad.buttons & b::kHome) != 0u;
+    overlay.nunchuk_c = overlay.nunchuk_c || (pad.buttons & b::kC) != 0u;
+    overlay.nunchuk_z = overlay.nunchuk_z || (pad.buttons & b::kZ) != 0u;
+    overlay.has_stick = true;
+    overlay.stick_x = pad.stick_x;
+    overlay.stick_y = pad.stick_y;
+    overlay.shake = overlay.shake || pad.shake;
+    if (pad.has_pointer) {
+        overlay.has_pointer = true;
+        overlay.pointer_x = pad.pointer_x;
+        overlay.pointer_y = pad.pointer_y;
+    }
+}
+
 void apply_shake_script_env(
     NativeInputScriptOverlay& overlay,
     std::uint64_t current_vi,
@@ -8158,6 +8245,7 @@ NativeInputScriptOverlay build_native_input_script_overlay(
         first_mario_control_vi,
         "GALAXY_INPUT_STICK_SCRIPT");
     apply_diagnostic_stick_command_file(overlay);
+    apply_agent_pad(overlay);
     apply_shake_script_env(
         overlay, current_vi, "GALAXY_INPUT_SHAKE_SCRIPT");
     apply_pointer_script_envs(overlay, current_vi);
@@ -8590,6 +8678,9 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     }
     input_poll_diagnostic_stage(NativeInputPollStage::Keys);
     const LiveControls& controls = live_controls();
+    // The game's HOME Menu stays shut unless home_menu=on (or GALAXY_HOME_MENU=1): the report encoders
+    // drop Wii HOME from every source (native_input.h).
+    galaxy::input::set_home_button_enabled(galaxy::input::home_menu_wanted(controls.config.home_menu));
     const galaxy::input::BindingTable& keyboard_table =
         controls.config.table(galaxy::input::ControlScheme::Keyboard);
     galaxy::input::KeyboardMouseLevels keyboard_levels{};
@@ -8739,22 +8830,31 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     };
     galaxy::input::tilt::Vec3 tilt_up_value{0.0f, 1.0f, 0.0f};
     const galaxy::input::tilt::Vec3* tilt_up = nullptr;
+    // Scheme of the controller whose button prompts the game shows (button_prompts.h).
+    std::optional<galaxy::input::ControlScheme> prompt_scheme;
+    // Which device plays which brother (player_devices.h): the router picks the driving device, the second
+    // player's controller (his join press while he is out, the disconnect grace) and the seats a menu chose.
+    static galaxy::players::Router s_router;
+    static bool s_router_loaded = false;
+    if (!s_router_loaded) {
+        s_router.parse_seats(galaxy::get_runtime_settings().player_devices.data());
+        s_router_loaded = true;
+    }
+    if (auto requests = galaxy::players::take_seat_requests(); !requests.empty()) {
+        for (const auto& [key, seat] : requests) s_router.set_seat(key, seat);
+        galaxy::RuntimeSettings settings = galaxy::get_runtime_settings();
+        const std::string seats = s_router.format_seats();
+        settings.player_devices.fill('\0');
+        (void)strncpy_s(settings.player_devices.data(), settings.player_devices.size(), seats.c_str(), _TRUNCATE);
+        galaxy::set_runtime_settings(settings);
+        (void)galaxy::save_runtime_settings_to_file();
+    }
+    // Every device's input this poll, before the router decides whose it is.
+    std::array<galaxy::input::LogicalInput, XUSER_MAX_COUNT + kMaxHidPads> pad_logics{};
+    std::array<galaxy::players::DeviceFrame, XUSER_MAX_COUNT + kMaxHidPads + 1u> device_frames{};
+    std::size_t device_frame_count = 0u;
+    const std::uint32_t plus_bit = galaxy::input::wii_target_bit(galaxy::input::WiiTarget::Plus);
     if (use_pads) {
-        const LivePad* driving = nullptr;
-        const LivePad* first_connected = nullptr;
-        for (const LivePad& pad : live_pads) {
-            if (!pad.sample.connected) continue;
-            if (first_connected == nullptr) first_connected = &pad;
-            const bool moved = pad_has_input(pad.sample) || pad.shake_remote || pad.shake_nunchuk ||
-                               std::fabs(pad.gyro_x) + std::fabs(pad.gyro_y) > 0.003f;
-            if (moved) s_driving_pad = pad_key(pad);
-            if (pad_key(pad) == s_driving_pad) driving = &pad;
-        }
-        if (driving == nullptr && s_driving_pad != kDrivingKeyboard) driving = first_connected;
-        if (driving != nullptr && driving->gravity_valid) {
-            tilt_up_value = driving->gravity;
-            tilt_up = &tilt_up_value;
-        }
         for (std::size_t index = 0; index < live_pads.size(); ++index) {
             const LivePad& pad = live_pads[index];
             if (!pad.sample.connected) {
@@ -8763,10 +8863,85 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
             }
             const galaxy::input::SchemeTuning& tuning = controls.config.tune(pad.sample.scheme);
             const bool gyro_pointing = tuning.gyro_pointer && pad.imu_live;
-            galaxy::input::LogicalInput pad_logic = galaxy::input::evaluate_pad_bindings(
-                controls.config.table(pad.sample.scheme), pad.sample, trigger_threshold,
-                s_pad_previous_pressed[index], gyro_pointing);
-            s_pad_previous_pressed[index] = pad_logic.pressed;
+            const std::uint32_t previous = s_pad_previous_pressed[index];
+            pad_logics[index] = galaxy::input::evaluate_pad_bindings(
+                controls.config.table(pad.sample.scheme), pad.sample, trigger_threshold, previous, gyro_pointing);
+            s_pad_previous_pressed[index] = pad_logics[index].pressed;
+            const bool moved = pad_has_input(pad.sample) || pad.shake_remote || pad.shake_nunchuk ||
+                               std::fabs(pad.gyro_x) + std::fabs(pad.gyro_y) > 0.003f;
+            device_frames[device_frame_count++] = {
+                pad_key(pad), moved, (pad_logics[index].pressed & plus_bit) != 0u && (previous & plus_bit) == 0u};
+        }
+    } else {
+        s_pad_previous_pressed = {};
+    }
+    galaxy::input::LogicalInput keyboard_logic{};
+    if (use_keyboard) {
+        keyboard_logic = galaxy::input::evaluate_keyboard_bindings(keyboard_table, keyboard_levels);
+        if (controls.config.tune(galaxy::input::ControlScheme::Keyboard).invert_pointer_y) {
+            keyboard_logic.pointer_y = -keyboard_logic.pointer_y;
+        }
+        static std::uint32_t s_keyboard_previous = 0u;
+        const bool keys_moved =
+            keyboard_logic.pressed != 0u || keyboard_logic.stick_x != 0.0f || keyboard_logic.stick_y != 0.0f;
+        device_frames[device_frame_count++] = {galaxy::players::kKeyboard, keys_moved,
+                                               (keyboard_logic.pressed & plus_bit) != 0u && (s_keyboard_previous & plus_bit) == 0u};
+        s_keyboard_previous = keyboard_logic.pressed;
+    }
+    // Online, each PC is one player: every device here is theirs.
+    const bool coop_routing = galaxy::coop_available() && use_pads && !galaxy::net_session_requested();
+    const bool second_present = galaxy::coop_second_present() || !galaxy::coop_hot_join();
+    const double now_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const galaxy::players::Route route = s_router.step(
+        std::span(device_frames.data(), device_frame_count), second_present, now_seconds, coop_routing);
+    galaxy::players::post_events(s_router.take_events());
+    {
+        galaxy::players::Status status;
+        for (std::size_t index = 0; index < device_frame_count && index < status.devices.size(); ++index) {
+            const galaxy::players::DeviceKey key = device_frames[index].key;
+            status.devices[status.device_count++] = {key, s_router.seat(key), key == route.driving, key == route.second,
+                                                     route.is_join_candidate(key), device_frames[index].input};
+        }
+        status.second_present = coop_routing && second_present;
+        status.waiting = route.waiting;
+        status.grace_left = route.grace_left;
+        galaxy::players::publish_status(status);
+    }
+    s_driving_pad = route.driving == galaxy::players::kKeyboard ? kDrivingKeyboard
+                    : route.driving == galaxy::players::kNoDevice ? kDrivingNone
+                                                                  : route.driving;
+    galaxy::coop::PartnerInput partner_input{};
+    // His controller is gone: he stays in, still, until the grace ends.
+    if (route.waiting) partner_input.connected = true;
+    if (use_pads) {
+        const LivePad* driving = nullptr;
+        const LivePad* first_connected = nullptr;
+        for (const LivePad& pad : live_pads) {
+            if (!pad.sample.connected || !route.feeds_first(pad_key(pad))) continue;
+            if (first_connected == nullptr) first_connected = &pad;
+            if (pad_key(pad) == s_driving_pad) driving = &pad;
+        }
+        if (driving == nullptr && s_driving_pad != kDrivingKeyboard) driving = first_connected;
+        if (driving != nullptr) prompt_scheme = driving->sample.scheme;
+        if (driving != nullptr && driving->gravity_valid) {
+            tilt_up_value = driving->gravity;
+            tilt_up = &tilt_up_value;
+        }
+        for (std::size_t index = 0; index < live_pads.size(); ++index) {
+            const LivePad& pad = live_pads[index];
+            if (!pad.sample.connected) continue;
+            const galaxy::input::SchemeTuning& tuning = controls.config.tune(pad.sample.scheme);
+            const bool gyro_pointing = tuning.gyro_pointer && pad.imu_live;
+            galaxy::input::LogicalInput pad_logic = pad_logics[index];
+            const galaxy::players::DeviceKey key = pad_key(pad);
+            if (key == route.second) {
+                partner_input = galaxy::coop::partner_input_from(pad_logic, pad.shake_remote || pad.shake_nunchuk);
+                update_partner_pointer(partner_input, pad, pad_logic, tuning, gyro_pointing);
+                continue;
+            }
+            if (!route.feeds_first(key)) continue;
+            // A free controller's + asks for the second player (coop_guest.cpp update_presence), never the pause.
+            if (route.is_join_candidate(key)) pad_logic.pressed &= ~plus_bit;
             const float speed = pad.sample.scheme == galaxy::input::ControlScheme::Xbox
                 ? xinput_pointer_speed_or(tuning.pointer_speed) : tuning.pointer_speed;
             if (tuning.invert_pointer_y) pad_logic.pointer_y = -pad_logic.pointer_y;
@@ -8789,18 +8964,35 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
                 gyro_y += tuning.invert_pointer_y ? -pad.gyro_y : pad.gyro_y;
             }
         }
-    } else {
-        s_pad_previous_pressed = {};
     }
-    galaxy::input::LogicalInput keyboard_logic{};
-    if (use_keyboard) {
-        keyboard_logic = galaxy::input::evaluate_keyboard_bindings(keyboard_table, keyboard_levels);
-        if (controls.config.tune(galaxy::input::ControlScheme::Keyboard).invert_pointer_y) {
-            keyboard_logic.pointer_y = -keyboard_logic.pointer_y;
+    // The keyboard seated as the second player's (or seated nobody's).
+    if (use_keyboard && coop_routing) {
+        if (route.second == galaxy::players::kKeyboard) {
+            partner_input = galaxy::coop::partner_input_from(keyboard_logic, false);
+            keyboard_logic = {};
+        } else if (!route.feeds_first(galaxy::players::kKeyboard)) {
+            keyboard_logic = {};
+        } else if (route.is_join_candidate(galaxy::players::kKeyboard)) {
+            keyboard_logic.pressed &= ~plus_bit;
         }
-        if (keyboard_logic.pressed != 0u || keyboard_logic.stick_x != 0.0f || keyboard_logic.stick_y != 0.0f) {
-            s_driving_pad = kDrivingKeyboard;
+    }
+    if (galaxy::coop_available()) galaxy::coop_publish_partner_input(partner_input);
+    {
+        // F1 > Game > Button prompts: the controller in use, or always one family.
+        using galaxy::ButtonPrompts;
+        std::optional<galaxy::input::ControlScheme> shown;
+        switch (galaxy::get_runtime_settings().button_prompts) {
+        case ButtonPrompts::Auto:
+            if (s_driving_pad != kDrivingKeyboard) shown = prompt_scheme;
+            break;
+        case ButtonPrompts::Wii: break;
+        case ButtonPrompts::Xbox: shown = galaxy::input::ControlScheme::Xbox; break;
+        case ButtonPrompts::DualSense: shown = galaxy::input::ControlScheme::PlayStation; break;
         }
+        const auto family = shown ? galaxy::prompts::family_for_scheme(*shown) : std::nullopt;
+        galaxy::prompts::publish(
+            family ? galaxy::prompts::make_prompt_set(*family, controls.config.table(*shown))
+                   : galaxy::prompts::PromptSet{});
     }
     // Vibration: target and strength, published with the game's motor bit.
     g_rumble_host = {};
@@ -9311,6 +9503,104 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     (void)advance_nunchuk_shake_accel(
         snapshot, held(WiiTarget::NunchukShake) || motion_shake_nunchuk,
         s_previous_nunchuk_shake, s_nunchuk_shake_frames);
+    {
+        // The host menus read the first player's buttons and pointer beside the game (player_devices.h).
+        using galaxy::players::MenuInput;
+        const auto bit = [](bool on, std::uint32_t mask) { return on ? mask : 0u; };
+        galaxy::players::publish_menu_input(
+            bit(snapshot.buttons.a, MenuInput::kA) | bit(snapshot.buttons.b, MenuInput::kB) |
+                bit(snapshot.buttons.up, MenuInput::kUp) | bit(snapshot.buttons.down, MenuInput::kDown) |
+                bit(snapshot.buttons.left, MenuInput::kLeft) | bit(snapshot.buttons.right, MenuInput::kRight) |
+                bit(snapshot.buttons.plus, MenuInput::kPlus) | bit(snapshot.buttons.minus, MenuInput::kMinus),
+            pointer_active, s_pointer_x, s_pointer_y);
+        // A host window over the game's own menu takes the buttons; those held as it closes stay hidden until let go.
+        static galaxy::input::WiimoteButtons s_captured{};
+        if (galaxy::players::menu_capture()) {
+            s_captured = snapshot.buttons;
+            snapshot.buttons = {};
+        } else {
+            using C = galaxy::input::WiimoteButtons;
+            for (bool C::*b : {&C::a, &C::b, &C::one, &C::two, &C::plus, &C::minus, &C::up, &C::down, &C::left,
+                               &C::right, &C::home}) {
+                if (!(snapshot.buttons.*b)) s_captured.*b = false;
+                if (s_captured.*b) snapshot.buttons.*b = false;
+            }
+        }
+    }
+    if (!galaxy::net_session_requested()) {
+        // Out of a session while another PC asks to join (Joinable switched on in play): + opens the answer (the
+        // online menu's Accept / Not now) rather than the pause, and while it is open the D-pad, A and B are its, not
+        // the game's. Buttons held as it closes stay out of the game until released.
+        using B_ = galaxy::input::WiimoteButtons;
+        static bool s_answering = false;
+        static galaxy::input::WiimoteButtons s_previous_buttons{};
+        static galaxy::input::WiimoteButtons s_hidden_buttons{};
+        const galaxy::input::WiimoteButtons held_now = snapshot.buttons;
+        const auto edge = [&](bool galaxy::input::WiimoteButtons::*b) { return held_now.*b && !(s_previous_buttons.*b); };
+        if (galaxy::coop_join_request_pending() || s_answering) {
+            s_answering = galaxy::coop_online_menu_poll(edge(&B_::plus), edge(&B_::up), edge(&B_::down), edge(&B_::a),
+                                                        edge(&B_::b));
+            if (s_answering) {
+                s_hidden_buttons = held_now;
+                snapshot.buttons = {};
+                snapshot.nunchuk = galaxy::input::NunchukState{};
+            } else {
+                snapshot.buttons.plus = false;
+            }
+        }
+        // What the answer took stays hidden until let go.
+        for (bool B_::*b : {&B_::a, &B_::b, &B_::up, &B_::down, &B_::plus}) {
+            if (!(held_now.*b)) s_hidden_buttons.*b = false;
+            if (!s_answering && s_hidden_buttons.*b) snapshot.buttons.*b = false;
+        }
+        s_previous_buttons = held_now;
+    }
+    if (galaxy::net_session_requested()) {
+        // Online: this PC's player, as the Remote and Nunchuk above have it (netplay.cpp makes its KPAD status).
+        namespace button = galaxy::coop::button;
+        galaxy::coop::PartnerInput local{};
+        local.connected = true;
+        const auto bit = [](bool on, std::uint32_t mask) { return on ? mask : 0u; };
+        local.buttons = bit(snapshot.buttons.a, button::kA) | bit(snapshot.buttons.b, button::kB) |
+                        bit(snapshot.buttons.one, button::kOne) | bit(snapshot.buttons.two, button::kTwo) |
+                        bit(snapshot.buttons.plus, button::kPlus) | bit(snapshot.buttons.minus, button::kMinus) |
+                        bit(snapshot.buttons.up, button::kUp) | bit(snapshot.buttons.down, button::kDown) |
+                        bit(snapshot.buttons.left, button::kLeft) | bit(snapshot.buttons.right, button::kRight) |
+                        bit(snapshot.nunchuk.c, button::kC) | bit(snapshot.nunchuk.z, button::kZ) |
+                        bit(snapshot.buttons.home, button::kHome);
+        local.stick_x = stick_x;
+        local.stick_y = stick_y;
+        local.shake = shake_pressed || held(WiiTarget::NunchukShake) || motion_shake_nunchuk;
+        // Not ir_active: the emulated Remote's IR camera state does not matter to a status built from this.
+        local.pointer_valid = pointer_active;
+        local.pointer_x = s_pointer_x;
+        local.pointer_y = s_pointer_y;
+        // No pause online: + and HOME open this PC's own menu instead (the game plays on for both), which takes
+        // the D-pad or stick, A and B while it is open. Buttons held as it closes stay out of the game until
+        // released, so the A that chose a row is not a jump.
+        static std::uint32_t s_previous = 0u;
+        static std::uint32_t s_hidden = 0u;
+        static int s_stick_previous = 0;
+        const std::uint32_t pressed = local.buttons & ~s_previous;
+        s_previous = local.buttons;
+        const int stick = stick_y > 0.6f ? 1 : (stick_y < -0.6f ? -1 : 0);
+        const bool stick_up = stick == 1 && s_stick_previous != 1;
+        const bool stick_down = stick == -1 && s_stick_previous != -1;
+        s_stick_previous = stick;
+        const bool open = galaxy::coop_online_menu_poll(
+            (pressed & (button::kPlus | button::kHome)) != 0u, (pressed & button::kUp) != 0u || stick_up,
+            (pressed & button::kDown) != 0u || stick_down, (pressed & button::kA) != 0u,
+            (pressed & button::kB) != 0u);
+        if (open) {
+            s_hidden = local.buttons;
+            local = galaxy::coop::PartnerInput{};
+            local.connected = true;
+        } else {
+            s_hidden &= local.buttons;
+            local.buttons &= ~(s_hidden | button::kPlus | button::kHome);
+        }
+        galaxy::coop_publish_local_input(local);
+    }
 
     const std::uint16_t buttons = wiimote_trace_button_bits(snapshot.buttons);
     const bool trace_interesting =
@@ -12687,16 +12977,63 @@ void GuestAddressSpace::open_game_pak(const std::filesystem::path& path) {
         std::cout << "[di] game.pak mapped: " << pak_size_ << " bytes at "
                   << static_cast<const void*>(pak_view_) << '\n';
     }
-    load_disc_mod_overrides_from_env();
+    load_disc_mod_overrides_from_env(path.parent_path());
 }
 
-void GuestAddressSpace::load_disc_mod_overrides_from_env() {
+void GuestAddressSpace::apply_disc_overrides(
+    std::uint64_t disc_offset, std::uint32_t guest_address, std::uint32_t size) {
+    const std::uint64_t end = disc_offset + size;
+    for (const DiscOverride& entry : disc_overrides_) {
+        const std::uint64_t entry_end = entry.disc_offset + entry.bytes.size();
+        const std::uint64_t first = std::max(disc_offset, entry.disc_offset);
+        const std::uint64_t last = std::min(end, entry_end);
+        if (first >= last) {
+            continue;
+        }
+        copy(guest_address + static_cast<std::uint32_t>(first - disc_offset),
+             std::span<const std::byte>(entry.bytes).subspan(
+                 static_cast<std::size_t>(first - entry.disc_offset),
+                 static_cast<std::size_t>(last - first)));
+    }
+}
+
+void GuestAddressSpace::load_disc_mod_overrides_from_env(
+    const std::filesystem::path& content_root) {
     disc_overrides_.clear();
-    const std::optional<std::filesystem::path> manifest =
-        get_env_path(L"GALAXY_DISC_MOD_MANIFEST");
-    if (!manifest) {
+    if (const std::optional<std::filesystem::path> manifest =
+            get_env_path(L"GALAXY_DISC_MOD_MANIFEST")) {
+        load_disc_mod_manifest(*manifest);
         return;
     }
+    // The custom animations and model (runtime_settings.h) are disc mods kept with the game content,
+    // each in its own folder and area of the disc. The animations come in two builds: "animations" for
+    // the game's model, and "animations-model", which also switches the custom model's extra faces.
+    const auto manifest_in = [&content_root](const wchar_t* folder) {
+        return content_root / L"mods" / folder / L"manifest.txt";
+    };
+    const auto exists = [](const std::filesystem::path& path) {
+        std::error_code error;
+        return std::filesystem::is_regular_file(path, error);
+    };
+    const bool model = custom_model_for_boot() && exists(manifest_in(L"model"));
+    std::vector<std::filesystem::path> manifests;
+    if (custom_animations_for_boot()) {
+        const std::filesystem::path with_faces = manifest_in(L"animations-model");
+        manifests.push_back(model && exists(with_faces) ? with_faces : manifest_in(L"animations"));
+    }
+    if (model) {
+        manifests.push_back(manifest_in(L"model"));
+    }
+    for (const std::filesystem::path& manifest : manifests) {
+        if (exists(manifest)) {
+            std::cerr << "[mods] " << manifest.string() << '\n';
+            load_disc_mod_manifest(manifest);
+        }
+    }
+}
+
+void GuestAddressSpace::load_disc_mod_manifest(const std::filesystem::path& manifest_file) {
+    const std::filesystem::path* const manifest = &manifest_file;
     std::ifstream file(*manifest);
     if (!file) {
         throw std::runtime_error(
@@ -13759,6 +14096,7 @@ bool GuestAddressSpace::read_device(
                 dsp_native_dirq_pending_ = false;
                 dsp_native_from_mail_irq_latched_ = false;
                 dsp_native_suppressing_task_done_dirq_ = false;
+                dsp_native_settle_for_determinism();  // the consume woke it
                 if (native_sync_tail_mail) {
                     dsp_native_wait_for_sync_task_done(low);
                 }
@@ -14036,7 +14374,7 @@ bool GuestAddressSpace::write_device_register(
                 throw std::runtime_error(message.str());
             }
             if ((written & kPeTokenInterruptClear) != 0u) {
-                pe_token_pending_.store(false, std::memory_order_release);
+                clear_pe_token();
             }
             if ((written & kPeFinishInterruptClear) != 0u) {
                 pe_finish_pending_.store(false, std::memory_order_release);
@@ -14337,6 +14675,7 @@ bool GuestAddressSpace::write_device_register(
             }
             dsp_native_worker_->signal_external_interrupt(
                 kRmge01DspCpuInterruptVector);
+            dsp_native_settle_for_determinism();
         }
         return true;
     }
@@ -15142,6 +15481,11 @@ void GuestAddressSpace::post_next_ipc_reply() {
     latched_reply_acked_ = false;
     latched_reply_read_by_handler_ = false;
     latched_reply_release_deferred_ = false;
+    if (galaxy::netplay_tracing()) {
+        // No time here: reading the tick source publishes due deadlines, which would change the run it traces.
+        galaxy::netplay_trace("ipc-reply req=%08x cmd=%u fd=%d", physical_request, read_u32(physical_request),
+                              static_cast<int>(read_u32(physical_request + 8u)));
+    }
     write_storage_be32(
         hollywood_registers_, kIpcReplyRegisterOffset, physical_request);
     write_storage_be32(
@@ -17972,6 +18316,7 @@ void GuestAddressSpace::dsp_native_forward_mail(std::uint32_t mail) {
             dsp_native_worker_->signal_external_interrupt(
                 kRmge01DspCpuInterruptVector);
         }
+        dsp_native_settle_for_determinism();
     }
 }
 
@@ -18019,6 +18364,257 @@ void GuestAddressSpace::dsp_native_service_mram_transaction() {
         galaxy::DspMramTransactionBoundary::ServiceResult::Rejected) {
         throw std::runtime_error(
             "native DSP ARAM whole-span commit was rejected by the CPU service");
+    }
+}
+
+// Rollback: the device members a snapshot copies. Callbacks and their users, workers, sinks, caches, trace and
+// benchmark records stay as they are. NAND files share their backing, so a rollback across a save write keeps
+// the write (rollback windows are a few frames; a save is not undone).
+#define GALAXY_DEVICE_SNAPSHOT_FIELDS(X)                                                                         \
+    X(locked_cache_) X(broadway_registers_) X(hollywood_registers_)                                             \
+    X(next_ios_handle_) X(ios_event_hook_handle_) X(ios_event_hook_pending_request_) X(ios_paths_)              \
+    X(nand_files_) X(provisional_nand_files_)                                                                    \
+    X(bluetooth_interrupt_read_) X(bluetooth_bulk_read_) X(bluetooth_events_) X(bluetooth_acl_events_)           \
+    X(bt_virtual_input_report_) X(bt_virtual_input_cadence_) X(bt_virtual_input_mode_generation_)               \
+    X(bt_wiimote_scan_enabled_) X(bt_wiimote_connection_requested_) X(bt_wiimote_connection_request_delivered_)  \
+    X(bt_last_connection_attempt_ticks_) X(bt_connection_request_deadline_ticks_)                                \
+    X(bt_next_connection_attempt_ticks_) X(bt_capture_security_block_) X(bt_capture_disconnect_)                 \
+    X(bt_last_disconnect_reason_) X(bt_wiimote_connected_) X(bt_wiimote_sniff_mode_)                             \
+    X(bt_wiimote_sniff_interval_) X(bt_wiimote_link_key_stored_) X(bt_wiimote_link_key_requested_)               \
+    X(bt_wiimote_pin_requested_) X(bt_wiimote_authenticated_) X(bt_wiimote_authenticated_at_ticks_)              \
+    X(bt_wiimote_encrypted_) X(bt_l2cap_control_connect_pending_) X(bt_l2cap_post_auth_wait_logged_)             \
+    X(bt_l2cap_retry_psm_) X(bt_l2cap_retry_deadline_ticks_) X(bt_l2cap_control_retry_count_)                    \
+    X(bt_l2cap_interrupt_retry_count_) X(bt_l2cap_connection_psm_) X(bt_l2cap_connection_signal_id_)             \
+    X(bt_l2cap_connection_response_deadline_ticks_) X(bt_l2cap_connection_response_pending_)                     \
+    X(bt_l2cap_connection_ertx_maximum_deadline_ticks_) X(bt_l2cap_configuration_psm_)                           \
+    X(bt_l2cap_config_signal_id_) X(bt_l2cap_config_response_deadline_ticks_)                                    \
+    X(bt_l2cap_config_response_pending_) X(bt_l2cap_configuration_deadline_ticks_) X(bt_wiimote_handle_)         \
+    X(bt_l2cap_control_local_cid_) X(bt_l2cap_control_remote_cid_) X(bt_l2cap_interrupt_local_cid_)              \
+    X(bt_l2cap_interrupt_remote_cid_) X(bt_l2cap_next_local_cid_) X(bt_l2cap_next_signal_id_)                    \
+    X(bt_l2cap_control_config_request_seen_) X(bt_l2cap_control_config_response_seen_)                           \
+    X(bt_l2cap_interrupt_config_request_seen_) X(bt_l2cap_interrupt_config_response_seen_)                       \
+    X(bt_wiimote_report_mode_) X(bt_wiimote_reporting_enabled_) X(bt_wiimote_init_complete_)                     \
+    X(bt_wiimote_init_delay_logged_) X(bt_wiimote_led_mask_) X(bt_wiimote_rumble_)                               \
+    X(bt_wiimote_speaker_enabled_) X(bt_wiimote_speaker_muted_) X(bt_wiimote_ir_enabled_)                        \
+    X(bt_wiimote_ir_report13_enabled_) X(bt_wiimote_ir_report1a_enabled_)                                        \
+    X(bt_wiimote_ir_sensitivity_block1_seen_) X(bt_wiimote_ir_sensitivity_block2_seen_)                          \
+    X(bt_wiimote_ir_latch_seen_) X(bt_wiimote_ir_mode_) X(latest_native_hid_snapshot_)                           \
+    X(latest_native_hid_snapshot_valid_) X(synthetic_kpad_buttons_) X(latest_native_pointer_x_)                  \
+    X(latest_native_pointer_y_) X(latest_native_pointer_active_) X(synthetic_kpad_pointer_sample_)               \
+    X(synthetic_kpad_mouse_press_) X(synthetic_kpad_mouse_press_mask_) X(synthetic_kpad_last_mouse_buttons_)     \
+    X(synthetic_kpad_last_non_mouse_buttons_) X(synthetic_kpad_pending_non_mouse_press_)                         \
+    X(synthetic_kpad_known_outside_) X(bt_wiimote_extension_init_seen_) X(bt_wiimote_extension_initialized_)     \
+    X(bt_wiimote_interrupt_open_)                                                                                \
+    X(deferred_ios_replies_) X(ipc_pending_replies_) X(latched_reply_requests_) X(latched_reply_)                \
+    X(latched_reply_acked_) X(latched_reply_read_by_handler_) X(latched_reply_release_deferred_)                 \
+    X(ipc_interrupt_handler_pass_depth_) X(disc_read_ticket_sequence_) X(disc_read_tickets_)                     \
+    X(gx_fifo_) X(cp_base_lo_) X(cp_end_lo_) X(cp_wr_lo_) X(cp_fifo_base_) X(cp_fifo_end_) X(cp_rd_ptr_)         \
+    X(cpu_fifo_base_) X(cpu_fifo_top_) X(cpu_fifo_wr_ptr_) X(cpu_fifo_wrap_) X(wgpipe_gather_)                   \
+    X(wgpipe_gather_count_) X(wgpipe_recent_bytes_) X(wgpipe_recent_count_) X(wgpipe_pe_hint_recent_bytes_)      \
+    X(wgpipe_pe_hint_recent_count_) X(gx_pe_scan_hint_pending_) X(fifo_stream_next_)                             \
+    X(pi_interrupt_cause_latch_)                                                                                 \
+    X(aram_dma_active_) X(aram_dma_aram_to_mram_) X(aram_dma_mram_address_) X(aram_dma_aram_address_)            \
+    X(aram_dma_total_blocks_) X(aram_dma_completed_blocks_) X(aram_dma_start_ticks_) X(aram_dma_next_block_ticks_) \
+    X(ai_dma_playing_) X(ai_dma_shadow_address_) X(ai_dma_shadow_blocks_) X(ai_dma_active_address_)              \
+    X(ai_dma_active_blocks_) X(ai_dma_active_sample_rate_) X(ai_dma_active_start_ticks_)                         \
+    X(ai_dma_next_completion_ticks_) X(ai_dma_next_interrupt_ticks_) X(ai_dma_interrupt_pending_since_ticks_)    \
+    X(ai_dma_last_duration_ticks_) X(ai_dma_shadow_fresh_) X(ai_dma_hold_since_ticks_)                           \
+    X(ai_dma_hold_recheck_ticks_) X(ai_dma_latch_stale_) X(ai_dma_feed_stalled_) X(ai_dma_output_concealed_)     \
+    X(ai_dma_notified_deadline_ticks_)                                                                           \
+    X(dsp_task_booted_) X(dsp_expect_value_mail_) X(dsp_mail_to_high_) X(dsp_last_command_)                      \
+    X(dsp_boot_iram_src_) X(dsp_boot_iram_len_) X(dsp_boot_iram_dest_) X(dsp_boot_dram_len_)                     \
+    X(dsp_native_task_vectors_valid_) X(dsp_native_task_descriptor_) X(dsp_native_task_start_vector_)            \
+    X(dsp_native_task_resume_vector_) X(dsp_native_to_mail_count_) X(dsp_native_to_mail_after_mram_count_)       \
+    X(dsp_cmd_words_remaining_) X(dsp_cmd_first_word_) X(dsp_cmd_word_count_) X(dsp_cmd_words_)                  \
+    X(dsp_cmd_have_first_) X(pending_dsp_sync_frame_) X(pending_dsp_sync_release_deferred_)                      \
+    X(dsp_channel_table_addr_) X(dsp_resampler_filter_addr_) X(dsp_adpcm_filter_addr_) X(dsp_sync_frame_count_)  \
+    X(dsp_render_channels_) X(dsp_from_mail_queue_)                                                              \
+    X(dsp_native_to_mail_high_staged_) X(dsp_native_from_mail_staged_) X(dsp_native_dirq_pending_)               \
+    X(dsp_native_from_mail_irq_latched_) X(dsp_native_suppressing_task_done_dirq_)                               \
+    X(dsp_native_suppressed_task_done_count_) X(dsp_native_sync_pacing_active_)                                  \
+    X(dsp_native_next_sync_completion_ticks_) X(dsp_native_from_mail_queue_)                                     \
+    X(dsp_native_command_declared_count_) X(dsp_native_command_is_dset_) X(dsp_native_dset_seen_)
+
+struct GuestAddressSpace::DeviceSnapshot {
+#define GALAXY_DEVICE_SNAPSHOT_DECLARE(name) decltype(GuestAddressSpace::name) name{};
+    GALAXY_DEVICE_SNAPSHOT_FIELDS(GALAXY_DEVICE_SNAPSHOT_DECLARE)
+#undef GALAXY_DEVICE_SNAPSHOT_DECLARE
+    bool pe_finish_pending{};
+    bool pe_token_pending{};
+    std::uint16_t pe_token_value{};
+    std::deque<std::uint16_t> pe_token_backlog;
+    bool dsp_native_int_pending{};
+    std::shared_ptr<galaxy::NativeDspCoprocessor::RollbackState> dsp;  // when the native DSP runs
+    std::shared_ptr<galaxy::DspAramMirrorBoundary::RollbackState> aram_mirror;  // once its ARAM is seeded
+    std::vector<std::uint64_t> aram_cpu_dirty_words;
+};
+
+std::shared_ptr<GuestAddressSpace::DeviceSnapshot> GuestAddressSpace::make_device_snapshot() {
+    return std::make_shared<DeviceSnapshot>();
+}
+
+void GuestAddressSpace::own_device_snapshot(DeviceSnapshot& snapshot) {
+    for (auto& [handle, file] : snapshot.nand_files_) {
+        if (file.backing != nullptr) file.backing = std::make_shared<NandBacking>(*file.backing);
+    }
+}
+
+
+void GuestAddressSpace::save_devices(DeviceSnapshot& out) {
+#define GALAXY_DEVICE_SNAPSHOT_SAVE(name) out.name = name;
+    GALAXY_DEVICE_SNAPSHOT_FIELDS(GALAXY_DEVICE_SNAPSHOT_SAVE)
+#undef GALAXY_DEVICE_SNAPSHOT_SAVE
+    out.pe_finish_pending = pe_finish_pending_.load();
+    out.pe_token_pending = pe_token_pending_.load();
+    out.pe_token_value = pe_token_value_.load();
+    {
+        std::lock_guard lock(pe_token_mutex_);
+        out.pe_token_backlog = pe_token_backlog_;
+    }
+    out.dsp_native_int_pending = dsp_native_int_pending_.load();
+    if (dsp_native_running_ && dsp_native_ != nullptr) {
+        // Deterministic mode settles the DSP after every wake, so at a frame boundary it is parked.
+        dsp_native_settle_for_determinism();
+        if (out.dsp == nullptr) out.dsp = std::make_shared<galaxy::NativeDspCoprocessor::RollbackState>();
+        dsp_native_->save_rollback_state(*out.dsp);
+        out.aram_cpu_dirty_words.clear();
+        if (dsp_native_aram_active_.load(std::memory_order_acquire) && dsp_native_aram_cpu_dirty_words_ != nullptr) {
+            if (out.aram_mirror == nullptr) {
+                out.aram_mirror = std::make_shared<galaxy::DspAramMirrorBoundary::RollbackState>();
+            }
+            if (!dsp_native_aram_boundary_.save_rollback_state(*out.aram_mirror)) {
+                throw std::runtime_error("rollback snapshot with a DSP ARAM packet in flight");
+            }
+            out.aram_cpu_dirty_words.assign(dsp_native_aram_cpu_dirty_words_.get(),
+                                            dsp_native_aram_cpu_dirty_words_.get() + kDspNativeAramDirtyWordCount);
+        } else {
+            out.aram_mirror.reset();
+        }
+    }
+}
+
+void GuestAddressSpace::restore_devices(const DeviceSnapshot& in) {
+#define GALAXY_DEVICE_SNAPSHOT_RESTORE(name) name = in.name;
+    GALAXY_DEVICE_SNAPSHOT_FIELDS(GALAXY_DEVICE_SNAPSHOT_RESTORE)
+#undef GALAXY_DEVICE_SNAPSHOT_RESTORE
+    pe_finish_pending_.store(in.pe_finish_pending);
+    pe_token_pending_.store(in.pe_token_pending);
+    pe_token_value_.store(in.pe_token_value);
+    {
+        std::lock_guard lock(pe_token_mutex_);
+        pe_token_backlog_ = in.pe_token_backlog;
+    }
+    dsp_native_int_pending_.store(in.dsp_native_int_pending);
+    if (in.dsp != nullptr && dsp_native_running_ && dsp_native_ != nullptr) {
+        dsp_native_settle_for_determinism();
+        if (in.dsp->context.pc != dsp_native_->peek_parked_pc()) {
+            std::cerr << "[rollback] the native DSP is parked at pc 0x" << std::hex << dsp_native_->peek_parked_pc()
+                      << ", the snapshot at 0x" << in.dsp->context.pc << std::dec << '\n';
+        }
+        dsp_native_->restore_rollback_state(*in.dsp);
+        // The DSP's ARAM mirror and both sides' dirty records, as they were: guest ARAM went back with MEM2.
+        if (in.aram_mirror != nullptr && dsp_native_aram_cpu_dirty_words_ != nullptr) {
+            if (!dsp_native_aram_boundary_.restore_rollback_state(*in.aram_mirror)) {
+                throw std::runtime_error("rollback restore with a DSP ARAM packet in flight");
+            }
+            std::copy(in.aram_cpu_dirty_words.begin(), in.aram_cpu_dirty_words.end(),
+                      dsp_native_aram_cpu_dirty_words_.get());
+        }
+    }
+}
+
+namespace {
+std::uint32_t rollback_fnv(const void* data, std::size_t size, std::uint32_t h = 2166136261u) noexcept {
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    for (std::size_t i = 0; i < size; ++i) {
+        h ^= bytes[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+}  // namespace
+
+std::string GuestAddressSpace::rollback_digest() {
+    char text[512];
+    int length = 0;
+    const auto add = [&](const char* name, std::uint32_t hash) {
+        length += std::snprintf(text + length, sizeof(text) - static_cast<std::size_t>(length), " %s=%08x", name, hash);
+    };
+    add("broadway", rollback_fnv(broadway_registers_.data(), broadway_registers_.size()));
+    add("hollywood", rollback_fnv(hollywood_registers_.data(), hollywood_registers_.size()));
+    add("gxfifo", rollback_fnv(gx_fifo_.data(), gx_fifo_.size()));
+    const std::uint64_t ai[] = {ai_dma_active_address_, ai_dma_active_blocks_, ai_dma_active_start_ticks_,
+                                ai_dma_next_completion_ticks_, ai_dma_next_interrupt_ticks_, ai_dma_shadow_address_,
+                                ai_dma_shadow_blocks_, static_cast<std::uint64_t>(ai_dma_playing_)};
+    add("ai", rollback_fnv(ai, sizeof(ai)));
+    if (dsp_native_running_ && dsp_native_ != nullptr) {
+        galaxy::NativeDspCoprocessor::RollbackState dsp;
+        dsp_native_->save_rollback_state(dsp);
+        const auto& c = dsp.context;
+        std::uint32_t regs = rollback_fnv(c.ar.data(), sizeof(c.ar));
+        regs = rollback_fnv(c.ix.data(), sizeof(c.ix), regs);
+        regs = rollback_fnv(c.wr.data(), sizeof(c.wr), regs);
+        regs = rollback_fnv(c.ax.data(), sizeof(c.ax), regs);
+        regs = rollback_fnv(c.ac.data(), sizeof(c.ac), regs);
+        regs = rollback_fnv(c.st.data(), sizeof(c.st), regs);
+        regs = rollback_fnv(&c.sr, sizeof(c.sr), regs);
+        regs = rollback_fnv(&c.pc, sizeof(c.pc), regs);
+        add("dsp-regs", regs);
+        add("dsp-dram", rollback_fnv(c.dram.data(), sizeof(c.dram)));
+        add("dsp-iram", rollback_fnv(c.iram.data(), sizeof(c.iram)));
+        add("dsp-ifx", rollback_fnv(c.ifx.data(), sizeof(c.ifx)));
+        add("dsp-bus", rollback_fnv(&c.audio_bus_state, sizeof(c.audio_bus_state)));
+        if (dsp_native_aram_active_.load(std::memory_order_acquire)) {
+            galaxy::DspAramMirrorBoundary::RollbackState mirror;
+            if (dsp_native_aram_boundary_.save_rollback_state(mirror)) {
+                add("aram-mirror", rollback_fnv(mirror.mirror.data(), mirror.mirror.size()));
+                add("aram-out", rollback_fnv(mirror.dirty_page_flags.data(), mirror.dirty_page_flags.size()));
+            }
+            add("aram-in", rollback_fnv(dsp_native_aram_cpu_dirty_words_.get(),
+                                        kDspNativeAramDirtyWordCount * sizeof(std::uint64_t)));
+        }
+    }
+    return std::string(text, static_cast<std::size_t>(length));
+}
+
+// The native DSP runs on its own thread at host speed, so how far it gets before the CPU next looks depends on
+// host scheduling. In deterministic mode, every CPU action that wakes it (a mail, a consumed mail, PIINT) waits
+// here until it parks again: in a mailbox poll or halted with nothing pending. Its DMA to main memory is served
+// meanwhile. The DSP then only runs at fixed points of guest execution.
+void GuestAddressSpace::dsp_native_settle_for_determinism() {
+    static const bool deterministic = read_env_flag("GALAXY_DETERMINISTIC");
+    if (!deterministic || !dsp_native_running_ || dsp_native_ == nullptr || dsp_native_worker_ == nullptr) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    // GALAXY_NETPLAY_RATE: how much of the simulation thread's time goes to waiting for the DSP.
+    static const bool report = read_env_flag("GALAXY_NETPLAY_RATE");
+    static double s_waited_ms = 0.0;
+    static std::uint64_t s_settles = 0u;
+    const auto account = [&] {
+        if (!report) return;
+        s_waited_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        if (++s_settles % 2000u == 0u) {
+            std::fprintf(stderr, "[netplay-rate] DSP settles %llu, %.0f ms waited in all\n",
+                         static_cast<unsigned long long>(s_settles), s_waited_ms);
+        }
+    };
+    for (;;) {
+        dsp_native_service_mram_transaction();
+        dsp_native_throw_if_failed();
+        if (dsp_native_->parked_in_idle_wait() || dsp_native_worker_->halted_and_idle()) {
+            account();
+            return;
+        }
+        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) {
+            static bool s_logged = false;
+            if (!s_logged) {
+                s_logged = true;
+                std::cerr << "[deterministic] the native DSP did not park within 2 s; continuing\n";
+            }
+            return;
+        }
+        SwitchToThread();
     }
 }
 
@@ -26894,6 +27490,19 @@ std::uint32_t GuestAddressSpace::ensure_rmge01_data_directory() {
     return 0u;
 }
 
+void GuestAddressSpace::adopt_device_snapshot(DeviceSnapshot& snapshot) {
+    for (auto& [handle, file] : snapshot.nand_files_) {
+        if (file.backing == nullptr) continue;
+        const std::optional<NativeNandObjectIdentity> identity =
+            native_nand_object_identity(nand_host_path(file.backing->guest_path));
+        file.backing->host_identity_valid = identity.has_value() && !identity->is_directory;
+        if (file.backing->host_identity_valid) {
+            file.backing->host_volume_serial = identity->volume_serial;
+            file.backing->host_file_index = identity->file_index;
+        }
+    }
+}
+
 std::filesystem::path GuestAddressSpace::nand_host_path(
     std::string_view guest_path) const {
     if (nand_root_.empty()) {
@@ -32293,9 +32902,14 @@ void GuestAddressSpace::service_virtual_wiimote_input_device(
 
     input_poll_diagnostic_stage(NativeInputPollStage::Report);
     std::array<std::uint8_t, galaxy::input::kMaxWiimoteInputReportBytes> report{};
+    // Deterministic mode (netplay): the game's Bluetooth stack gets the same neutral report every time, so the host
+    // controllers' noise cannot make two machines' games differ; the players' input reaches the game through the
+    // KPAD answers instead, which netplay records, sends and replays (netplay.h).
+    static const bool deterministic_reports = read_env_flag("GALAXY_DETERMINISTIC");
+    static const galaxy::input::WiimoteInputSnapshot kNeutralSnapshot{};
     const galaxy::input::WiimoteReportBuildResult built =
         galaxy::input::build_wiimote_input_report(
-            emitted_report_mode, snapshot, report);
+            emitted_report_mode, deterministic_reports ? kNeutralSnapshot : snapshot, report);
     if (built.status ==
         galaxy::input::WiimoteReportBuildStatus::UnsupportedReportMode) {
         std::ostringstream message;
@@ -32969,6 +33583,18 @@ void initialize_boot_memory(
     address_space.write_u32(0x8000310C, arena_low);
     address_space.write_u32(0x80003110, fst_address);
     address_space.open_game_pak(content_root / L"game.pak");
+    // A disc mod may move or resize a file, which it does by patching the disc's FST; the guest's copy
+    // comes from sys/fst.bin, so the same patch is applied to it. boot.bin 0x424 holds the FST's disc
+    // offset in words.
+    if (boot.size() >= 0x428u) {
+        const auto byte_at = [&boot](std::size_t i) { return std::to_integer<std::uint32_t>(boot[i]); };
+        const std::uint64_t fst_disc_offset =
+            static_cast<std::uint64_t>((byte_at(0x424) << 24) | (byte_at(0x425) << 16) |
+                                       (byte_at(0x426) << 8) | byte_at(0x427))
+            << 2;
+        address_space.apply_disc_overrides(
+            fst_disc_offset, fst_address, static_cast<std::uint32_t>(fst.size()));
+    }
     // Does not re-zero the declared BSS range. RMGE01's BSS span (0x805F5A40..0x806ADF90) interleaves with two loaded
     // data sections: .sdata (0x8069CCA0, initialised SDA1 globals, including __mailboxAck at 0x8069E390, the IPC
     // free-slot semaphore whose retail initial value is 1) and .sdata2 (0x806A3280, SDA2 float/double constants).

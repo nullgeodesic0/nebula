@@ -1,4 +1,5 @@
 #include "galaxy/coop_scheduler.h"
+#include "galaxy/hot_join.h"
 
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
@@ -21,9 +22,46 @@ namespace {
 constexpr std::uint32_t kDefaultSwitchThreadCallback = 0x804AAC08u;
 
 // A translated thread's native frames: deep scene traversals stay well below
-// this; the reserve is address space only.
-constexpr SIZE_T kFiberCommit = 256u * 1024u;
-constexpr SIZE_T kFiberReserve = 8u * 1024u * 1024u;
+// this. The whole stack is committed up front (nothing grows it on demand: the
+// guard page below it is no-access), so a parked stack is plain memory; pages
+// nobody touches cost commit charge only. The boot thread gets what the
+// simulation thread's own stack had (the /STACK reserve in CMakeLists.txt):
+// cooperative frames nest deeply on it.
+constexpr SIZE_T kFiberStack = 16u * 1024u * 1024u;
+constexpr SIZE_T kBootStack = 256u * 1024u * 1024u;
+constexpr SIZE_T kGuardPage = 4096u;
+// coop_context_x64.asm's frame: 0x100 bytes of saved state below the return address.
+constexpr std::size_t kContextFrame = 0x100u;
+// The stack pool's fixed place: slot i at kStackPoolBase + i * kStackPoolStride (above the flat guest view).
+constexpr std::uintptr_t kStackPoolBase = 0x0000200000000000ull;
+constexpr std::uintptr_t kStackPoolStride = 0x20000000ull;  // 512 MiB: the boot stack and its guard fit
+
+extern "C" void coop_context_switch(void** save_sp, void* load_sp);
+extern "C" void coop_context_trampoline();
+
+// The stack pointer of a context that has not run yet: coop_context_switch's frame laid out so that its return
+// enters coop_context_trampoline, which calls entry(argument).
+void* coop_context_make(std::byte* base, std::byte* top, void (*entry)(void*), void* argument, unsigned mxcsr) {
+    auto* ret = reinterpret_cast<std::uint64_t*>((reinterpret_cast<std::uintptr_t>(top) & ~std::uintptr_t{15}) - 16u);
+    auto* frame = reinterpret_cast<std::byte*>(ret) - kContextFrame;
+    std::memset(frame, 0, kContextFrame);
+    std::uint32_t mx = mxcsr;
+    std::memcpy(frame + 0xA0, &mx, sizeof(mx));
+    const std::uint16_t fpcw = 0x027Fu;
+    std::memcpy(frame + 0xA4, &fpcw, sizeof(fpcw));
+    const std::uint64_t words[] = {
+        reinterpret_cast<std::uint64_t>(base),                // +A8 DeallocationStack
+        reinterpret_cast<std::uint64_t>(base + kGuardPage),   // +B0 StackLimit
+        reinterpret_cast<std::uint64_t>(top),                 // +B8 StackBase
+        0u, 0u, 0u, 0u,                                       // +C0 rbp rbx rdi rsi
+        reinterpret_cast<std::uint64_t>(entry),               // +E0 r12
+        reinterpret_cast<std::uint64_t>(argument),            // +E8 r13
+        0u, 0u,                                               // +F0 r14 r15
+    };
+    std::memcpy(frame + 0xA8, words, sizeof(words));
+    *ret = reinterpret_cast<std::uint64_t>(&coop_context_trampoline);
+    return frame;
+}
 
 std::uint32_t leading_zeros(std::uint32_t value) noexcept {
     return static_cast<std::uint32_t>(std::countl_zero(value));
@@ -112,32 +150,193 @@ Scheduler::Scheduler(Host host, GuestRam ram, PpcContext* shared_context)
 }
 
 Scheduler::~Scheduler() {
-    for (void* handle : retired_) {
-        if (handle != nullptr && handle != GetCurrentFiber()) DeleteFiber(handle);
+    // Only after the boot fiber has ended (run_boot returned): no stack is in use by the caller.
+    for (Stack& stack : stacks_) {
+        if (stack.base != nullptr) VirtualFree(stack.base, 0, MEM_RELEASE);
     }
-    for (auto& [thread, fiber] : fibers_) {
-        if (fiber.handle != nullptr && !fiber.boot && fiber.handle != GetCurrentFiber()) {
-            DeleteFiber(fiber.handle);
+}
+
+void Scheduler::add_stack(std::size_t size) {
+    // Slot i lives at kStackPoolBase + i * kStackPoolStride in every process, so a snapshot's stacks (and the
+    // pointers they hold into each other) are valid in another process (hot join, docs/HOT_JOIN.md).
+    void* const wanted = reinterpret_cast<void*>(kStackPoolBase + stacks_.size() * kStackPoolStride);
+    auto* base = static_cast<std::byte*>(VirtualAlloc(wanted, size + kGuardPage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (base == nullptr) {
+        std::fprintf(stderr, "[coop] stack slot %zu cannot be placed at %p; snapshots will not move to another process\n",
+                     stacks_.size(), wanted);
+        base = static_cast<std::byte*>(VirtualAlloc(nullptr, size + kGuardPage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    }
+    if (base == nullptr) {
+        throw std::runtime_error("cannot allocate a guest thread stack: " + std::to_string(GetLastError()));
+    }
+    DWORD old = 0;
+    VirtualProtect(base, kGuardPage, PAGE_NOACCESS, &old);
+    stacks_.push_back(Stack{base, base + kGuardPage + size, nullptr, false});
+}
+
+int Scheduler::acquire_stack(std::size_t size) {
+    // The lowest free slot of that size, so the same sequence of thread creations gets the same stacks.
+    for (std::size_t i = 0; i < stacks_.size(); ++i) {
+        if (!stacks_[i].in_use && static_cast<std::size_t>(stacks_[i].top - stacks_[i].base) == size + kGuardPage) {
+            stacks_[i].in_use = true;
+            return static_cast<int>(i);
+        }
+    }
+    add_stack(size);
+    stacks_.back().in_use = true;
+    return static_cast<int>(stacks_.size() - 1u);
+}
+
+void Scheduler::adopt_stacks(const Snapshot& in) {
+    for (const Snapshot::StackImage& image : in.stacks) {
+        const auto top = reinterpret_cast<std::uintptr_t>(image.sp) + image.bytes.size();
+        const std::uintptr_t base = kStackPoolBase + static_cast<std::uintptr_t>(image.slot) * kStackPoolStride;
+        if (top <= base + kGuardPage || top > base + kStackPoolStride) {
+            throw std::runtime_error("hot join: stack slot " + std::to_string(image.slot) + " is not in the pool");
+        }
+        while (stacks_.size() <= static_cast<std::size_t>(image.slot)) {
+            add_stack(stacks_.size() == static_cast<std::size_t>(image.slot) ? top - base - kGuardPage : kFiberStack);
+        }
+        const Stack& stack = stacks_[static_cast<std::size_t>(image.slot)];
+        if (reinterpret_cast<std::uintptr_t>(stack.base) != base || reinterpret_cast<std::uintptr_t>(stack.top) != top) {
+            throw std::runtime_error("hot join: stack slot " + std::to_string(image.slot) + " differs in this process");
         }
     }
 }
 
-void Scheduler::attach_boot_fiber() {
-    if (boot_handle_ != nullptr) return;
-    // Float switching keeps MXCSR (flush-to-zero, rounding) per fiber; new
-    // fibers start from the simulation thread's mode.
-    boot_handle_ = ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
-    if (boot_handle_ == nullptr) {
-        throw std::runtime_error(
-            "ConvertThreadToFiberEx failed: " + std::to_string(GetLastError()));
+void Scheduler::switch_context(int to_slot) {
+    void** const save = current_slot_ == kNoSlot ? &host_sp_ : &stacks_[current_slot_].sp;
+    void* const load = to_slot == kNoSlot ? host_sp_ : stacks_[to_slot].sp;
+    current_slot_ = to_slot;
+    coop_context_switch(save, load);
+    // Resumed: whoever switched here set current_slot_ to this context.
+}
+
+void Scheduler::boot_entry(void* parameter) {
+    auto* scheduler = static_cast<Scheduler*>(parameter);
+    try {
+        scheduler->boot_function_(scheduler->boot_argument_);
+    } catch (...) {
+        scheduler->boot_result_ = std::current_exception();
     }
+    // Back to the simulation thread's context for good; this stack is never resumed.
+    scheduler->switch_context(kNoSlot);
+    std::terminate();
+}
+
+void Scheduler::run_boot(void (*entry)(void*), void* argument) {
+    if (boot_slot_ != kNoSlot) throw std::logic_error("the cooperative boot fiber runs once");
+    // New fibers start from the simulation thread's float mode (flush-to-zero, rounding).
     mxcsr_ = _mm_getcsr();
+    boot_function_ = entry;
+    boot_argument_ = argument;
+    boot_slot_ = acquire_stack(kBootStack);
+    Stack& stack = stacks_[boot_slot_];
+    stack.sp = coop_context_make(stack.base, stack.top, &Scheduler::boot_entry, this, mxcsr_);
+    int resume = boot_slot_;
+    for (;;) {
+        switch_context(resume);
+        // Back on this context: a fiber asks for a snapshot or a restore, or the boot fiber has ended.
+        const HostRequest request = host_request_;
+        host_request_ = HostRequest::None;
+        if (request == HostRequest::Save) {
+            host_save(*save_target_);
+            resume = requester_slot_;
+        } else if (request == HostRequest::Restore) {
+            hot_join::trace("host_restore");
+            resume = host_restore(*restore_source_);
+            hot_join::trace("host_restore done; switching to the saved fiber");
+        } else {
+            break;
+        }
+    }
+    if (boot_result_ != nullptr) {
+        std::exception_ptr result = boot_result_;
+        boot_result_ = nullptr;
+        std::rethrow_exception(result);
+    }
+}
+
+bool Scheduler::save(Snapshot& out) {
+    if (current_slot_ == kNoSlot) throw std::logic_error("cooperative snapshot outside a fiber");
+    host_request_ = HostRequest::Save;
+    requester_slot_ = current_slot_;
+    save_target_ = &out;
+    resumed_by_restore_ = false;
+    switch_context(kNoSlot);
+    // Resumed after the capture, or by restore() (which set resumed_by_restore_).
+    hot_join::trace("Scheduler::save resumed");
+    const bool restored = resumed_by_restore_;
+    resumed_by_restore_ = false;
+    return restored;
+}
+
+void Scheduler::restore(const Snapshot& in) {
+    if (current_slot_ == kNoSlot || !in.valid) throw std::logic_error("cooperative restore without a snapshot");
+    host_request_ = HostRequest::Restore;
+    restore_source_ = &in;
+    switch_context(kNoSlot);
+    std::terminate();  // the context that called restore is gone
+}
+
+void Scheduler::host_save(Snapshot& out) {
+    out.stacks.clear();
+    for (std::size_t i = 0; i < stacks_.size(); ++i) {
+        const Stack& stack = stacks_[i];
+        if (!stack.in_use || stack.sp == nullptr) continue;
+        Snapshot::StackImage image;
+        image.slot = static_cast<int>(i);
+        image.sp = stack.sp;
+        const auto* from = static_cast<const std::byte*>(stack.sp);
+        image.bytes.assign(from, static_cast<const std::byte*>(stack.top));
+        out.stacks.push_back(std::move(image));
+    }
+    out.fibers = fibers_;
+    out.current_slot = requester_slot_;
+    out.running_thread = running_thread_;
+    out.boot_thread = boot_thread_;
+    out.unowned_chain = unowned_chain_;
+    out.retired = retired_;
+    out.switches = switches_;
+    out.fibers_created = fibers_created_;
+    out.idle_entries = idle_entries_;
+    out.idle_passes = idle_passes_;
+    out.valid = true;
+    if (host_.captured != nullptr) host_.captured(host_.user);
+}
+
+int Scheduler::host_restore(const Snapshot& in) {
+    // Every stack the snapshot knew is back in use with its bytes; a stack taken since is free again (it is
+    // still allocated, so slots keep their addresses).
+    for (Stack& stack : stacks_) {
+        stack.in_use = false;
+        stack.sp = nullptr;
+    }
+    for (const Snapshot::StackImage& image : in.stacks) {
+        Stack& stack = stacks_[static_cast<std::size_t>(image.slot)];
+        stack.in_use = true;
+        stack.sp = image.sp;
+        std::memcpy(image.sp, image.bytes.data(), image.bytes.size());
+    }
+    stacks_[static_cast<std::size_t>(boot_slot_)].in_use = true;
+    fibers_ = in.fibers;
+    running_thread_ = in.running_thread;
+    boot_thread_ = in.boot_thread;
+    unowned_chain_ = in.unowned_chain;
+    retired_ = in.retired;
+    switches_ = in.switches;
+    fibers_created_ = in.fibers_created;
+    idle_entries_ = in.idle_entries;
+    idle_passes_ = in.idle_passes;
+    fiber_error_ = nullptr;
+    resumed_by_restore_ = true;
+    return in.current_slot;
 }
 
 ChainState& Scheduler::running_chain() noexcept {
     if (running_thread_ != 0u) {
         const auto it = fibers_.find(running_thread_);
-        if (it != fibers_.end() && it->second.handle == GetCurrentFiber()) {
+        if (it != fibers_.end() && it->second.slot == current_slot_ && current_slot_ != kNoSlot) {
             return it->second.chain;
         }
     }
@@ -201,14 +400,14 @@ void Scheduler::select_thread(bool yield) {
     if (current != 0u) {
         // The fiber executing SelectThread belongs to the current thread.
         Fiber& self = fibers_[current];
-        if (self.handle == nullptr) {
-            self.handle = GetCurrentFiber();
+        if (self.slot == kNoSlot) {
+            self.slot = current_slot_;
             self.started = true;
-            self.boot = self.handle == boot_handle_;
+            self.boot = self.slot == boot_slot_;
             if (self.boot) {
                 boot_thread_ = current;
             }
-        } else if (self.handle != GetCurrentFiber()) {
+        } else if (self.slot != current_slot_) {
             throw std::runtime_error(
                 "cooperative SelectThread: current thread " + hex(current) +
                 " belongs to another fiber");
@@ -264,7 +463,7 @@ void Scheduler::select_thread(bool yield) {
     // context; the "load" is the fiber switch below.
     call_switch_callback(ram_.load32(os::kCurrentThread), next);
     set_current(next, next);
-    if (next != running_thread_ || fibers_[next].handle != GetCurrentFiber()) {
+    if (next != running_thread_ || fibers_[next].slot != current_slot_) {
         switch_to(next);
     }
 }
@@ -273,23 +472,18 @@ void Scheduler::switch_to(std::uint32_t next) {
     ChainState* const parked = &running_chain();
     if (running_thread_ != 0u) {
         Fiber& self = fibers_[running_thread_];
-        if (self.handle == GetCurrentFiber()) {
+        if (self.slot == current_slot_ && current_slot_ != kNoSlot) {
             save_thread_registers(*context_, self.saved);
             self.started = true;
         }
     }
     // References into fibers_ stay valid across insertion.
     Fiber& target = fibers_[next];
-    if (target.handle == nullptr) {
+    if (target.slot == kNoSlot) {
         auto* start = new FiberStart{this, next};
-        target.handle = CreateFiberEx(kFiberCommit, kFiberReserve, FIBER_FLAG_FLOAT_SWITCH,
-                                      &Scheduler::fiber_entry, start);
-        if (target.handle == nullptr) {
-            delete start;
-            throw std::runtime_error(
-                "CreateFiberEx failed for guest thread " + hex(next) + ": " +
-                std::to_string(GetLastError()));
-        }
+        target.slot = acquire_stack(kFiberStack);
+        Stack& stack = stacks_[target.slot];
+        stack.sp = coop_context_make(stack.base, stack.top, &Scheduler::fiber_entry, start, mxcsr_);
         target.started = false;
         target.chain = {};
         ++fibers_created_;
@@ -299,12 +493,12 @@ void Scheduler::switch_to(std::uint32_t next) {
     host_.exchange_chain(host_.user, *parked, target.chain);
     running_thread_ = next;
     ++switches_;
-    SwitchToFiber(target.handle);
+    switch_context(target.slot);
 
     // Resumed: the switching fiber restored this thread's registers and chain.
     reap_exited();
     release_parked();
-    if (fiber_error_ != nullptr && GetCurrentFiber() == boot_handle_) {
+    if (fiber_error_ != nullptr && current_slot_ == boot_slot_) {
         std::exception_ptr error = fiber_error_;
         fiber_error_ = nullptr;
         std::rethrow_exception(error);
@@ -315,17 +509,17 @@ void Scheduler::return_to_boot() noexcept {
     ChainState& parked = running_chain();
     const auto boot = fibers_.find(boot_thread_);
     const ChainState& resumed =
-        boot != fibers_.end() && boot->second.handle == boot_handle_
+        boot != fibers_.end() && boot->second.slot == boot_slot_
             ? boot->second.chain
             : unowned_chain_;
     host_.exchange_chain(host_.user, parked, resumed);
     running_thread_ = boot_thread_;
-    SwitchToFiber(boot_handle_);
+    switch_context(boot_slot_);
     // The boot fiber never resumes a fiber that reported a failure.
     std::terminate();
 }
 
-void __stdcall Scheduler::fiber_entry(void* parameter) {
+void Scheduler::fiber_entry(void* parameter) {
     auto* start = static_cast<FiberStart*>(parameter);
     Scheduler* const scheduler = start->scheduler;
     const std::uint32_t thread = start->thread;
@@ -345,9 +539,9 @@ void __stdcall Scheduler::fiber_entry(void* parameter) {
 void Scheduler::on_thread_created(std::uint32_t thread) {
     const auto it = fibers_.find(thread);
     if (it == fibers_.end()) return;
-    if (it->second.handle != nullptr && it->second.handle != GetCurrentFiber() &&
-        !it->second.boot) {
-        retired_.push_back(it->second.handle);
+    if (it->second.slot != kNoSlot && !it->second.boot) {
+        // Its own fiber (current) keeps running on the stack until it switches away.
+        retired_.push_back(it->second.slot);
     }
     fibers_.erase(it);
     release_parked();
@@ -357,13 +551,12 @@ void Scheduler::on_thread_created(std::uint32_t thread) {
 // runs again only through OSCreateThread, which starts a new fiber: its parked
 // fiber is released.
 void Scheduler::reap_exited() {
-    void* const current = GetCurrentFiber();
     for (auto it = fibers_.begin(); it != fibers_.end();) {
         const Fiber& fiber = it->second;
         const std::uint16_t state = ram_.load16(it->first + os::kThreadState);
-        if (fiber.handle != nullptr && fiber.handle != current && !fiber.boot &&
+        if (fiber.slot != kNoSlot && fiber.slot != current_slot_ && !fiber.boot &&
             fiber.started && (state == 0u || state == os::kStateMoribund)) {
-            retired_.push_back(fiber.handle);
+            retired_.push_back(fiber.slot);
             it = fibers_.erase(it);
         } else {
             ++it;
@@ -372,11 +565,10 @@ void Scheduler::reap_exited() {
 }
 
 void Scheduler::release_parked() {
-    if (retired_.empty()) return;
-    void* const current = GetCurrentFiber();
     for (auto it = retired_.begin(); it != retired_.end();) {
-        if (*it != current) {
-            DeleteFiber(*it);
+        if (*it != current_slot_) {
+            stacks_[*it].in_use = false;
+            stacks_[*it].sp = nullptr;
             it = retired_.erase(it);
         } else {
             ++it;

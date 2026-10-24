@@ -40,6 +40,19 @@ struct JAudioGuestMemory {
     }
 };
 
+// Replaces sounds with audio from the host (voice_replacement.h). claim() is asked when a channel starts a
+// sound with a known owner (`luigi`: a voice line in Luigi's take) and returns 0 (keep), 1 (this channel carries
+// the replacement: render() supplies its samples in place of the decoded ones, before filters, volume, pan and
+// effect sends) or 2 (silence it). mix_remainder() runs once per subframe after the channels.
+struct JAudioVoiceOverride {
+    std::uint8_t (*claim)(std::uint32_t sound_id, std::uint64_t start, bool luigi){};
+    void (*render)(std::int16_t* out, std::uint32_t count){};
+    void (*mix_remainder)(std::int16_t* left, std::int16_t* right, std::uint32_t count, std::uint32_t gain_q16){};
+    // Whether the replacement still has samples; when its channel ends first, the mixer finishes it through a
+    // copy of that channel's last state, so its volume, pan, filters and sends carry on unchanged.
+    bool (*playing)(){};
+};
+
 struct JAudioHostMixerStats {
     std::uint64_t setups{};
     std::uint64_t frames{};
@@ -98,6 +111,7 @@ public:
     // without it the owner is read from the console's memory, as v1.0.1 does.
     using OwnerResolver = std::uint32_t (*)(std::uint32_t channel, std::uint32_t* route);
     void set_owner_resolver(OwnerResolver resolver) noexcept { owner_resolver_ = resolver; }
+    void set_voice_override(const JAudioVoiceOverride& voice_override) noexcept { voice_override_ = voice_override; }
     [[nodiscard]] const JAudioChannelCategory& channel_category(std::uint32_t channel) const noexcept {
         return categories_[channel < categories_.size() ? channel : 0u];
     }
@@ -193,6 +207,18 @@ private:
     // Renders left in which an owner that was unresolved at the sound's start
     // is looked up again.
     std::array<std::uint8_t, 64> category_retries_{};
+    JAudioVoiceOverride voice_override_{};
+    // Channels whose sound is replaced (silenced), and whether that was decided for the current sound.
+    std::array<std::uint8_t, 64> replaced_{};
+    std::array<bool, 64> replacement_decided_{};
+    // The channel carrying a replacement, its record as of its last subframe, and whether it rendered in
+    // the current subframe.
+    std::int32_t carrier_index_ = -1;
+    bool carrier_rendered_ = false;
+    bool starting_carrier_ = false;
+    std::uint32_t carrier_level_ = 0u;  // the loudness proxy of the kept record
+    std::uint32_t carrier_quiet_subframes_ = 0u;  // subframes the game's own line has been silent or faded
+    std::array<std::byte, 0x180> carrier_record_{};
     galaxy::audio::NativeDspAudioBusState bus_state_{};
     JAudioHostMixerStats stats_{};
 };

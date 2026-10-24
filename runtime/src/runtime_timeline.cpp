@@ -1722,6 +1722,7 @@ void DeadlineBroker::set_periodic(
         if (stopping_) {
             throw std::runtime_error("deadline broker is stopping");
         }
+        poll_next_due_.store(0u, std::memory_order_relaxed);
         schedule_.set_periodic(
             kind, first_deadline_ticks, period_ticks, first_sequence);
         // Replacing a periodic clock also invalidates any edge published by
@@ -1735,6 +1736,7 @@ void DeadlineBroker::set_periodic(
 void DeadlineBroker::cancel_periodic(EventKind kind) noexcept {
     {
         const std::lock_guard<std::mutex> lock(mutex_);
+        poll_next_due_.store(0u, std::memory_order_relaxed);
         schedule_.cancel_periodic(kind);
     }
     notify_worker();
@@ -1750,6 +1752,7 @@ void DeadlineBroker::schedule_once(
         if (stopping_) {
             throw std::runtime_error("deadline broker is stopping");
         }
+        poll_next_due_.store(0u, std::memory_order_relaxed);
         schedule_.schedule_once(kind, deadline_ticks, sequence);
         wake = deadline_ticks < worker_wait_until_ticks_;
     }
@@ -1767,6 +1770,7 @@ void DeadlineBroker::replace_once(
         if (stopping_) {
             throw std::runtime_error("deadline broker is stopping");
         }
+        poll_next_due_.store(0u, std::memory_order_relaxed);
         schedule_.replace_once(kind, deadline_ticks, generation);
         // The worker publishes replaceable events while holding this same
         // mutex. Clearing here therefore linearizes replacement against both
@@ -1786,6 +1790,7 @@ void DeadlineBroker::restore_replaceable_after_host_suspension(
         if (stopping_) {
             throw std::runtime_error("deadline broker is stopping");
         }
+        poll_next_due_.store(0u, std::memory_order_relaxed);
         schedule_.restore_replaceable_after_host_suspension(
             kind, deadline_ticks, generation);
         // A published edge belongs to the discarded host-suspension interval.
@@ -1804,6 +1809,7 @@ void DeadlineBroker::cancel_once(
         if (stopping_) {
             throw std::runtime_error("deadline broker is stopping");
         }
+        poll_next_due_.store(0u, std::memory_order_relaxed);
         schedule_.cancel_once(kind, generation);
         latch_.clear_replaceable(kind);
     }
@@ -1818,11 +1824,45 @@ void DeadlineBroker::start() {
     if (stopping_) {
         throw std::runtime_error("deadline broker cannot restart after stop");
     }
+    if (synchronous_) {
+        started_ = true;  // poll() publishes; no worker
+        return;
+    }
     // std::thread construction can fail (resource exhaustion). Publish the
     // started state only after ownership of a live worker is established so a
     // caller can cleanly destroy the broker after the exception.
     worker_ = std::thread(&DeadlineBroker::worker_loop, this);
     started_ = true;
+}
+
+std::optional<std::uint64_t> DeadlineBroker::poll(std::uint64_t now_ticks) {
+    // The simulation thread polls at every time-base read: while nothing is due and the schedule is unchanged,
+    // the last answer stands, without the lock or the schedule scan.
+    if (const std::uint64_t due = poll_next_due_.load(std::memory_order_relaxed); due != 0u && now_ticks < due) {
+        return due;
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (!synchronous_ || stopping_) return std::nullopt;
+    for (const DeadlineEvent& event : schedule_.collect_due(now_ticks)) {
+        const bool published = event.replaceable
+            ? latch_.publish_replaceable(event.kind, event.sequence)
+            : (event.kind == EventKind::InputReport || event.kind == EventKind::VideoInterface
+                   ? latch_.publish_periodic(event)
+                   : latch_.publish(event.kind));
+        if (!published) {
+            throw std::overflow_error(event.replaceable ? "replaceable deadline publication collided"
+                                                        : "pending deadline event counter overflowed");
+        }
+        DeadlinePublicationStats& stats = publication_stats_[static_cast<std::size_t>(event.kind)];
+        ++stats.publications;
+        stats.last_sequence = event.sequence;
+        stats.last_deadline_ticks = event.deadline_ticks;
+        stats.last_prepublication_ticks = now_ticks;
+        stats.last_postpublication_ticks = now_ticks;
+    }
+    const std::optional<std::uint64_t> next = schedule_.next_deadline_ticks();
+    poll_next_due_.store(next.value_or(0u), std::memory_order_relaxed);
+    return next;
 }
 
 void DeadlineBroker::stop() noexcept {
@@ -1868,6 +1908,7 @@ bool DeadlineBroker::rebase_timeline_after_host_suspension(
     if (stopping_) {
         return false;
     }
+    poll_next_due_.store(0u, std::memory_order_relaxed);
     return timeline_.rebase_after_host_suspension(
         last_guest_ticks, observed_host_ticks);
 }
@@ -1882,6 +1923,7 @@ bool DeadlineBroker::rebase_and_restore_after_host_suspension(
         if (stopping_) {
             return false;
         }
+        poll_next_due_.store(0u, std::memory_order_relaxed);
 
         std::array<bool, kEventKindCount> restored{};
         for (const PeriodicDeadlineRestore& restore : periodic_restores) {

@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cstring>
 
+#include <emmintrin.h>
+
 namespace galaxy::host {
 namespace {
 
@@ -60,6 +62,34 @@ void put32(std::byte* p, std::uint32_t offset, std::uint32_t value) noexcept {
 // accumulator; returns the rounded value's middle word.
 [[nodiscard]] std::int64_t rounded_mid(std::int64_t product) noexcept {
     return ((product & 0x10000) != 0 ? product + 0x8000 : product + 0x7FFF) >> 16;
+}
+
+// rounded_mid(2 * a * b) for 16-bit a and b, eight lanes at a time in 32 bits: with p = a * b (exact),
+// rounding 2p half to even at bit 16 is (p + 0x3FFF + bit 15 of p) >> 15. Two halves of four lanes.
+struct RoundedPairs {
+    __m128i low;
+    __m128i high;
+};
+
+[[nodiscard]] RoundedPairs rounded_mid_doubled8(__m128i a, __m128i b) noexcept {
+    const __m128i product_low = _mm_mullo_epi16(a, b);
+    const __m128i product_high = _mm_mulhi_epi16(a, b);
+    const __m128i one = _mm_set1_epi32(1);
+    const __m128i bias = _mm_set1_epi32(0x3FFF);
+    const auto round = [&](__m128i p) {
+        const __m128i odd = _mm_and_si128(_mm_srli_epi32(p, 15), one);
+        return _mm_srai_epi32(_mm_add_epi32(_mm_add_epi32(p, bias), odd), 15);
+    };
+    return {round(_mm_unpacklo_epi16(product_low, product_high)),
+            round(_mm_unpackhi_epi16(product_low, product_high))};
+}
+
+// Sign-extended 32-bit halves of eight 16-bit lanes.
+[[nodiscard]] __m128i widen_low16(__m128i v) noexcept {
+    return _mm_srai_epi32(_mm_unpacklo_epi16(v, v), 16);
+}
+[[nodiscard]] __m128i widen_high16(__m128i v) noexcept {
+    return _mm_srai_epi32(_mm_unpackhi_epi16(v, v), 16);
 }
 
 // Q15 multiply with the product doubled (DSP "M2" mode), truncated.
@@ -243,17 +273,21 @@ void JAudioHostMixer::mix_subframe(const JAudioGuestMemory& memory) {
     clear(kBusLeft, kSamples);
     clear(kBusRight, kSamples);
     {
+        // The folded values are at most 0x6784 in magnitude, so the 16-bit pack never saturates.
         std::array<std::int16_t, kSamples> fold{};
-        for (std::uint32_t i = 0; i < kSamples; ++i) {
-            fold[i] = static_cast<std::int16_t>(
-                rounded_mid(static_cast<std::int64_t>(d[kBusSurroundLeft + i]) * 0x6784 * 2));
-        }
+        const auto fold_bus = [&](std::uint32_t bus) {
+            static_assert(kSamples % 8u == 0u);
+            const __m128i gain = _mm_set1_epi16(0x6784);
+            for (std::uint32_t i = 0; i < kSamples; i += 8u) {
+                const RoundedPairs r = rounded_mid_doubled8(
+                    _mm_loadu_si128(reinterpret_cast<const __m128i*>(d + bus + i)), gain);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(fold.data() + i), _mm_packs_epi32(r.low, r.high));
+            }
+        };
+        fold_bus(kBusSurroundLeft);
         add_scaled(kBusLeft, fold.data(), kSamples, 0x7FFF);
         add_scaled(kBusRight, fold.data(), kSamples, static_cast<std::int16_t>(0xB820));
-        for (std::uint32_t i = 0; i < kSamples; ++i) {
-            fold[i] = static_cast<std::int16_t>(
-                rounded_mid(static_cast<std::int64_t>(d[kBusSurroundRight + i]) * 0x6784 * 2));
-        }
+        fold_bus(kBusSurroundRight);
         add_scaled(kBusLeft, fold.data(), kSamples, 0x47E0);
         add_scaled(kBusRight, fold.data(), kSamples, static_cast<std::int16_t>(0x8001));
     }
@@ -296,6 +330,61 @@ void JAudioHostMixer::mix_subframe(const JAudioGuestMemory& memory) {
         }
     }
 
+    // A replacement whose channel ended before it: the rest goes through a copy of that channel's last state,
+    // so its volume, pan, filters and effect sends carry on.
+    if (carrier_index_ >= 0 && !carrier_rendered_) {
+        if (voice_override_.playing != nullptr && voice_override_.playing() && voice_override_.render != nullptr) {
+            std::byte* record = carrier_record_.data();
+            std::int16_t* out = channel_out_.data() + kOutOffset;
+            std::fill_n(out, kSamples, std::int16_t{0});  // no game line to measure the level against
+            voice_override_.render(out, kSamples);
+            // The line's pan and volume at its loudest, applied here directly: the game's own mixing of a
+            // stopped channel would fade it out.
+            std::int32_t left_q15 = 0;
+            std::int32_t right_q15 = 0;
+            if (be16(record, 0x058u) != 0u) {
+                const std::uint16_t pan_word = be16(record, 0x050u);
+                const std::uint32_t pan = std::min<std::uint32_t>(pan_word >> 8u, 0x7Fu);
+                const std::int32_t volume = std::max(sbe16(record, 0x054u), sbe16(record, 0x056u));
+                left_q15 = q15(dram_[0x200u + (pan ^ 0x7Fu)], volume);
+                right_q15 = q15(dram_[0x200u + pan], volume);
+            } else {
+                for (std::uint32_t bus = 0; bus < 6u; ++bus) {
+                    const std::uint32_t base = 0x010u + bus * 8u;
+                    const std::uint16_t connect = be16(record, base);
+                    const std::int32_t volume = std::max(sbe16(record, base + 2u), sbe16(record, base + 4u));
+                    if (connect == kBusLeft) left_q15 = std::max(left_q15, volume);
+                    if (connect == kBusRight) right_q15 = std::max(right_q15, volume);
+                    if (connect == kBusCenter) {
+                        left_q15 = std::max(left_q15, volume * 0x5A82 / 0x8000);
+                        right_q15 = std::max(right_q15, volume * 0x5A82 / 0x8000);
+                    }
+                }
+            }
+            const std::int64_t gain = bus_gains_set_
+                ? bus_gain_q16_[static_cast<std::size_t>(galaxy::audio::NativeAudioBus::Voice)]
+                : galaxy::audio::kNativeAudioUnityGainQ16;
+            for (std::uint32_t k = 0; k < kSamples; ++k) {
+                const std::int64_t s = (static_cast<std::int64_t>(out[k]) * gain) >> 16;
+                d[kBusLeft + k] = static_cast<std::int16_t>(
+                    std::clamp<std::int64_t>(d[kBusLeft + k] + ((s * left_q15) >> 15), -32768, 32767));
+                d[kBusRight + k] = static_cast<std::int16_t>(
+                    std::clamp<std::int64_t>(d[kBusRight + k] + ((s * right_q15) >> 15), -32768, 32767));
+            }
+        } else {
+            carrier_index_ = -1;
+        }
+    }
+    carrier_rendered_ = false;
+
+    // Anything of a replacement left unplaced (no channel state to finish it with).
+    if (voice_override_.mix_remainder != nullptr) {
+        voice_override_.mix_remainder(d + kBusLeft, d + kBusRight, kSamples,
+                            bus_gains_set_
+                                ? bus_gain_q16_[static_cast<std::size_t>(galaxy::audio::NativeAudioBus::Voice)]
+                                : galaxy::audio::kNativeAudioUnityGainQ16);
+    }
+
     // Output (0x042D..0x045C): center at -3 dB into both sides, mixer level,
     // inverted-right bus.
     add_scaled_dram(kBusLeft, kBusCenter, kSamples, 0x5A82);
@@ -326,13 +415,59 @@ void JAudioHostMixer::render_channel(std::byte* record, std::uint32_t index,
     } else {
         render_source(record, out, memory);
     }
-    apply_fir(record, out);
-    apply_iir(record, out);
     if (bus_gains_set_) {
         const bool starting = be16(record, 0x008u) != 0u;
         if (starting || category_retries_[index] != 0u) {
             classify_channel(index, record, starting, memory);
         }
+        if (starting) {
+            replaced_[index] = 0u;
+            replacement_decided_[index] = false;
+        }
+        if (!replacement_decided_[index] && voice_override_.claim != nullptr &&
+            categories_[index].decision.classification == galaxy::audio::NativeAudioBusClassification::OwnerSoundId) {
+            replacement_decided_[index] = true;
+            // Channels starting one sound in the same subframe share a start stamp.
+            replaced_[index] = voice_override_.claim(categories_[index].owner.sound_id,
+                                                     (stats_.subframes << 32u) | categories_[index].owner.sound_id,
+                                                     categories_[index].owner.luigi);
+        }
+        // A replaced line: the host's samples take the decoded ones' place, so the channel's filters, volume,
+        // pan and effect sends place the replacement in the scene as they would the original.
+        if (replaced_[index] == 1u && voice_override_.render != nullptr) {
+            if (carrier_index_ != static_cast<std::int32_t>(index) || starting) {
+                starting_carrier_ = true;  // a new line: its loudest state is looked for afresh
+                carrier_level_ = 0u;
+                carrier_quiet_subframes_ = 0u;
+            }
+            // The game's line is often shorter than the replacement: once it has gone silent, or its channel
+            // has faded well below its loudest, the replacement leaves the channel and finishes through the
+            // channel's loudest state (mix_subframe), so the rest is not faded with it.
+            bool game_silent = true;
+            for (std::uint32_t k = 0; k < kSamples && game_silent; ++k) {
+                game_silent = out[k] == 0;
+            }
+            std::uint32_t level = be16(record, 0x056u);
+            for (std::uint32_t bus = 0; bus < 6u; ++bus) {
+                level += be16(record, 0x010u + bus * 8u + 2u);
+            }
+            const bool faded = !starting_carrier_ && level * 4u < carrier_level_;
+            carrier_quiet_subframes_ = (game_silent || faded) ? carrier_quiet_subframes_ + 1u : 0u;
+            if (carrier_quiet_subframes_ >= 2u) {
+                replaced_[index] = 2u;  // detached: the channel stays silent from here
+                std::fill_n(out, kSamples, std::int16_t{0});
+            } else {
+                voice_override_.render(out, kSamples);
+                carrier_index_ = static_cast<std::int32_t>(index);
+                carrier_rendered_ = true;
+            }
+        } else if (replaced_[index] != 0u) {
+            std::fill_n(out, kSamples, std::int16_t{0});
+        }
+    }
+    apply_fir(record, out);
+    apply_iir(record, out);
+    if (bus_gains_set_) {
         const galaxy::audio::NativeAudioBus bus = categories_[index].decision.bus;
         galaxy::audio::NativeAudioBusRamp& ramp = bus_state_.ramps[index];
         galaxy::audio::native_audio_bus_set_ramp_target(
@@ -349,6 +484,19 @@ void JAudioHostMixer::render_channel(std::byte* record, std::uint32_t index,
         mix_auto(record, out);
     } else {
         mix_buses(record, out);
+    }
+    if (carrier_rendered_ && carrier_index_ == static_cast<std::int32_t>(index)) {
+        // Keep the state from the channel's loudest point: when the game stops its line, the channel fades its
+        // own volume out first, and a copy of that would carry the rest of the replacement at near silence.
+        std::uint32_t level = be16(record, 0x056u);
+        for (std::uint32_t bus = 0; bus < 6u; ++bus) {
+            level += be16(record, 0x010u + bus * 8u + 2u);
+        }
+        if (starting_carrier_ || level * 5u >= carrier_level_ * 4u) {
+            std::copy_n(record, carrier_record_.size(), carrier_record_.data());
+            carrier_level_ = std::max(level, starting_carrier_ ? 0u : carrier_level_);
+            starting_carrier_ = false;
+        }
     }
     if (!paused) {
         put16(record, 0x008u, 0u);
@@ -943,19 +1091,24 @@ std::int16_t JAudioHostMixer::ramp_mix(std::uint32_t destination,
     if (volume == 0 && step == 0) {
         return start;
     }
-    std::int16_t* dst = dram_.data() + destination;
-    const auto mix = [&](std::uint32_t k) {
-        const std::int64_t gain = mid_of(volume);
-        dst[k] = sat16(static_cast<std::int64_t>(dst[k]) + ((gain * source[k]) >> 16));
-    };
-    mix(0u);
+    // Each sample's gain first (sample 0 and the pair after it share one, as does every later pair; the
+    // tail from 65 keeps the last), then dst + (gain * source >> 16) saturated: mulhi and a saturating add.
+    alignas(16) std::array<std::int16_t, kSamples> gains;
+    gains[0] = mid_of(volume);
     for (std::uint32_t i = 0; i < 32u; ++i) {
-        mix(2u * i + 1u);
-        mix(2u * i + 2u);
+        const std::int16_t gain = mid_of(volume);
+        gains[2u * i + 1u] = gain;
+        gains[2u * i + 2u] = gain;
         volume += step;
     }
-    for (std::uint32_t k = 65u; k < kSamples; ++k) {
-        mix(k);
+    std::fill(gains.begin() + 65, gains.end(), mid_of(volume));
+    std::int16_t* dst = dram_.data() + destination;
+    for (std::uint32_t k = 0; k < kSamples; k += 8u) {
+        const __m128i scaled = _mm_mulhi_epi16(
+            _mm_load_si128(reinterpret_cast<const __m128i*>(gains.data() + k)),
+            _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + k)));
+        auto* out = reinterpret_cast<__m128i*>(dst + k);
+        _mm_storeu_si128(out, _mm_adds_epi16(_mm_loadu_si128(out), scaled));
     }
     return mid_of(volume);
 }
@@ -964,7 +1117,17 @@ std::int16_t JAudioHostMixer::ramp_mix(std::uint32_t destination,
 void JAudioHostMixer::add_scaled(std::uint32_t destination, const std::int16_t* source,
                                  std::uint32_t count, std::int16_t gain) {
     std::int16_t* dst = dram_.data() + destination;
-    for (std::uint32_t i = 0; i < count; ++i) {
+    std::uint32_t i = 0;
+    const __m128i gains = _mm_set1_epi16(gain);
+    for (; i + 8u <= count; i += 8u) {
+        const RoundedPairs r = rounded_mid_doubled8(
+            _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + i)), gains);
+        auto* out = reinterpret_cast<__m128i*>(dst + i);
+        const __m128i current = _mm_loadu_si128(out);
+        _mm_storeu_si128(out, _mm_packs_epi32(_mm_add_epi32(widen_low16(current), r.low),
+                                              _mm_add_epi32(widen_high16(current), r.high)));
+    }
+    for (; i < count; ++i) {
         dst[i] = sat16(static_cast<std::int64_t>(dst[i]) +
                        rounded_mid(static_cast<std::int64_t>(source[i]) * gain * 2));
     }

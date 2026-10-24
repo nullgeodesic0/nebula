@@ -23,6 +23,7 @@
 #include <set>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -644,10 +645,43 @@ public:
         pe_finish_pending_.store(true, std::memory_order_release);
         wake_idle_simulation();
     }
+    // Each interrupting draw-sync token reaches the guest's handler in order. Galaxy's DrawSyncManager
+    // brackets every token with a CP FIFO breakpoint so the GPU stops until the handler has run; this
+    // GP does not stop, so a token completing while an earlier one is still pending waits in
+    // pe_token_backlog_ and is raised when the guest clears the interrupt. Overwriting the latch instead
+    // lost the earlier token's callback: the Star Pointer's depth peek (StarPointerPeekZ) never ran,
+    // and Star Bits, Pull Stars and Star Bit aiming ignored the pointer.
     void raise_pe_token(std::uint16_t token, bool interrupt) {
-        pe_token_value_.store(token, std::memory_order_release);
-        if (interrupt) {
+        {
+            const std::lock_guard<std::mutex> lock(pe_token_mutex_);
+            if (pe_token_pending_.load(std::memory_order_acquire)) {
+                if (interrupt && pe_token_backlog_.size() < kPeTokenBacklogLimit) {
+                    pe_token_backlog_.push_back(token);
+                }
+                return;
+            }
+            pe_token_value_.store(token, std::memory_order_release);
+            if (!interrupt) {
+                return;
+            }
             pe_token_pending_.store(true, std::memory_order_release);
+        }
+        wake_idle_simulation();
+    }
+    // The guest's PE_SR token clear: the next waiting token, if any, becomes the pending one.
+    void clear_pe_token() {
+        bool raised = false;
+        {
+            const std::lock_guard<std::mutex> lock(pe_token_mutex_);
+            if (pe_token_backlog_.empty()) {
+                pe_token_pending_.store(false, std::memory_order_release);
+            } else {
+                pe_token_value_.store(pe_token_backlog_.front(), std::memory_order_release);
+                pe_token_backlog_.pop_front();
+                raised = true;
+            }
+        }
+        if (raised) {
             wake_idle_simulation();
         }
     }
@@ -1017,6 +1051,24 @@ public:
     DspAudioStats dsp_audio_stats() const { return dsp_audio_stats_; }
     IpcDebugSnapshot ipc_debug_snapshot() const;
     bool ipc_interrupt_pending() const;
+    // PI_INTSR as a pure observation (no device service), for the deterministic trace.
+    [[nodiscard]] std::uint32_t peek_processor_interrupt_cause() const { return processor_interrupt_cause(); }
+
+    // Rollback: every emulated device's state (IOS and IPC, Bluetooth and the virtual Wiimote, the GX FIFO, PI/PE,
+    // ARAM and AI DMA, DSP mail), not guest RAM, the native DSP coprocessor or host-side caches and diagnostics.
+    // Defined in native_host.cpp; make_device_snapshot allocates one.
+    struct DeviceSnapshot;
+    [[nodiscard]] static std::shared_ptr<DeviceSnapshot> make_device_snapshot();
+    void save_devices(DeviceSnapshot& out);
+    void restore_devices(const DeviceSnapshot& in);
+    // Hot join: a snapshot that leaves the process gets its own copy of what it shares with the live devices (open
+    // NAND files' backings), allocated where the caller allocates (the snapshot arena).
+    static void own_device_snapshot(DeviceSnapshot& snapshot);
+    // Hot join, in the process that loads such a snapshot: its open NAND files are bound to this process's host files
+    // at the same guest paths (their NTFS identity guards every write-back).
+    void adopt_device_snapshot(DeviceSnapshot& snapshot);
+    // Short digests of device and DSP state ("name=hash ..."), for the deterministic trace.
+    [[nodiscard]] std::string rollback_digest();
 
     // Filled by the WGPIPE write intercept.
     // The observable GX stream: every complete staged burst lands first.
@@ -1030,7 +1082,9 @@ public:
     //
     // Successful submission can return the released producer storage through
     // recycle_gx_fifo(). Retain at most one producer and one spare allocation,
-    // each capped at 256 KiB. A large capture does not enlarge this pool.
+    // each capped at 4 MiB: a co-op frame's FIFO is larger than 256 KiB, and
+    // regrowing it from empty every frame cost the simulation thread ~5%.
+    // A larger capture does not enlarge this pool.
     std::vector<std::byte> take_gx_fifo() {
         drain_wgpipe_gather_bursts();
         std::vector<std::byte> captured;
@@ -1043,7 +1097,7 @@ public:
     // and all CPU reads of the submitted source are complete. This does not
     // retire, consume or otherwise alter the submission's PE receipt.
     void recycle_gx_fifo(std::vector<std::byte>&& released) noexcept {
-        constexpr std::size_t kRetainedFifoCapacityBytes = 256u * 1024u;
+        constexpr std::size_t kRetainedFifoCapacityBytes = 4u * 1024u * 1024u;
         if (released.capacity() > kRetainedFifoCapacityBytes) {
             return;
         }
@@ -1104,6 +1158,10 @@ public:
     // Opens and memory-maps the game.pak image produced by build-pak. If the file
     // is missing, a warning is printed and disc reads return EIO.
     void open_game_pak(const std::filesystem::path& path);
+    // Copies the disc mod overrides that cover [disc_offset, disc_offset + size) over guest memory at
+    // guest_address, for disc data the host loads itself rather than through /dev/di (the FST).
+    void apply_disc_overrides(
+        std::uint64_t disc_offset, std::uint32_t guest_address, std::uint32_t size);
 
     // Pre-wires the CP FIFO ring with the dummy GXFifoObj base/end so direct
     // CP_WRITE_POINTER writes drain before GXInit runs.
@@ -1389,7 +1447,9 @@ private:
         bool destination_matches_source{};
         bool ioctlv{};
     };
-    void load_disc_mod_overrides_from_env();
+    void load_disc_mod_overrides_from_env(const std::filesystem::path& content_root);
+    // Adds one manifest's overrides; overrides from every manifest loaded must not overlap.
+    void load_disc_mod_manifest(const std::filesystem::path& manifest_file);
     [[nodiscard]] bool disc_read_in_range(
         std::uint64_t disc_offset,
         std::uint32_t size) const noexcept;
@@ -1509,6 +1569,8 @@ private:
     // mailbox path. Called from the CPU thread on mailbox polls.
     void dsp_native_pump();
     void dsp_native_service_mram_transaction();
+    // Deterministic mode (GALAXY_DETERMINISTIC): after the CPU wakes the native DSP, runs it to its next park.
+    void dsp_native_settle_for_determinism();
     void dsp_native_throw_if_failed();
     [[nodiscard]] bool dsp_native_active() const { return dsp_native_running_; }
     void dsp_native_shutdown(bool emit_audio_causal_report);
@@ -1939,6 +2001,11 @@ private:
     std::size_t fifo_stream_next_{0};
     std::atomic_bool pe_token_pending_{false};
     std::atomic<std::uint16_t> pe_token_value_{0};
+    // Interrupting tokens that completed while one was pending (raise_pe_token). Galaxy has at most a
+    // handful in flight per frame; the limit only bounds a guest that never clears the interrupt.
+    static constexpr std::size_t kPeTokenBacklogLimit = 64;
+    std::mutex pe_token_mutex_;
+    std::deque<std::uint16_t> pe_token_backlog_;
     // DSP mailbox: a to-DSP mail is a 16-bit high write (0x5000) then a low write
     // (0x5002). The boot-task protocol sends (command, value) pairs; the value of
     // 0x80F3D001 is the start vector, answered with DSP_INIT (0xDCD10000).

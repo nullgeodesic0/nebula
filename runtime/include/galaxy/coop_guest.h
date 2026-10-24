@@ -1,0 +1,99 @@
+#pragma once
+
+#include "galaxy/coop.h"
+#include "galaxy/native_api.h"
+
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+
+namespace galaxy {
+
+// Luigi's animation swap table from the content (<content>/mods/animations-model or animations/luigi_swap.txt,
+// "<bck> <swapped bck>" a line): Luigi's XanimeResourceTable resolves with it instead of Galaxy's
+// luigiAnimeSwapTable, and each brother's table has its own groups (coop_guest.cpp, namespace anime). At boot.
+void coop_load_luigi_swap(const std::filesystem::path& content_root);
+
+// Rollback: the co-op state (players, talks, pipes, lives, the save-select menu) and the second player's input.
+struct CoopRollbackState;
+[[nodiscard]] std::shared_ptr<CoopRollbackState> coop_rollback_save();
+void coop_rollback_restore(const CoopRollbackState& state);
+
+// Mario and Luigi co-op (docs/MULTIPLAYER.md). The runtime side of SiteHookKind::CoopBeforeCall and
+// CoopAfterCall: `id` names the game call (coop_call_id in translate.rs). Simulation thread, or the
+// game's archive loader thread for the archive calls.
+void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
+                      std::uint32_t guest_pc);
+void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services,
+                     std::uint32_t guest_pc);
+
+// Whether `mario` (a Mario, MarioActor + 0x230) is the second player's, which the Odyssey moveset leaves alone.
+[[nodiscard]] bool coop_is_second_player_mario(std::uint32_t mario) noexcept;
+
+// 1 or 2 while split screen draws the first or second half (GameScene::draw3D runs twice), else 0: the scene's
+// begin and end markers go around both (native_runtime.cpp).
+[[nodiscard]] unsigned coop_split_pass() noexcept;
+
+// Where split screen's line goes into the GX stream: native_runtime.cpp flushes the gather pipe and attaches a
+// SplitClip marker (gx_d3d12.h attach_split_clip) with `plane`, in logical EFB pixels, and `pass` (1 or 2);
+// zero and pass 0 clear it. `separator`: the black line between the halves (a, b, c as `plane`, opacity),
+// drawn by the pass 0 marker after the second half.
+using SplitClipSink = void (*)(void* user, const float plane[3], unsigned pass, const float separator[4]);
+void coop_set_split_clip_sink(SplitClipSink sink, void* user) noexcept;
+
+// The second player's MarioActor beside `first` (the scene's player), or 0: none, or one left from the last scene
+// (the agent's state and commands, agent_guest.cpp).
+[[nodiscard]] std::uint32_t coop_second_player(std::uint32_t first) noexcept;
+// Done in the second player's own turn after their next move, where MR::setPlayerPos and the player's calls act on
+// them: the agent's teleport and power-up for the second player (agent_guest.cpp).
+void coop_request_second_player_teleport(coop::Vec3 position) noexcept;
+void coop_request_second_player_mode(std::uint16_t mode) noexcept;
+// Co-op lives for the agent's state: the second player's lives (-1 before the first stage) and whether a player
+// (0 first, 1 second) is down or out of lives.
+[[nodiscard]] int coop_second_lives() noexcept;
+[[nodiscard]] coop::DownState coop_down_state(unsigned player) noexcept;
+
+// The agent's per-frame step (agent_guest.cpp), at the first player's controller read: with or without co-op.
+void agent_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc);
+// Online co-op's rejoin (agent_guest.cpp, net_lobby.h), at the same read: the location the lobby asks for, and
+// a session's way back to it. While it passes the logo, both PCs' first player presses A.
+void rejoin_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services, std::uint32_t guest_pc);
+[[nodiscard]] bool netplay_rejoin_press_a() noexcept;
+// A session's rejoin still playing its way back (its state is outside rollback's snapshot): no predictions then.
+[[nodiscard]] bool netplay_rejoin_active() noexcept;
+
+// Local hot join (docs/MULTIPLAYER.md "Drop in, drop out"): whether the second player is in the game, set by
+// coop_guest.cpp, read by the input thread to give him a controller of his own (native_host.cpp).
+void coop_set_second_present(bool present) noexcept;
+// Online live join: the second player drops in beside the first at the next chance (both PCs, the same frame).
+void coop_request_drop_in() noexcept;
+// The Players panel's Leave: the second player sits out at his next turn (local play).
+void coop_request_drop_out() noexcept;
+// Whether the second player is Luigi (a Mario save) or Mario (a Luigi save), for the menus' words.
+[[nodiscard]] bool coop_second_is_luigi() noexcept;
+// Whether a stage is playing (the co-op turn ran in the last quarter second), for the host menus.
+[[nodiscard]] bool coop_in_stage() noexcept;
+[[nodiscard]] bool coop_second_present() noexcept;
+
+// The second player's controller, published by the input thread and read once a game frame.
+void coop_publish_partner_input(const coop::PartnerInput& input) noexcept;
+[[nodiscard]] coop::PartnerInput coop_partner_input();
+// Online play replaces the source (netplay_session.cpp): the second player's controller from the synchronised
+// input, the same on both PCs. Returns false to fall back to this PC's.
+using CoopPartnerInputSource = bool (*)(coop::PartnerInput& out);
+void coop_set_partner_input_source(CoopPartnerInputSource source) noexcept;
+
+// Online play: this PC's whole controller input (every pad and the keyboard: one player a PC), published by the
+// input thread. The game's own Remote reads see a neutral Remote in deterministic mode, so netplay.cpp builds this
+// PC's player's KPAD status from this instead.
+void coop_publish_local_input(const coop::PartnerInput& input) noexcept;
+// Online play's own menu (net_lobby.h gx::online_menu_poll), reached from the input thread through this hook.
+using CoopOnlineMenuPoll = bool (*)(bool toggle, bool up, bool down, bool choose, bool back) noexcept;
+void coop_set_online_menu_poll(CoopOnlineMenuPoll poll) noexcept;
+// Another PC asks to join this one (net_lobby.cpp): the input poll lets + open the answer instead of the pause.
+void coop_set_join_request_pending(bool pending) noexcept;
+[[nodiscard]] bool coop_join_request_pending() noexcept;
+[[nodiscard]] bool coop_online_menu_poll(bool toggle, bool up, bool down, bool choose, bool back) noexcept;
+[[nodiscard]] coop::PartnerInput coop_local_input();
+
+}  // namespace galaxy
