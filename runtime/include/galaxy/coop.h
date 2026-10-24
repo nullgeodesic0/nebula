@@ -584,6 +584,67 @@ private:
     return {m[0] * p.x + m[1] * p.y + m[2] * p.z + m[3], m[4] * p.x + m[5] * p.y + m[6] * p.z + m[7],
             m[8] * p.x + m[9] * p.y + m[10] * p.z + m[11]};
 }
+[[nodiscard]] inline Vec3 rotate_vector(const std::array<float, 12>& m, Vec3 v) noexcept {
+    return {m[0] * v.x + m[1] * v.y + m[2] * v.z, m[4] * v.x + m[5] * v.y + m[6] * v.z,
+            m[8] * v.x + m[9] * v.y + m[10] * v.z};
+}
+
+// ---- A Star Pointer in a half of the split screen ----
+// The game makes a pointer's world point (StarPointerController::mWorldPos, where Star Bits are shot) from the
+// EFB depth under it with one camera, the shared one (TDDraw::invProject), and its far aim
+// (StarPieceShooter::calcShootGoalUsingPointingDepth) from that camera's ray. In split screen the pixel under the
+// pointer was drawn with its half's camera and lens (an off-centre GameCube projection, split_projection), so
+// these use them. `ndc_x`, `ndc_y`: the pointer on the whole screen, -1..1, y up.
+
+// The view-space ray through a screen point: z -1 (the camera looks down -z), x and y from the projection's
+// scales and centre shift (GameCube: x_clip = m00 x + m02 z, w = -z).
+[[nodiscard]] inline Vec3 pointer_view_ray(const std::array<float, 16>& projection, float ndc_x, float ndc_y) noexcept {
+    return {(ndc_x + projection[2]) / projection[0], (ndc_y + projection[6]) / projection[1 * 4 + 1], -1.0f};
+}
+
+// The world direction of the ray through a screen point, from the camera's eye (normalized).
+[[nodiscard]] inline Vec3 pointer_world_ray(const CameraMatrices& camera, const std::array<float, 16>& projection,
+                                            float ndc_x, float ndc_y) noexcept {
+    return normalized(rotate_vector(camera.inverse, pointer_view_ray(projection, ndc_x, ndc_y)),
+                      pose_of(camera.inverse).forward);
+}
+
+// The world point a depth sample shows: `depth` the EFB's 24-bit value over 0xFFFFFF, `near`, `far` the
+// viewport's depth range (GXSetViewport), as TDDraw::invProject reads them.
+[[nodiscard]] inline Vec3 unproject_pointer(const CameraMatrices& camera, const std::array<float, 16>& projection,
+                                            float ndc_x, float ndc_y, float depth, float near_z = 0.0f,
+                                            float far_z = 1.0f) noexcept {
+    // GameCube: depth = far + (far - near) * (m22 z + m23) / -z.
+    const float range = far_z - near_z;
+    const float d = depth - far_z;
+    const float z = -range * projection[11] / (d + range * projection[10]);
+    const Vec3 ray = pointer_view_ray(projection, ndc_x, ndc_y);
+    return transform_point(camera.inverse, ray * -z);
+}
+
+// Where a Star Bit shot aims (StarPieceShooter::calcShootGoalUsingPointingDepth), with the shooter's camera:
+// the world point under the pointer when it is within 3000 of the shooting player, pulled in to 3000 within
+// 4000, and beyond (or with no point) along the pointer's ray. The game takes the result again with the shared
+// camera's ray past 4000, so a far aim is given as the point on the ray 2990 from the player (the far end), which
+// it keeps as it is; a ray passing farther from him than that is pulled in to 2990.
+inline constexpr float kShotNear = 3000.0f;
+inline constexpr float kShotFar = 4000.0f;
+inline constexpr float kShotKept = 2990.0f;
+[[nodiscard]] inline Vec3 star_bit_shot_goal(Vec3 player, Vec3 point, bool has_point, Vec3 eye, Vec3 ray) noexcept {
+    const Vec3 from_player = point - player;
+    const float distance = length(from_player);
+    if (has_point && std::isfinite(distance) && distance <= kShotFar) {
+        return distance <= kShotNear ? point : player + from_player * (kShotNear / distance);
+    }
+    // The ray's far crossing of the sphere of kShotKept around the player.
+    const Vec3 to_player = player - eye;
+    const float along = dot(ray, to_player);
+    const float across = dot(to_player, to_player) - along * along;
+    const float reach = kShotKept * kShotKept - across;
+    if (reach >= 0.0f && std::isfinite(reach)) return eye + ray * (along + std::sqrt(reach));
+    const Vec3 far_point = eye + ray * (kShotNear + length(to_player));
+    return player + normalized(far_point - player, ray) * kShotKept;
+}
 
 // The second player's own camera while the screen is split: it trails the player at `distance`, keeps
 // `height` above them along their up vector (their gravity's opposite) and looks just above their head.
