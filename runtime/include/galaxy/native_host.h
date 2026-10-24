@@ -154,6 +154,8 @@ public:
     void set_paused(bool paused);
     // The game's name for the sound on a DSP channel (nebula_game_audio_channel_owner), for the volume categories.
     void set_channel_owner(std::uint32_t (*owner)(std::uint32_t channel, std::uint32_t* route));
+    // Mario's voice lines from the user's clips (voice_replacement.h): `folder` holds voices.txt; none when empty.
+    void load_voices(const std::filesystem::path& folder);
     // The DSP program's counters for the [jaudio] log line.
     [[nodiscard]] std::string stats_line() const;
 

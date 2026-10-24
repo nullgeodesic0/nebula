@@ -476,8 +476,10 @@ NEBULA_GAME_API void nebula_game_fs_complete(uint32_t slot, int32_t result);
 /* The AI took the latched DMA block (the console's AI DMA interrupt): the game prepares the next. */
 NEBULA_GAME_API void nebula_game_ai_interrupt(void);
 /* The sound playing on DSP channel `channel` (0-63) for the host's volume categories: its JAudio sound ID, with *route
-   1 (an effect), 2 (a sequence) or 3 (a stream); 0 with *route 0 when no sound the game can name plays there. The host
-   calls it from the DSP command it is running (the game's audio thread). */
+   1 (an effect), 2 (a sequence) or 3 (a stream), plus NEBULA_AUDIO_OWNER_LUIGI for a player voice line in Luigi's take;
+   0 with *route 0 when no sound the game can name plays there. The host calls it from the DSP command it is running
+   (the game's audio thread). */
+#define NEBULA_AUDIO_OWNER_LUIGI 0x100u
 NEBULA_GAME_API uint32_t nebula_game_audio_channel_owner(uint32_t channel, uint32_t* route);
 /* Mii import. prepare: makes a Mii (a 74-byte record as the console stores it) acceptable where the console would
    refuse a detail (birthday, special Mii not kept local, favourite colour, no name), then 1 when the game takes it as

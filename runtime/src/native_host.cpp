@@ -3,6 +3,7 @@
 #include "galaxy/native_host.h"
 #include "galaxy/wii_device_data.h"
 #include "galaxy/button_prompts.h"
+#include "galaxy/voice_replacement.h"
 
 #include "galaxy/native_audio_queue.h"
 #include "galaxy/jaudio_host_mixer.h"
@@ -4426,6 +4427,16 @@ bool NativeGameAudio::dsp_command(const std::uint32_t* words, std::uint32_t coun
 
 void NativeGameAudio::set_channel_owner(std::uint32_t (*owner)(std::uint32_t, std::uint32_t*)) {
     state_->mixer.set_owner_resolver(owner);
+}
+
+void NativeGameAudio::load_voices(const std::filesystem::path& folder) {
+    if (folder.empty()) return;
+    galaxy::voice::load(folder);
+    state_->mixer.set_voice_override(
+        {[](std::uint32_t id, std::uint64_t start, bool luigi) {
+             return static_cast<std::uint8_t>(galaxy::voice::claim(id, start, luigi));
+         },
+         &galaxy::voice::render, &galaxy::voice::mix_remainder, &galaxy::voice::playing});
 }
 
 bool NativeGameAudio::play(std::span<const std::byte> block, std::uint32_t sample_rate) {

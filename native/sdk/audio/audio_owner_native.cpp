@@ -40,6 +40,10 @@ extern "C" NEBULA_GAME_API uint32_t nebula_game_audio_channel_owner(uint32_t cha
         for (int depth = 0; track != nullptr && depth < 16; ++depth) {
             if (track->mNebulaOwner != nullptr) {
                 *route = track->mNebulaOwnerRoute;
+                // A player voice line in Luigi's take: AudSystem::switchToLuigi wrote 20 to its track's port 12.
+                if (track->mTrackPort.get(12) == 20) {
+                    *route |= NEBULA_AUDIO_OWNER_LUIGI;
+                }
                 return owner_id(track->mNebulaOwner);
             }
             track = track->mParent != track ? track->mParent : nullptr;

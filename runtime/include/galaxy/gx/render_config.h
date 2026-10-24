@@ -306,6 +306,10 @@ bool reload_render_config_if_changed();
 // GALAXY_TEXTURE_PACK_DIR names a pack folder for tests, below every mod. Empty when unknown or unset.
 [[nodiscard]] std::filesystem::path texture_pack_directory();
 [[nodiscard]] std::filesystem::path texture_pack_test_directory();
+// A pack installed for Dolphin, below every mod: NEBULA_TEXTURE_PACK=<folder> (or "off"), else Dolphin's
+// %APPDATA%\Dolphin Emulator\Load\Textures\RMGE01 or Documents\Dolphin Emulator\Load\Textures\RMGE01 when it
+// exists. Empty when none.
+[[nodiscard]] std::filesystem::path dolphin_texture_pack_directory();
 [[nodiscard]] std::filesystem::path texture_dump_directory();
 // The enabled mods' textures/ folders in load order (the host sets them at start); the generation changes with each
 // set.

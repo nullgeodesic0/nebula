@@ -126,6 +126,7 @@ galaxy_host_options(galaxy_jaudio_mixer)
 
 add_library(galaxy_native_host STATIC
     runtime/src/native_host.cpp
+    runtime/src/voice_replacement.cpp
     runtime/src/wii_device_data.cpp
     runtime/src/mii_import.cpp
     runtime/src/mii_formats.cpp

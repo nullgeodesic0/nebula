@@ -709,6 +709,38 @@ std::filesystem::path texture_pack_test_directory() {
     return folder;
 }
 
+std::filesystem::path dolphin_texture_pack_directory() {
+    static const std::filesystem::path folder = [] {
+        std::error_code error;
+#if defined(_WIN32)
+        const DWORD required = GetEnvironmentVariableW(L"NEBULA_TEXTURE_PACK", nullptr, 0);
+        if (required != 0u) {
+            std::wstring value(required, L'\0');
+            const DWORD copied = GetEnvironmentVariableW(L"NEBULA_TEXTURE_PACK", value.data(), required);
+            value.resize(copied < required ? copied : 0u);
+            if (value.empty() || _wcsicmp(value.c_str(), L"off") == 0) return std::filesystem::path{};
+            return std::filesystem::is_directory(value, error) ? std::filesystem::path(value) : std::filesystem::path{};
+        }
+        for (const wchar_t* base : {L"APPDATA", L"USERPROFILE"}) {
+            wchar_t root[MAX_PATH]{};
+            const DWORD length = GetEnvironmentVariableW(base, root, MAX_PATH);
+            if (length == 0u || length >= MAX_PATH) continue;
+            std::filesystem::path candidate(root);
+            if (base[0] == L'U') candidate /= L"Documents";
+            candidate = candidate / L"Dolphin Emulator" / L"Load" / L"Textures" / L"RMGE01";
+            if (std::filesystem::is_directory(candidate, error)) return candidate;
+        }
+#else
+        if (const char* value = std::getenv("NEBULA_TEXTURE_PACK"); value != nullptr) {
+            if (*value == '\0' || std::strcmp(value, "off") == 0) return std::filesystem::path{};
+            return std::filesystem::is_directory(value, error) ? std::filesystem::path(value) : std::filesystem::path{};
+        }
+#endif
+        return std::filesystem::path{};
+    }();
+    return folder;
+}
+
 std::filesystem::path texture_dump_directory() {
     return data_folder("GALAXY_TEXTURE_DUMP_DIR", "TextureDumps");
 }

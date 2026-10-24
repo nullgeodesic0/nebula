@@ -8917,6 +8917,10 @@ void GxBackend::render_frame_on_thread(FrameChunk& chunk) {
             settings.preload = render.texture_pack_preload;
             settings.dump = render.texture_dump;
             // Each mod's pack, the lowest in the mods list first (the last wins a texture).
+            // A pack installed for Dolphin (Load\Textures\RMGE01) sits below every mod.
+            if (std::filesystem::path dolphin = dolphin_texture_pack_directory(); !dolphin.empty()) {
+                settings.packs.push_back(std::move(dolphin));
+            }
             if (std::filesystem::path packs = texture_pack_test_directory(); !packs.empty()) {
                 settings.packs.push_back(std::move(packs));
             }

@@ -108,6 +108,8 @@ enum class JAudioOwnerRoute : std::uint8_t { Format, Se, Seq, Stream };
 struct JAudioChannelOwner {
     JAudioOwnerRoute route{JAudioOwnerRoute::Format};
     std::uint32_t sound_id{};
+    // A player voice line in Luigi's take (AudSystem::switchToLuigi; the game's NEBULA_AUDIO_OWNER_LUIGI).
+    bool luigi{};
 };
 
 inline constexpr std::uint32_t kJasDspChannelsPointer = 0x806A2BD0u;

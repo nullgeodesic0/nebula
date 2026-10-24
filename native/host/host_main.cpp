@@ -2990,6 +2990,18 @@ int main(int argc, char** argv) {
     galaxy::gx::set_indexed_load_host_order(true);
     gAudio = new galaxy::host::NativeGameAudio();  // lives as long as the process (the AI thread is detached)
     gAudio->set_channel_owner(gModule.audio_channel_owner);
+    {
+        // Custom voices (voice_replacement.h): the highest enabled mod with a voice folder (voice\voices.txt).
+        std::vector<galaxy::mods::ModInfo> mods = galaxy::mods::session_mods().started_with;
+        std::sort(mods.begin(), mods.end(), [](const auto& a, const auto& b) { return a.order < b.order; });
+        for (const galaxy::mods::ModInfo& mod : mods) {
+            if (mod.enabled && fs::is_regular_file(mod.path / "voice" / "voices.txt", error)) {
+                std::fprintf(stderr, "[voice] clips from mod %s\n", mod.id.c_str());
+                gAudio->load_voices(mod.path / "voice");
+                break;
+            }
+        }
+    }
     // The live controls' links to the window: the mouse as the pointer, keyboard capture and controller navigation
     // while the settings overlay or the HOME Menu is open.
     galaxy::host::install_host_pointer_provider([]() noexcept {
