@@ -6,6 +6,7 @@
 #include "Game/Player/FireMarioBall.hpp"
 #include "Game/Player/JetTurtleShadow.hpp"
 #include "Game/Player/MarioActor.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/Player/MarioAnimator.hpp"
 #include "Game/Player/MarioConst.hpp"
 #include "Game/Player/MarioNullBck.hpp"
@@ -398,6 +399,12 @@ void MarioActor::updateFairyStar() {
 }
 
 void MarioActor::update2D() {
+#ifdef TARGET_PC
+    // Nebula's co-op: the HUD shows the first player's life, bee power and air, not the second player's.
+    if (this == NebulaCoop::getSecond()) {
+        return;
+    }
+#endif
     GameSceneLayoutHolder* layoutHolder = MR::getGameSceneLayoutHolder();
     layoutHolder->setLifeCount(mHealth);
 

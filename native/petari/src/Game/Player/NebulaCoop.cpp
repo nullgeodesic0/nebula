@@ -22,6 +22,7 @@
 #include "Game/Util/MapUtil.hpp"
 #include "Game/Util/PlayerUtil.hpp"
 #include "Game/Util/ScreenUtil.hpp"
+#include "Game/System/GameDataFunction.hpp"
 #include "Game/Util/SceneUtil.hpp"
 #include "Game/Util/SingletonHolder.hpp"
 #include <nebula_coop.h>
@@ -45,11 +46,14 @@ namespace {
         bool mPresentKnown;
         bool mLevelStart;      // until the first player has landed and has control
         u32 mControllableFrames;
+        u32 mHeldFrames;       // how long the game last had the first player's controls
         bool mTravelling;      // carried beside the first (a level start, the first's controls held)
         bool mHeldHere;
         TVec3f mHeldAt;
         TVec3f mParked;
-        bool mHidden;          // hidden and untouchable (a level start, sitting out)
+        bool mHidden;          // hidden and untouchable (a level start, sitting out, down)
+        coop::DownState mDown; // fell while the first plays on: back beside him after a while, for a life
+        u32 mTurns;            // his turns in play this scene (GALAXY_TEST_DOWN_SECOND)
         // Split screen: how far split, the line between the halves, the second player's own camera.
         coop::SplitState mSplit;
         coop::SplitLayout mLayout;
@@ -62,6 +66,11 @@ namespace {
         coop::Array< float, 16 > mGameProjection;
     };
     State sState;
+
+    // A trip of the first player's (his controls held this long) that ends this far from the second brings the
+    // second to him.
+    const u32 kCatchUpHeldFrames = 30;
+    const f32 kCatchUpDistance = 3000.0f;
 
     WPadHolder* padHolder() {
         GameSystem* pSystem = SingletonHolder< GameSystem >::get();
@@ -184,6 +193,32 @@ namespace {
         __NebulaGXSplitClip(&plane[0], second ? 2 : 1, nullptr);
     }
 
+    // The game's own fall (a miss): the player's game-over nerves, set when he runs out of life, falls into
+    // the abyss, burns, sinks or is pulled in.
+    bool isGoingDown(MarioActor* pActor) {
+        return pActor->isNerve(GET_NERVE(MarioActor, MarioActorNrvGameOver)) ||
+               pActor->isNerve(GET_NERVE(MarioActor, MarioActorNrvGameOverAbyss)) ||
+               pActor->isNerve(GET_NERVE(MarioActor, MarioActorNrvGameOverAbyss2)) ||
+               pActor->isNerve(GET_NERVE(MarioActor, MarioActorNrvGameOverFire)) ||
+               pActor->isNerve(GET_NERVE(MarioActor, MarioActorNrvGameOverBlackHole)) ||
+               pActor->isNerve(GET_NERVE(MarioActor, MarioActorNrvGameOverNonStop)) ||
+               pActor->isNerve(GET_NERVE(MarioActor, MarioActorNrvGameOverSink));
+    }
+
+    // The second player went down while the first plays on: his game-over (which would start the scene's miss
+    // for both) never runs; he is out of the picture for a while and comes back beside the first, for a life.
+    // With no lives left he sits out until the stage reloads.
+    void goDown(MarioActor* pSecond) {
+        int lives = GameDataFunction::getPlayerLeft();
+        const coop::DownState first{};
+        (void)coop::go_down_alone(sState.mDown, first, lives);
+        if (lives < GameDataFunction::getPlayerLeft()) {
+            GameDataFunction::addPlayerLeft(-1);
+        }
+        pSecond->setNerve(GET_NERVE(MarioActor, MarioActorNrvWait));
+        OSReport("coop: second player down (%s)\n", sState.mDown.out ? "no lives left" : "back soon");
+    }
+
     void setHidden(bool hidden) {
         if (hidden == sState.mHidden) {
             return;
@@ -244,6 +279,18 @@ namespace {
             sState.mLevelStart = false;
             landBeside = true;
         }
+        // The first player taken somewhere far while the game had his controls (a launch star, a pipe, a warp):
+        // the second joins him there once he has landed and has control again.
+        if (sState.mControllableFrames == 0) {
+            sState.mHeldFrames++;
+        } else if (sState.mControllableFrames == coop::kLevelStartSettleFrames) {
+            if (sState.mHeldFrames >= kCatchUpHeldFrames && sState.mPresent && !sState.mDown.down &&
+                PSVECDistance(&pFirst->mPosition, &pSecond->mPosition) > kCatchUpDistance) {
+                landBeside = true;
+                OSReport("coop: second player joins the first after his trip\n");
+            }
+            sState.mHeldFrames = 0;
+        }
         sState.mTravelling = coop::keep_travelling(sState.mTravelling, sState.mLevelStart, sState.mControllableFrames);
         const bool holdHere = !sState.mTravelling && coop::second_player_waits(firstHeld, demo);
         if (holdHere && !sState.mHeldHere) {
@@ -251,7 +298,18 @@ namespace {
         }
         sState.mHeldHere = holdHere;
 
-        setHidden(!sState.mPresent || sState.mLevelStart);
+        // Down: back beside the first after a while.
+        bool comeBack = false;
+        if (sState.mDown.down) {
+            const coop::DownState first{};
+            comeBack = coop::respawn_due(sState.mDown, first);
+            if (comeBack) {
+                pSecond->mHealth = pSecond->mMaxHealth;
+                OSReport("coop: second player back\n");
+            }
+        }
+        const bool down = sState.mDown.down;
+        setHidden(!sState.mPresent || sState.mLevelStart || down);
 
         // His turn.
         MarioHolder* pHolder = MR::getMarioHolder();
@@ -259,7 +317,7 @@ namespace {
         gIsLuigi = !ownIsLuigi;
         pHolder->setMarioActor(pSecond);
         swapPads();
-        if (sState.mPresent) {
+        if (sState.mPresent && !down) {
             // Split, his stick is relative to his own camera: the player code reads the scene's camera.
             CameraContext* pContext = splitShown() ? cameraContext() : nullptr;
             coop::CameraMatrices gameCamera;
@@ -271,9 +329,22 @@ namespace {
             if (pContext != nullptr) {
                 writeCamera(pContext, gameCamera);
             }
+            if (!sState.mLevelStart) {
+                sState.mTurns++;
+                const u32 testDown = __NebulaOption(NEBULA_OPTION_TEST_DOWN_SECOND);
+                if (testDown != 0 && sState.mTurns == testDown) {
+                    pSecond->forceKill(6);  // any type past 5: the plain game-over fall
+                }
+            }
+            if (isGoingDown(pSecond)) {
+                goDown(pSecond);
+            }
         }
         // MR::setPlayerPos moves the scene's player: him, in his turn.
-        if (!sState.mPresent || sState.mTravelling || landBeside) {
+        if (comeBack) {
+            // Back from a fall: beside the first, his state as at a fresh start.
+            MR::setPlayerPosAndWait(besideFirst());
+        } else if (!sState.mPresent || sState.mTravelling || landBeside || down) {
             MR::setPlayerPos(sState.mLevelStart ? sState.mParked : besideFirst());
         } else if (holdHere) {
             MR::setPlayerPos(sState.mHeldAt);
@@ -284,7 +355,7 @@ namespace {
         pHolder->setMarioActor(pFirst);
         gIsLuigi = ownIsLuigi;
 
-        if (!sState.mPresent || sState.mLevelStart) {
+        if (!sState.mPresent || sState.mLevelStart || down) {
             sState.mSplit.reset();
             sState.mFollow.reset();
             sState.mLayout.reset();
@@ -335,9 +406,12 @@ namespace NebulaCoop {
         sState.mOwnIsLuigi = gIsLuigi;
         sState.mLevelStart = true;
         sState.mControllableFrames = 0;
+        sState.mHeldFrames = 0;
         sState.mTravelling = true;
         sState.mHeldHere = false;
         sState.mHidden = false;
+        sState.mDown = coop::DownState{};
+        sState.mTurns = 0;
         sState.mPresentKnown = false;
         const TVec3f side = pActor->mMario->mSideVec;
         sState.mParked = pActor->mPosition + side * 120.0f;

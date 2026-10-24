@@ -144,6 +144,8 @@ enum {
     NEBULA_OPTION_MOTION_STYLE, /* how characters move (nebula_motion_style.h): 0 original, 1 smooth, 2 modern */
     NEBULA_OPTION_COOP,         /* 1: Mario and Luigi co-op runs (both characters load; the second player plays while
                                    Wii Remote channel 1 is connected and sits out otherwise), 0: one player */
+    NEBULA_OPTION_TEST_DOWN_SECOND, /* tests (GALAXY_TEST_DOWN_SECOND): the co-op second player's turn at which he
+                                       falls (MarioActor::forceKill), 0 never */
 };
 
 /* NEBULA_OPTION_MOVESET: the moves on, then each of them, and whether a co-op second player has them too. */

@@ -2014,6 +2014,13 @@ uint32_t svc_option(void*, uint32_t what) {
 #else
         return 0;
 #endif
+    case NEBULA_OPTION_TEST_DOWN_SECOND: {
+        static const uint32_t turn = [] {
+            const char* value = std::getenv("GALAXY_TEST_DOWN_SECOND");
+            return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+        }();
+        return turn;
+    }
     case NEBULA_OPTION_TEST_DUMP_LAYOUTS: {
         static const bool dump = [] {
             const char* value = std::getenv("GALAXY_TEST_DUMP_LAYOUTS");
