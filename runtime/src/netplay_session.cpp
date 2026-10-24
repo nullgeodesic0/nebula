@@ -235,6 +235,13 @@ std::string env(const char* name) {
 // Size and write time of the executable and the game module: two PCs must run the same build.
 std::uint64_t build_identity() {
     std::uint64_t h = 1469598103934665603ull;
+    // GALAXY_NET_BUILD_ID names the build by its content (Nebula Plus: source commit, module key, mods), so two installs
+    // compiled on different PCs from the same source match; without it, the files' size and write time.
+    wchar_t named[256]{};
+    if (const DWORD length = GetEnvironmentVariableW(L"GALAXY_NET_BUILD_ID", named, 256); length != 0u && length < 256u) {
+        for (DWORD i = 0; i < length; ++i) h = (h ^ static_cast<std::uint64_t>(named[i])) * 1099511628211ull;
+        return h;
+    }
     const auto mix = [&](const wchar_t* path) {
         WIN32_FILE_ATTRIBUTE_DATA data{};
         if (!GetFileAttributesExW(path, GetFileExInfoStandard, &data)) return;
@@ -962,7 +969,8 @@ void initialize(Session& s) {
 }
 
 // Joiner, at startup (before the game reads its save or settings): fetch the host's bundle and play from it.
-// The save goes to %LOCALAPPDATA%\Nebula\netplay\<host>\saves (the rejoin cache; never the joiner's own saves),
+// The save goes to %LOCALAPPDATA%\Nebula\netplay\<host>\saves, or GALAXY_NETPLAY_DIR\<host>\saves (the rejoin
+// cache; never the joiner's own saves),
 // the settings to ...\runtime_settings.ini: the joiner's own file with the host's game settings in place of its.
 void join_session(Session& s, const std::string& host_label) {
     const std::int64_t started = now_qpc();
@@ -997,7 +1005,10 @@ void join_session(Session& s, const std::string& host_label) {
     for (char& c : label) {
         if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '-') c = '_';
     }
-    const std::filesystem::path session_dir = env_path(L"LOCALAPPDATA") / L"Nebula" / L"netplay" / label;
+    // GALAXY_NETPLAY_DIR keeps the cache with a separate install's own data (Nebula Plus: <root>\data\netplay).
+    std::filesystem::path netplay_dir = env_path(L"GALAXY_NETPLAY_DIR");
+    if (netplay_dir.empty()) netplay_dir = env_path(L"LOCALAPPDATA") / L"Nebula" / L"netplay";
+    const std::filesystem::path session_dir = netplay_dir / label;
     const std::filesystem::path saves = session_dir / L"saves";
     std::error_code error;
     std::filesystem::remove_all(saves, error);

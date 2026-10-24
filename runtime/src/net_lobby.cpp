@@ -90,6 +90,13 @@ Lobby& lobby() {
 
 std::uint64_t build_identity() {
     std::uint64_t h = 1469598103934665603ull;
+    // GALAXY_NET_BUILD_ID names the build by its content (Nebula Plus: source commit, module key, mods), so two installs
+    // compiled on different PCs from the same source match; without it, the files' size and write time.
+    wchar_t named[256]{};
+    if (const DWORD length = GetEnvironmentVariableW(L"GALAXY_NET_BUILD_ID", named, 256); length != 0u && length < 256u) {
+        for (DWORD i = 0; i < length; ++i) h = (h ^ static_cast<std::uint64_t>(named[i])) * 1099511628211ull;
+        return h;
+    }
     const auto mix = [&](const wchar_t* path) {
         WIN32_FILE_ATTRIBUTE_DATA data{};
         if (!GetFileAttributesExW(path, GetFileExInfoStandard, &data)) return;
