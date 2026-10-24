@@ -40,11 +40,12 @@ official Nebula (the folder `Nebula-Setup.exe` registered, normally `%LOCALAPPDA
 mod files in Downloads, Documents and Desktop. Choose the Plus folder (default `C:\NebulaPlus`), check the mod
 files, choose what to do with saves, and press Install.
 
-From a terminal:
+From a terminal, `NebulaPlusCli.exe` (the same program as a console executable, beside `NebulaPlus.exe`) takes the same
+choices:
 
 ```
-NebulaPlus.exe --cli install --root C:\NebulaPlus --detect-mods --import-saves --import-settings
-NebulaPlus.exe --cli install --root C:\NebulaPlus --package <NebulaPlus-1.x.y.zip | package folder> --disc D:\Games\RMGE01.wbfs
+NebulaPlusCli.exe install --root C:\NebulaPlus --detect-mods --import-saves --import-settings
+NebulaPlusCli.exe install --root C:\NebulaPlus --package <NebulaPlus-1.x.y.zip | package folder> --disc D:\Games\RMGE01.wbfs
 ```
 
 What the install does:
@@ -97,7 +98,7 @@ Plus's runtime) to `data\`, so the runtime never falls back to `%LOCALAPPDATA%\N
   `%LOCALAPPDATA%\Nebula\saves` once, when Plus has no saves yet; with saves already there it copies them to
   `data\saves-imported-<time>` instead, so nothing is overwritten. Each file and folder keeps its NTFS streams
   (`galaxy.isfs.meta` holds the Wii file metadata; a plain copy drops it), and every stream is compared after
-  the copy. The official saves are read, never moved or changed. `NebulaPlus.exe --cli import-saves` does it
+  the copy. The official saves are read, never moved or changed. `NebulaPlusCli.exe import-saves` does it
   later.
 - **Shared saves** (`--shared-saves`, or the window's checkbox). The launchers point `GALAXY_NAND_ROOT` at the
   official saves folder itself. Plus then writes to the official saves (co-op adds `coop_lives.txt`); back them up
@@ -122,7 +123,7 @@ Plus converts these from your own files with the repository's builders (`tools/a
 | `voiceClips` | folder with `(Mario) Jump 1.ogg` ... | Mario's voice (`build_voice_mod.py`) |
 | `marioModelDae` | `mario.dae` | another Mario model (`build_model_mod.py`), used when there is no Odyssey model |
 
-Each mod whose files are missing is skipped with the reason (`NebulaPlus.exe --cli status` lists them), and one
+Each mod whose files are missing is skipped with the reason (`NebulaPlusCli.exe status` lists them), and one
 that fails does not stop the others or the install. The builders read `game.pak` through a hard link in staging
 and write into staging; the finished `mods` folder replaces `content\mods` in one rename, and the previous one
 stays as `content\mods.previous`. Your input files are only read.
@@ -134,7 +135,7 @@ builders read `.blend` files directly.
 
 ## Updates
 
-"Check for updates" (`Check for updates.cmd`, the window, or `NebulaPlus.exe --cli update [--check]`) compares
+"Check for updates" (`Check for updates.cmd`, the window, or `NebulaPlusCli.exe update [--check]`) compares
 the installed build with GitHub (`plus.json`: `repository`, default `nullgeodesic0/nebula`):
 
 - **Release channel (default).** The newest release tagged `plus-v<version>` with `NebulaPlus-<version>.zip`
@@ -157,7 +158,7 @@ An update builds the new version in staging and switches to it only when it is c
   choices), and your mod input files.
 
 The game must be closed for the switch; Plus asks and waits, and never closes it. The previous version stays in
-`versions\` for **Roll back** (`--cli rollback`), which also restores the previous mods when they still match.
+`versions\` for **Roll back** (`NebulaPlusCli.exe rollback`), which also restores the previous mods when they still match.
 
 ## Online play between two PCs
 
@@ -196,7 +197,7 @@ installer\plus\publish-plus-release.cmd              build, sign and create the 
 `publish-plus-release` builds from `fork/plus` (`-Revision`), names the version `1.<date>.<time>` unless
 `-Version` is given, and uploads `NebulaPlus-<version>.zip`, `.sig`, `plus-release.json` and `NebulaPlus.exe`
 with the GitHub CLI. `installer\plus\build-plus-package.cmd [-Zip]` builds a package without publishing it
-(`dist\plus-<version>\package`); `NebulaPlus.exe --cli install --package <folder>` installs it.
+(`dist\plus-<version>\package`); `NebulaPlusCli.exe install --package <folder>` installs it.
 
 ## Content
 
@@ -207,5 +208,5 @@ animations and voice clips are made on each player's PC from their own disc and 
 ## When something goes wrong
 
 - Install and update logs: `logs\install-<time>.log`. The game's: `data\logs\run-<time>.log`.
-- `NebulaPlus.exe --cli status` shows the version, the commit, the mods built and skipped, and the update source.
+- `NebulaPlusCli.exe status` shows the version, the commit, the mods built and skipped, and the update source.
 - An install that stops leaves the previous version running: nothing switches until the new one is complete.

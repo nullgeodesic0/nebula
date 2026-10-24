@@ -172,7 +172,7 @@ namespace Nebula.Plus
             if (runtimeIsa == "AVX2" && !InstallEngine.HostSupportsAvx2()) throw new InvalidOperationException("This package's runtime needs AVX2, which this CPU does not have.");
             Func<string, string> runtimeFile = name => package.RuntimeIsa == "SSE2+AVX2" && runtimeIsa == "AVX2" ? package.File("avx2/" + name) : package.File(name);
             File.Copy(runtimeFile("NebulaRuntime.exe"), Path.Combine(app, "NebulaRuntime.exe"));
-            foreach (var name in new[] { "nebula-recomp.exe", "NebulaPlus.exe", "LICENSE", "THIRD-PARTY-NOTICES.md", "README.md", "NEBULA_PLUS.md" })
+            foreach (var name in new[] { "nebula-recomp.exe", "NebulaPlus.exe", "NebulaPlusCli.exe", "LICENSE", "THIRD-PARTY-NOTICES.md", "README.md", "NEBULA_PLUS.md" })
                 if (File.Exists(package.File(name))) File.Copy(package.File(name), Path.Combine(app, name));
             var toolchain = new Toolchain(package.ToolchainPins(), layout.Toolchains);
 

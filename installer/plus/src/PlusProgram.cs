@@ -42,6 +42,15 @@ namespace Nebula.Plus
                 if (name == "cli") { command = value; continue; }
                 options[name] = value;
             }
+#if NEBULA_PLUS_CLI
+            // NebulaPlusCli.exe: the same commands in a console program, which terminals and scripts wait for.
+            if (command == null && args.Length > 0 && !args[0].StartsWith("--")) command = args[0];
+            if (command == null)
+            {
+                Console.WriteLine("NebulaPlusCli.exe install|update|rollback|build-mods|import-saves|status|detect-mods [--root PATH] [options]; see docs/NEBULA_PLUS.md.");
+                return 2;
+            }
+#endif
             if (command == null)
             {
                 NativeMethods.SetProcessDpiAwarenessContext(new IntPtr(-4));

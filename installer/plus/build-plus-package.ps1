@@ -187,6 +187,9 @@ namespace Nebula
     $exe = Join-Path $package 'NebulaPlus.exe'
     Invoke-Checked $csc (@('/nologo', '/nowarn:649', '/target:winexe', '/platform:x64', '/optimize+', "/win32manifest:$(Join-Path $src 'installer\app.manifest')",
         "/win32icon:$(Join-Path $src 'installer\assets\nebula.ico')", "/out:$exe") + $references + $sources)
+    # The same program as a console executable for terminals and scripts (they wait for it and see its output).
+    Invoke-Checked $csc (@('/nologo', '/nowarn:649', '/target:exe', '/platform:x64', '/optimize+', '/define:NEBULA_PLUS_CLI',
+        "/win32manifest:$(Join-Path $src 'installer\app.manifest')", "/out:$(Join-Path $package 'NebulaPlusCli.exe')") + $references + $sources)
 
     # 5. Module contract, toolchain pins, notices.
     $apiText = Get-Content -LiteralPath (Join-Path $src 'runtime/include/galaxy/native_api.h') -Raw
