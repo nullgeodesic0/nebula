@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <memory>
 #include <string>
 #include <span>
 
@@ -59,6 +60,9 @@ enum class FifoMarker : std::uint8_t {
     SceneEnd,
     Scene2DBegin,
     Scene2DEnd,
+    // Split screen (coop_guest.cpp): from here on, full-screen draws keep only the pixels on one side of a
+    // line (attach_split_clip).
+    SplitClip,
 };
 
 enum class EfbPeekKind : std::uint8_t {
@@ -208,6 +212,11 @@ std::size_t game_world_lights(std::span<GameLight> out, std::uint64_t max_age_ms
 // vertices follow. The next render_frame submission carries it.
 void attach_stripe_particle(std::size_t stream_offset, std::uint32_t particle, std::uint32_t age_lifetime,
                             std::uint8_t strip);
+// Simulation thread: a SplitClip marker at `fifo_offset`. Full-screen draws after it keep the pixels where
+// plane[0] * x + plane[1] * y + plane[2] >= 0, x and y in logical EFB pixels; (0, 0, 0) keeps all. `pass` is
+// 1 or 2 for the first or second player's half (EFB copies made in pass 2 go to their own textures), 0 after;
+// a pass 0 marker draws `separator` (the line as `plane`, then its opacity) as the black line between them.
+void attach_split_clip(const float plane[3], unsigned pass, const float separator[4], std::size_t fifo_offset) noexcept;
 void set_pointer_response(PointerResponseStamp stamp) noexcept;
 // Simulation producer; copied into each owned FIFO chunk and selected XFB.
 void set_prerecorded_movie_content(bool movie) noexcept;
@@ -260,6 +269,14 @@ void scan_pe_events(
     GuestMemoryV1* memory,
     const NativeServicesV1* services);
 
+// Rollback: the GX parse state that carries across frames (GxBackend::RollbackState), as an opaque handle.
+struct GxRollbackState;
+[[nodiscard]] std::shared_ptr<GxRollbackState> make_rollback_state();
+void save_rollback_state(GxRollbackState& out);
+void restore_rollback_state(const GxRollbackState& in);
+// Rollback re-simulation: frames are not rendered (GxBackend::set_render_suppressed).
+void set_render_suppressed(bool suppressed);
+
 void install_guest_dirty_tracker(GuestMemoryV1* memory) noexcept;
 
 // The native game computes the arrays indexed loads read (matrices, lights) in host byte order: before its first
@@ -269,6 +286,12 @@ void set_indexed_load_host_order(bool host_order) noexcept;
 void notify_guest_memory_write(
     std::uint32_t address,
     std::uint32_t size) noexcept;
+
+// Rollback's incremental snapshots (native_runtime.cpp): ORs into `out` a bit per 2 KiB block of physical guest
+// memory (0..0x14000000) written since the last call. Simulation thread only.
+inline constexpr std::size_t kRollbackDirtyWords = 4096u;  // 0x20000000 / 2 KiB / 64
+inline constexpr std::uint32_t kRollbackBlockBytes = 2048u;
+void harvest_rollback_dirty(std::uint64_t* out) noexcept;
 
 // Pump Win32 messages; call periodically from the guest execution loop.
 void pump_messages();

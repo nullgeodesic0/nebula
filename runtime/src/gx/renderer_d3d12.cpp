@@ -9,6 +9,17 @@
 #include "galaxy/experimental_ultrawide_aspect.h"
 #include "galaxy/gx_d3d12.h"
 #include "galaxy/gx/game_asset_extract.h"
+#include "galaxy/gx/game_disc.h"
+#include "galaxy/gx/game_font.h"
+#include "galaxy/gx/font_sdf.h"
+#include "galaxy/gx/menu_glyphs.h"
+#include "galaxy/gx/menu_screens.h"
+#include "galaxy/menu_sounds.h"
+#include "galaxy/gx/host_menus.h"
+#include "galaxy/gx/menu_kit.h"
+#include "galaxy/gx/menu_kit_raster.h"
+#include "galaxy/net_lobby.h"
+#include "galaxy/button_prompts.h"
 #include "galaxy/gx/galaxy_select.h"
 #include "galaxy/gx/render_config.h"
 #include "galaxy/gx/streamline_bridge.h"
@@ -818,7 +829,8 @@ static std::size_t mtx_per_frame_bytes() {
 // 32 MiB default. A busy frame re-loads the XF palette many times (per-object and skinned
 // matrices via LOAD_INDX), so the headroom is needed. peak_bytes_per_frame() reports actual use,
 // so this figure can be tightened against measurements.
-static constexpr unsigned    kSrvPerFrame = 32768u;
+// Doubled for split screen, which draws the 3D scene twice a frame.
+static constexpr unsigned    kSrvPerFrame = 65536u;
 // Color and depth EFB sources never change during a renderer lifetime. Keep
 // their two views outside the rewound frame segments instead of copying a
 // descriptor into the frame ring for every EFB conversion. TextureCache's own
@@ -1776,7 +1788,10 @@ void RendererD3D12::sync_post_process_settings() {
     const PostProcessSettings next = post_process_settings_from(get_render_config());
     const PostProcessSettings& current = post_process_.settings();
     if (next.aa != current.aa || next.smaa_quality != current.smaa_quality ||
-        next.upscaler != current.upscaler || next.sharpness != current.sharpness) {
+        next.upscaler != current.upscaler || next.sharpness != current.sharpness ||
+        next.bloom != current.bloom || next.saturation != current.saturation ||
+        next.contrast != current.contrast || next.vignette != current.vignette ||
+        next.lens_flare != current.lens_flare) {
         post_process_.apply_settings(next, frame_index_, kFramesInFlight);
     }
 }
@@ -1901,6 +1916,15 @@ detail::create_efb_conversion_source_views(
     return {table.gpu, depth_gpu};
 }
 
+// Split screen's separator: black over a band around the line a*x + b*y + c = 0 (physical pixels, a and b
+// a unit normal), line_style.x its half width, line_style.y its opacity; one pixel of antialiasing.
+static constexpr char kSplitLinePs[] =
+    "cbuffer C:register(b0){float4 line_plane;float4 line_style;};"
+    "float4 main(float4 pos:SV_Position):SV_Target{"
+    " float d=abs(dot(line_plane.xy,pos.xy)+line_plane.z);"
+    " return float4(0,0,0,saturate(line_style.x+0.5-d)*line_style.y);"
+    "}";
+
 bool RendererD3D12::create_clear_pipeline() {
     D3D12_ROOT_PARAMETER param{};
     param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -1923,7 +1947,88 @@ bool RendererD3D12::create_clear_pipeline() {
     clear_vs_ = compile_hlsl(blit_vertex_shader_source().data(), blit_vertex_shader_source().size(), "vs_5_1", "main");
     clear_ps_ =
         compile_hlsl(clear_pixel_shader_source().data(), clear_pixel_shader_source().size(), "ps_5_1", "main");
+
+    // Split screen's separator line: eight constants, blended over the colour.
+    D3D12_ROOT_PARAMETER line_param = param;
+    line_param.Constants.Num32BitValues = 8;
+    rsd.pParameters = &line_param;
+    ComPtr<ID3DBlob> line_blob;
+    d3d_check(D3D12SerializeRootSignature(
+        &rsd, D3D_ROOT_SIGNATURE_VERSION_1, &line_blob, &err),
+        "SerializeSplitLineRS");
+    d3d_check(device_->CreateRootSignature(
+        0, line_blob->GetBufferPointer(), line_blob->GetBufferSize(),
+        IID_PPV_ARGS(&split_line_root_sig_)), "CreateSplitLineRS");
+    split_line_ps_ = compile_hlsl(kSplitLinePs, sizeof(kSplitLinePs) - 1, "ps_5_1", "main");
     return clear_pipeline(true) != nullptr && clear_pipeline(false) != nullptr;
+}
+
+// The separator's pipeline for the EFB in use (its sample count and format), made at its first use.
+ID3D12PipelineState* RendererD3D12::split_line_pipeline() {
+    const std::uint8_t variant = efb_variant();
+    ComPtr<ID3D12PipelineState>& pipeline = split_line_pipelines_[variant];
+    if (pipeline) {
+        return pipeline.Get();
+    }
+    if (!split_line_root_sig_ || !split_line_ps_ || !clear_vs_) {
+        return nullptr;
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = split_line_root_sig_.Get();
+    pd.VS = {clear_vs_->GetBufferPointer(), clear_vs_->GetBufferSize()};
+    pd.PS = {split_line_ps_->GetBufferPointer(), split_line_ps_->GetBufferSize()};
+    pd.SampleMask = UINT_MAX;
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.DepthStencilState.DepthEnable = FALSE;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = (variant & kEfbVariantHdr) != 0u ? kEfbHdrColorFormat : kEfbColorFormat;
+    pd.SampleDesc.Count = 1u << (variant & kEfbVariantSamplesMask);
+    auto& blend = pd.BlendState.RenderTarget[0];
+    blend.BlendEnable = TRUE;
+    blend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ZERO;
+    blend.DestBlendAlpha = D3D12_BLEND_ONE;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTargetWriteMask =
+        D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN | D3D12_COLOR_WRITE_ENABLE_BLUE;
+    d3d_check(device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pipeline)), "CreateSplitLinePSO");
+    return pipeline.Get();
+}
+
+void RendererD3D12::draw_split_line(const std::array<float, 3>& plane, float half_width, float opacity) {
+    if (opacity <= 0.0f) return;
+    const float length = std::sqrt(plane[0] * plane[0] + plane[1] * plane[1]);
+    if (!(length > 1e-6f)) return;
+    ID3D12PipelineState* const pipeline = split_line_pipeline();
+    if (pipeline == nullptr) return;
+    // The line in logical EFB pixels to the current target's physical pixels (the output EFB after the
+    // scene, at its own scale), with a unit normal so the shader's distance is in pixels.
+    const float scale = static_cast<float>(efb_scale_);
+    const float constants[8] = {
+        plane[0] / length / scale, plane[1] / length / scale, plane[2] / length, 0.0f,
+        half_width * scale, std::clamp(opacity, 0.0f, 1.0f), 0.0f, 0.0f};
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = efb_rtv_;
+    command_list_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    bound_rt_aux_ = 0u;
+    const LONG efb_w = static_cast<LONG>(kEfbWidth * efb_scale_);
+    const LONG efb_h = static_cast<LONG>(kEfbHeight * efb_scale_);
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(efb_w), static_cast<float>(efb_h), 0.0f, 1.0f};
+    const D3D12_RECT rect{0, 0, efb_w, efb_h};
+    command_list_->RSSetViewports(1, &vp);
+    command_list_->RSSetScissorRects(1, &rect);
+    command_list_->SetGraphicsRootSignature(split_line_root_sig_.Get());
+    command_list_->SetPipelineState(pipeline);
+    command_list_->SetGraphicsRoot32BitConstants(0, 8, constants, 0);
+    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    command_list_->DrawInstanced(3, 1, 0, 0);
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    invalidate_gx_bindings();
+    bind_efb(nullptr);
 }
 
 ID3D12PipelineState* RendererD3D12::clear_pipeline(bool color) {
@@ -2509,14 +2614,23 @@ bool RendererD3D12::initialize(int window_width, int window_height, unsigned efb
         // Each ring reserves its largest segmentation (interpolation, temporal), so a frame-rate or
         // upscaler change only re-segments it: no 300-400 MB of upload memory created mid-game.
         constexpr unsigned kMostSegments = std::max({kFramesInFlight, kInterpSegments, kRingSegments});
-        if (!vertex_ring_  .initialize(device_.Get(), "vertex",   vb_per_frame_bytes(),  kFramesInFlight,
-                                       vb_per_frame_bytes() * std::max(kFramesInFlight, kInterpSegments))) return false;
-        if (!index_ring_   .initialize(device_.Get(), "index",    ib_per_frame_bytes(),  kFramesInFlight,
-                                       ib_per_frame_bytes() * std::max(kFramesInFlight, kInterpSegments))) return false;
-        if (!constant_ring_.initialize(device_.Get(), "constant", cb_per_frame_bytes(),  kFramesInFlight,
-                                       cb_per_frame_bytes() * 4u * kInterpSegments)) return false;
-        if (!matrix_ring_  .initialize(device_.Get(), "matrix",   mtx_per_frame_bytes(), kFramesInFlight,
-                                       mtx_per_frame_bytes() * kMostSegments)) return false;
+        vertex_ring_bytes_ = vb_per_frame_bytes();
+        index_ring_bytes_ = ib_per_frame_bytes();
+        constant_ring_bytes_ = cb_per_frame_bytes();
+        matrix_ring_bytes_ = mtx_per_frame_bytes();
+        // Each segment has as much again as headroom (the reservations double, untouched pages are never
+        // backed): a frame over budget (split screen draws the scene twice) goes on and the ring grows.
+        if (!vertex_ring_  .initialize(device_.Get(), "vertex",   vertex_ring_bytes_,  kFramesInFlight,
+                                       2u * vertex_ring_bytes_ * std::max(kFramesInFlight, kInterpSegments),
+                                       vertex_ring_bytes_)) return false;
+        if (!index_ring_   .initialize(device_.Get(), "index",    index_ring_bytes_,  kFramesInFlight,
+                                       2u * index_ring_bytes_ * std::max(kFramesInFlight, kInterpSegments),
+                                       index_ring_bytes_)) return false;
+        if (!constant_ring_.initialize(device_.Get(), "constant", constant_ring_bytes_,  kFramesInFlight,
+                                       2u * constant_ring_bytes_ * 4u * kInterpSegments,
+                                       constant_ring_bytes_)) return false;
+        if (!matrix_ring_  .initialize(device_.Get(), "matrix",   matrix_ring_bytes_, kFramesInFlight,
+                                       2u * matrix_ring_bytes_ * kMostSegments, matrix_ring_bytes_)) return false;
         if (!srv_ring_.initialize(device_.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvPerFrame, kInterpSegments, kPersistentSrvDescriptors)) return false;
         {
             const DescriptorRing::Table views = srv_ring_.allocate_persistent(kRtTextureViews);
@@ -2538,8 +2652,9 @@ bool RendererD3D12::initialize(int window_width, int window_height, unsigned efb
         // bytes_per_frame * frames_in_flight. The peak is reported per ring below and at shutdown; the
         // pairing is what makes the 240 MiB default checkable against a real workload.
         {
+            // Budget plus as much again of headroom, per frame in flight.
             const auto ring_reserved_mb = [](std::size_t bytes) {
-                return (bytes * kFramesInFlight) / (1024u * 1024u);
+                return (bytes * 2u * kFramesInFlight) / (1024u * 1024u);
             };
             std::cerr << "[gpu-rings]"
                       << " vertex-reserved-mb=" << ring_reserved_mb(vb_per_frame_bytes())
@@ -3438,6 +3553,408 @@ void RendererD3D12::draw_ui_glyph(
     invalidate_gx_bindings();
 }
 
+// ---- The host menus (menu_kit.h): the game's font and button art from game.pak, one draw per frame.
+
+namespace {
+
+constexpr char kMenuKitShader[] = R"(
+Texture2D g_tex[16] : register(t0);
+SamplerState g_samp : register(s0);
+cbuffer Screen : register(b0) { float2 g_screen; float g_gain; };
+struct VsIn {
+    float2 pos : POSITION; float2 uv : TEXCOORD0; float4 color : COLOR0;
+    float4 c0 : COLOR1; float4 c1 : COLOR2; float4 params : TEXCOORD1;
+};
+struct PsIn {
+    float4 pos : SV_Position; float2 uv : TEXCOORD0; float4 color : COLOR0;
+    nointerpolation float4 c0 : COLOR1; nointerpolation float4 c1 : COLOR2; nointerpolation float4 params : TEXCOORD1;
+};
+PsIn vs_main(VsIn i) {
+    PsIn o;
+    o.pos = float4(i.pos.x / g_screen.x * 2.0 - 1.0, 1.0 - i.pos.y / g_screen.y * 2.0, 0.0, 1.0);
+    o.uv = i.uv; o.color = i.color; o.c0 = i.c0; o.c1 = i.c1; o.params = i.params;
+    return o;
+}
+// menu_kit_raster.cpp shade() is the same maths on the CPU.
+float4 ps_main(PsIn i) : SV_Target {
+    const uint t = (uint)i.params.x;
+    const uint mode = (uint)i.params.y;
+    const float4 texel = g_tex[NonUniformResourceIndex(t)].Sample(g_samp, i.uv);
+    float3 rgb = i.color.rgb;
+    float a = i.color.a;
+    if (mode == 1) {
+        a *= texel.a;
+    } else if (mode == 5) {
+        rgb *= texel.rgb;
+        a *= texel.a;
+    } else if (mode == 4) {
+        // A distance-field glyph: the edge stays one pixel wide at any size.
+        const float w = max(fwidth(texel.a) * 0.75, 0.02);
+        a *= smoothstep(0.5 - w, 0.5 + w, texel.a);
+    } else if (mode >= 2) {
+        const float3 face = min(i.c1.rgb * i.color.rgb * i.params.z, 1.0);
+        rgb = lerp(i.c0.rgb, face, texel.r);
+        a = i.color.a * texel.a;
+    }
+    rgb = saturate(saturate(rgb) * g_gain);
+    a = saturate(a);
+    return float4(rgb * a, mode == 3 ? 0.0 : a);
+}
+)";
+
+struct MenuKitVertex {
+    float x, y, u, v;
+    float color[4];
+    float c0[4];
+    float c1[4];
+    float params[4];  // texture, mode, TEV scale
+};
+constexpr std::size_t kMenuKitMaxQuads = 4096u;
+constexpr std::size_t kMenuKitSegmentBytes = kMenuKitMaxQuads * 6u * sizeof(MenuKitVertex);
+
+}  // namespace
+
+namespace {
+
+// The menus' assets, read and prepared off the render thread (the font's distance fields take most of a second).
+struct MenuKitPrepared {
+    std::unique_ptr<galaxy::gx::GameDisc> disc;
+    galaxy::gx::GameFont font;
+    galaxy::gx::DecodedTexture cap;
+    galaxy::gx::DecodedTexture corner;
+    std::vector<galaxy::gx::DecodedTexture> font_fields;
+    galaxy::gx::menu::GlyphAtlasImage glyphs;
+    std::array<galaxy::gx::DecodedTexture, 4> hand;  // Tex::Hand .. Tex::HandStar
+    bool hand_loaded = false;
+};
+
+std::optional<MenuKitPrepared> prepare_menu_kit(std::string content_root) {
+    try {
+        const std::filesystem::path root(std::u8string(content_root.begin(), content_root.end()));
+        std::filesystem::path pak = root / "game.pak";
+        if (!std::filesystem::exists(pak)) pak = root / "DATA" / "game.pak";
+        MenuKitPrepared out;
+        out.disc = galaxy::gx::GameDisc::open(pak);
+        if (out.disc == nullptr) {
+            std::cerr << "[Renderer] menus: game.pak unreadable, the host menus are off\n";
+            return std::nullopt;
+        }
+        const auto font_bytes = out.disc->read_arc_entry("LayoutData/Font.arc", "messagefont26.brfnt");
+        const auto cap_bytes = out.disc->read_arc_entry("LayoutData/PauseMenu.arc", "mybuttonatypeside.tpl");
+        const auto corner_bytes = out.disc->read_arc_entry("LayoutData/SysInfoWindow.arc", "mysysinfowindow.tpl");
+        auto font = font_bytes ? galaxy::gx::parse_brfnt(*font_bytes) : std::nullopt;
+        auto cap = cap_bytes ? galaxy::gx::decode_tpl(*cap_bytes) : std::nullopt;
+        auto corner = corner_bytes ? galaxy::gx::decode_tpl(*corner_bytes) : std::nullopt;
+        if (!font || !cap || !corner) {
+            std::cerr << "[Renderer] menus: the game's font or menu art is missing, the host menus are off\n";
+            return std::nullopt;
+        }
+        out.font = std::move(*font);
+        out.cap = galaxy::gx::menu::mirror_cap_vertically(*cap);
+        out.corner = std::move(*corner);
+        for (const auto& sheet : out.font.sheets) out.font_fields.push_back(galaxy::gx::coverage_to_sdf(sheet));
+        const auto picture_bytes = out.disc->read_arc_entry("LayoutData/Font.arc", "picturefont.brfnt");
+        const auto picture = picture_bytes ? galaxy::gx::parse_brfnt(*picture_bytes) : std::nullopt;
+        out.glyphs = galaxy::gx::menu::build_glyph_atlas(picture ? &*picture : nullptr);
+        // The game's menu sounds, synthesised from the disc (well under a second, here off the render thread).
+        if (!galaxy::menu_sounds::load(*out.disc)) std::cerr << "[Renderer] menus: the game's menu sounds are unavailable\n";
+        // The Star Pointer's hand, to draw again over the menus.
+        const char* hand_files[4] = {"handpointerpoint.tpl", "handpointerpointshadow.tpl", "dpdoutstar.tpl", "dpdpointer.tpl"};
+        out.hand_loaded = true;
+        for (std::size_t i = 0; i < 4u; ++i) {
+            const auto bytes = out.disc->read_arc_entry("LayoutData/DPDPointer.arc", hand_files[i]);
+            auto tex = bytes ? galaxy::gx::decode_tpl(*bytes) : std::nullopt;
+            if (!tex) {
+                out.hand_loaded = false;
+                break;
+            }
+            out.hand[i] = i >= 2u ? galaxy::gx::menu::mirror_horizontally(*tex) : std::move(*tex);
+        }
+        return out;
+    } catch (const std::exception& e) {
+        std::cerr << "[Renderer] menus unavailable: " << e.what() << '\n';
+        return std::nullopt;
+    }
+}
+
+}  // namespace
+
+struct RendererD3D12::MenuKitState {
+    std::future<std::optional<MenuKitPrepared>> pending;
+    std::unique_ptr<galaxy::gx::GameDisc> disc;
+    std::optional<galaxy::gx::GameFont> font;
+    galaxy::gx::menu::GlyphAtlas glyphs;
+    galaxy::gx::menu::Assets assets;
+    std::array<ComPtr<ID3D12Resource>, galaxy::gx::menu::kMaxTextures> textures;
+    std::vector<ComPtr<ID3D12Resource>> uploads;  // kept until shutdown (a few MB, once)
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    ComPtr<ID3D12RootSignature> root_sig;
+    ComPtr<ID3D12PipelineState> pipeline;
+    ComPtr<ID3D12Resource> vertices;  // kRingSegments segments of kMenuKitSegmentBytes, persistently mapped
+    std::uint8_t* mapped = nullptr;
+    bool ready = false;
+    bool failed = false;
+};
+
+bool RendererD3D12::ensure_menu_kit_loaded() {
+    if (menu_kit_ == nullptr) {
+        menu_kit_ = std::make_shared<MenuKitState>();
+        if (host_window::native_settings_content_root.empty()) {
+            menu_kit_->failed = true;
+        } else {
+            menu_kit_->pending = std::async(std::launch::async, prepare_menu_kit, host_window::native_settings_content_root);
+        }
+    }
+    MenuKitState& kit = *menu_kit_;
+    if (kit.ready || kit.failed) return kit.ready;
+    if (kit.pending.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+    std::optional<MenuKitPrepared> prepared = kit.pending.get();
+    if (!prepared) {
+        kit.failed = true;
+        return false;
+    }
+    try {
+        namespace menu = galaxy::gx::menu;
+        kit.disc = std::move(prepared->disc);
+        kit.font = std::move(prepared->font);
+        const auto upload_texture = [&](std::size_t slot, const galaxy::gx::DecodedTexture& tex) {
+            D3D12_HEAP_PROPERTIES default_heap{};
+            default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            desc.Width = tex.width;
+            desc.Height = tex.height;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            d3d_check(device_->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                       IID_PPV_ARGS(&kit.textures[slot])),
+                      "create menu texture");
+            const UINT row_pitch = static_cast<UINT>((tex.width * 4u + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) &
+                                                     ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u));
+            D3D12_HEAP_PROPERTIES upload_heap{};
+            upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC buf{};
+            buf.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            buf.Width = static_cast<UINT64>(row_pitch) * tex.height;
+            buf.Height = 1;
+            buf.DepthOrArraySize = 1;
+            buf.MipLevels = 1;
+            buf.SampleDesc.Count = 1;
+            buf.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            ComPtr<ID3D12Resource> upload;
+            d3d_check(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buf,
+                                                       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)),
+                      "create menu texture upload");
+            void* mapped = nullptr;
+            const D3D12_RANGE no_read{0, 0};
+            d3d_check(upload->Map(0, &no_read, &mapped), "map menu texture upload");
+            for (unsigned y = 0; y < tex.height; ++y) {
+                std::memcpy(static_cast<std::uint8_t*>(mapped) + static_cast<std::size_t>(y) * row_pitch,
+                            tex.rgba8.data() + static_cast<std::size_t>(y) * tex.width * 4u, tex.width * 4u);
+            }
+            upload->Unmap(0, nullptr);
+            D3D12_TEXTURE_COPY_LOCATION dst{};
+            dst.pResource = kit.textures[slot].Get();
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            D3D12_TEXTURE_COPY_LOCATION src{};
+            src.pResource = upload.Get();
+            src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, tex.width, tex.height, 1, row_pitch};
+            command_list_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = kit.textures[slot].Get();
+            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            command_list_->ResourceBarrier(1, &barrier);
+            kit.uploads.push_back(std::move(upload));
+        };
+
+        // Slot 0 (no texture) samples opaque white; unused slots point at it too.
+        galaxy::gx::DecodedTexture white{1u, 1u, {255u, 255u, 255u, 255u}};
+        upload_texture(0u, white);
+        upload_texture(static_cast<std::size_t>(menu::Tex::ButtonCap), prepared->cap);
+        upload_texture(static_cast<std::size_t>(menu::Tex::WindowCorner), prepared->corner);
+        upload_texture(static_cast<std::size_t>(menu::Tex::Glyphs), prepared->glyphs.texture);
+        if (prepared->hand_loaded) {
+            for (std::size_t i = 0; i < 4u; ++i) {
+                upload_texture(static_cast<std::size_t>(menu::Tex::Hand) + i, prepared->hand[i]);
+            }
+        }
+        kit.glyphs = prepared->glyphs.atlas;
+        for (std::size_t sheet = 0; sheet < kit.font->sheets.size(); ++sheet) {
+            const std::size_t slot = static_cast<std::size_t>(menu::Tex::Font) + sheet;
+            if (slot >= menu::kMaxTextures) break;
+            upload_texture(slot, prepared->font_fields[sheet]);
+        }
+
+        D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+        heap_desc.NumDescriptors = static_cast<UINT>(menu::kMaxTextures);
+        heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        d3d_check(device_->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&kit.srv_heap)), "create menu SRV heap");
+        const UINT increment = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = 1;
+        for (std::size_t slot = 0; slot < menu::kMaxTextures; ++slot) {
+            D3D12_CPU_DESCRIPTOR_HANDLE handle = kit.srv_heap->GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += slot * increment;
+            ID3D12Resource* resource = kit.textures[slot] ? kit.textures[slot].Get() : kit.textures[0].Get();
+            device_->CreateShaderResourceView(resource, &srv, handle);
+        }
+
+        D3D12_STATIC_SAMPLER_DESC sampler{};
+        sampler.Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_DESCRIPTOR_RANGE range{};
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        range.NumDescriptors = static_cast<UINT>(menu::kMaxTextures);
+        D3D12_ROOT_PARAMETER params[2]{};
+        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        params[0].Constants.Num32BitValues = 3;
+        params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[1].DescriptorTable.NumDescriptorRanges = 1;
+        params[1].DescriptorTable.pDescriptorRanges = &range;
+        params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC rsd{};
+        rsd.NumParameters = 2;
+        rsd.pParameters = params;
+        rsd.NumStaticSamplers = 1;
+        rsd.pStaticSamplers = &sampler;
+        rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        ComPtr<ID3DBlob> rs_blob, rs_err;
+        d3d_check(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rs_blob, &rs_err),
+                  "serialize menu root signature");
+        d3d_check(device_->CreateRootSignature(0, rs_blob->GetBufferPointer(), rs_blob->GetBufferSize(),
+                                               IID_PPV_ARGS(&kit.root_sig)),
+                  "create menu root signature");
+
+        const ComPtr<ID3DBlob> vs = compile_hlsl(kMenuKitShader, sizeof(kMenuKitShader) - 1, "vs_5_1", "vs_main");
+        const ComPtr<ID3DBlob> ps = compile_hlsl(kMenuKitShader, sizeof(kMenuKitShader) - 1, "ps_5_1", "ps_main");
+        const D3D12_INPUT_ELEMENT_DESC layout[] = {
+            {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"COLOR", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"COLOR", 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 48, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 64, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        };
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = kit.root_sig.Get();
+        pd.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+        pd.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+        pd.InputLayout = {layout, static_cast<UINT>(std::size(layout))};
+        // Premultiplied: an additive quad writes alpha 0.
+        auto& blend = pd.BlendState.RenderTarget[0];
+        blend.BlendEnable = TRUE;
+        blend.SrcBlend = D3D12_BLEND_ONE;
+        blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        blend.BlendOp = D3D12_BLEND_OP_ADD;
+        blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pd.SampleMask = UINT_MAX;
+        pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        pd.RasterizerState.DepthClipEnable = TRUE;
+        pd.DepthStencilState.DepthEnable = FALSE;
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.NumRenderTargets = 1;
+        pd.RTVFormats[0] = kBackbufferFormat;
+        pd.SampleDesc.Count = 1;
+        d3d_check(device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&kit.pipeline)), "create menu PSO");
+
+        D3D12_HEAP_PROPERTIES upload_heap{};
+        upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC vb{};
+        vb.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        vb.Width = kMenuKitSegmentBytes * kRingSegments;
+        vb.Height = 1;
+        vb.DepthOrArraySize = 1;
+        vb.MipLevels = 1;
+        vb.SampleDesc.Count = 1;
+        vb.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        d3d_check(device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &vb,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&kit.vertices)),
+                  "create menu vertex ring");
+        void* mapped = nullptr;
+        const D3D12_RANGE no_read{0, 0};
+        d3d_check(kit.vertices->Map(0, &no_read, &mapped), "map menu vertex ring");
+        kit.mapped = static_cast<std::uint8_t*>(mapped);
+
+        kit.assets.glyphs = &kit.glyphs;
+        kit.assets.font = &*kit.font;
+        kit.assets.button_cap = true;
+        kit.assets.window_corner = true;
+        kit.assets.font_sdf = true;
+        kit.assets.pointer_hand = prepared->hand_loaded;
+        kit.ready = true;
+        std::cout << "[Renderer] menus: the game's font and menu art loaded from game.pak\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[Renderer] menus unavailable: " << e.what() << '\n';
+        kit.ready = false;
+        kit.failed = true;
+    }
+    invalidate_gx_bindings();
+    return kit.ready;
+}
+
+const galaxy::gx::menu::Assets* RendererD3D12::menu_kit_assets() const noexcept {
+    return menu_kit_ != nullptr && menu_kit_->ready ? &menu_kit_->assets : nullptr;
+}
+
+void RendererD3D12::draw_menu_kit(std::span<const galaxy::gx::menu::Quad> quads) {
+    if (quads.empty() || menu_kit_ == nullptr || !menu_kit_->ready || host_window::backbuffer_width == 0u || host_window::backbuffer_height == 0u) return;
+    MenuKitState& kit = *menu_kit_;
+    const std::size_t count = std::min(quads.size(), kMenuKitMaxQuads);
+    const std::size_t segment = static_cast<std::size_t>(frame_index_ % kRingSegments);
+    auto* out = reinterpret_cast<MenuKitVertex*>(kit.mapped + segment * kMenuKitSegmentBytes);
+    const auto vertex = [](const galaxy::gx::menu::Quad& q, int corner) {
+        const auto& v = q.v[static_cast<std::size_t>(corner)];
+        return MenuKitVertex{v.x, v.y, v.u, v.v,
+                             {v.color.r, v.color.g, v.color.b, v.color.a},
+                             {q.c0.r, q.c0.g, q.c0.b, q.c0.a},
+                             {q.c1.r, q.c1.g, q.c1.b, q.c1.a},
+                             {static_cast<float>(q.tex), static_cast<float>(q.mode), q.scale, 0.0f}};
+    };
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& q = quads[i];
+        out[i * 6u + 0u] = vertex(q, 0);
+        out[i * 6u + 1u] = vertex(q, 1);
+        out[i * 6u + 2u] = vertex(q, 2);
+        out[i * 6u + 3u] = vertex(q, 2);
+        out[i * 6u + 4u] = vertex(q, 1);
+        out[i * 6u + 5u] = vertex(q, 3);
+    }
+    D3D12_VERTEX_BUFFER_VIEW view{};
+    view.BufferLocation = kit.vertices->GetGPUVirtualAddress() + segment * kMenuKitSegmentBytes;
+    view.SizeInBytes = static_cast<UINT>(count * 6u * sizeof(MenuKitVertex));
+    view.StrideInBytes = sizeof(MenuKitVertex);
+    const float constants[3] = {static_cast<float>(host_window::backbuffer_width), static_cast<float>(host_window::backbuffer_height),
+                                galaxy::gx::menu::kPictureGain};
+    ID3D12DescriptorHeap* heaps[] = {kit.srv_heap.Get()};
+    command_list_->SetDescriptorHeaps(1, heaps);
+    command_list_->SetGraphicsRootSignature(kit.root_sig.Get());
+    command_list_->SetPipelineState(kit.pipeline.Get());
+    command_list_->SetGraphicsRoot32BitConstants(0, 3, constants, 0);
+    command_list_->SetGraphicsRootDescriptorTable(1, kit.srv_heap->GetGPUDescriptorHandleForHeapStart());
+    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    command_list_->IASetVertexBuffers(0, 1, &view);
+    command_list_->DrawInstanced(static_cast<UINT>(count * 6u), 1, 0, 0);
+    invalidate_gx_bindings();
+}
+
 void RendererD3D12::pump_messages() {
     // HWND ownership and all native modal loops stay on window_owner_.
     // Guest checkpoints must never dispatch a Win32 modal loop themselves.
@@ -3453,6 +3970,7 @@ bool RendererD3D12::quit_requested() const noexcept {
 
 void RendererD3D12::invalidate_gx_bindings() {
     bound_pipeline_ = nullptr;
+    bound_stencil_ref_ = 0xFFFFu;
     bound_vs_constants_ = 0;
     bound_ps_constants_ = 0;
     bound_texture_table_ = {};
@@ -3508,27 +4026,48 @@ void RendererD3D12::begin_frame(bool present_swap_chain) {
             temporal_interp_suspended_ = false;
             host_window::temporal_interp_suspended.store(false, std::memory_order_relaxed);
         }
+        // Motion blur needs the matrix history the temporal ring keeps (skinned
+        // meshes' previous palettes), so it selects that ring when nothing else does.
+        const bool blur_history = get_render_config().motion_blur != 0u;
         const RingMode mode = interpolation_mode() ? RingMode::Interp
-            : temporal_mode() ? RingMode::Temporal : RingMode::Normal;
-        if (mode != ring_mode_) {
+            : (temporal_mode() || blur_history) ? RingMode::Temporal : RingMode::Normal;
+        // A frame that ran into a ring's headroom (split screen draws the scene twice) grows that ring
+        // here, between frames, so the next frames have their budget again.
+        bool grow = false;
+        const auto grown = [&grow](const UploadRing& ring, std::size_t& bytes, std::size_t multiplier) {
+            if (!ring.growth_requested()) return;
+            const std::size_t next = std::min(UploadRing::kMaxBytesPerFrame,
+                std::max(bytes * 2u, ring.grown_bytes_per_frame() / multiplier));
+            if (next <= bytes) return;
+            std::cerr << "[ring] growing per-frame budget: " << (bytes >> 20u) << " -> " << (next >> 20u)
+                      << " MiB\n";
+            bytes = next;
+            grow = true;
+        };
+        grown(vertex_ring_, vertex_ring_bytes_, 1u);
+        grown(index_ring_, index_ring_bytes_, 1u);
+        grown(constant_ring_, constant_ring_bytes_, ring_mode_ == RingMode::Interp ? 4u : 1u);
+        grown(matrix_ring_, matrix_ring_bytes_, 1u);
+        if (mode != ring_mode_ || grow) {
             wait_for_gpu();
             const unsigned segments = mode == RingMode::Interp ? kInterpSegments : kFramesInFlight;
             const unsigned matrix_segments = mode == RingMode::Normal ? kFramesInFlight
                 : mode == RingMode::Interp ? kInterpSegments : kRingSegments;
             // Interpolated sub-frames add one VS constant block per scene
             // record each; the constant segment holds a whole game frame.
-            const std::size_t constant_bytes = cb_per_frame_bytes() * (mode == RingMode::Interp ? 4u : 1u);
+            const std::size_t constant_bytes = constant_ring_bytes_ * (mode == RingMode::Interp ? 4u : 1u);
             const auto place = [&](UploadRing& ring, const char* name, std::size_t bytes, unsigned count) {
-                if (ring.resegment(bytes, count)) {
+                // In place while the grown budget and its headroom fit the reservation; else a new buffer.
+                if (ring.resegment(bytes, count) && ring.headroom_bytes_per_frame() != 0u) {
                     return true;
                 }
                 ring.reset();
-                return ring.initialize(device_.Get(), name, bytes, count);
+                return ring.initialize(device_.Get(), name, bytes, count, 2u * bytes * count, bytes);
             };
-            if (!place(vertex_ring_, "vertex", vb_per_frame_bytes(), segments) ||
-                !place(index_ring_, "index", ib_per_frame_bytes(), segments) ||
+            if (!place(vertex_ring_, "vertex", vertex_ring_bytes_, segments) ||
+                !place(index_ring_, "index", index_ring_bytes_, segments) ||
                 !place(constant_ring_, "constant", constant_bytes, segments) ||
-                !place(matrix_ring_, "matrix", mtx_per_frame_bytes(), matrix_segments)) {
+                !place(matrix_ring_, "matrix", matrix_ring_bytes_, matrix_segments)) {
                 throw std::runtime_error("ring resize failed");
             }
             matrix_segments_ = matrix_segments;
@@ -3894,6 +4433,9 @@ UINT RendererD3D12::present_sync_interval(unsigned configured, float max_fps) {
 }
 
 void RendererD3D12::present_to_swap_chain() {
+    if (skip_present_enabled()) {
+        return;
+    }
     const bool stall_watch = trace_stall_watch_enabled();
     const RenderConfig cfg = get_render_config();
     const bool generating = frame_generation_running();
@@ -7280,12 +7822,24 @@ bool RendererD3D12::take_eval_readback(std::vector<std::uint32_t>& words, float&
 }
 
 bool RendererD3D12::begin_motion_scene() {
-    if (!scene_temporal_ || !ensure_motion_target()) {
+    if ((!scene_temporal_ && !scene_motion_only_) || !ensure_motion_target()) {
         return false;
     }
     const float zero[4]{};
     command_list_->ClearRenderTargetView(motion_rtv_, zero, 0u, nullptr);
     command_list_->ClearRenderTargetView(reactive_rtv_, zero, 0u, nullptr);
+    scene_motion_valid_ = true;
+    return true;
+}
+
+bool RendererD3D12::scene_motion_blur_begin() {
+    scene_motion_only_ = false;
+    // Our scene effects run on the plain EFB only (no MSAA, no HDR scene EFB).
+    if (scene_temporal_ || output_efb_active_ || replay_recording_ || efb_variant() != 0u || !post_process_.ready() ||
+        !post_process_.motion_blur_ready() || get_render_config().motion_blur == 0u) {
+        return false;
+    }
+    scene_motion_only_ = true;
     return true;
 }
 
@@ -7356,6 +7910,10 @@ void RendererD3D12::prepare_temporal_upscaler() {
 bool RendererD3D12::scene_temporal_begin(float& jitter_x, float& jitter_y) {
     jitter_x = 0.0f;
     jitter_y = 0.0f;
+    scene_projection_valid_ = false;
+    scene_light_valid_ = false;
+    scene_motion_only_ = false;
+    scene_motion_valid_ = false;
     scene_temporal_ = false;
     const unsigned rw = kEfbWidth * efb_scale_;
     const unsigned ow = temporal_output_w_;
@@ -7419,6 +7977,180 @@ bool RendererD3D12::temporal_inputs_match(const TemporalUpscaleInputs& in) const
         }
     }
     return match;
+}
+
+void RendererD3D12::set_scene_projection(const float abcd[4], const float viewport[4]) noexcept {
+    std::memcpy(scene_proj_, abcd, sizeof(scene_proj_));
+    std::memcpy(scene_viewport_, viewport, sizeof(scene_viewport_));
+    scene_projection_valid_ = true;
+}
+
+void RendererD3D12::set_scene_light(const float position[3]) noexcept {
+    std::memcpy(scene_light_, position, sizeof(scene_light_));
+    scene_light_valid_ = true;
+}
+
+namespace {
+float env_float(const char* name, float fallback, float minimum) {
+    char v[32]{};
+    std::size_t n = 0;
+    if (getenv_s(&n, v, sizeof(v), name) == 0 && n > 1) {
+        return std::max(minimum, static_cast<float>(std::atof(v)));
+    }
+    return fallback;
+}
+}  // namespace
+
+bool RendererD3D12::record_scene_effects() {
+    if (!scene_projection_valid_ || output_efb_active_ || replay_recording_ ||
+        !post_process_.ready() || !efb_color_ || !efb_depth_ || command_list_ == nullptr) {
+        return false;
+    }
+    const RenderConfig cfg = get_render_config();
+    const bool shadows = cfg.contact_shadows != 0u && scene_light_valid_;
+    const bool occlusion = post_process_.ssao_ready() && (cfg.ssao != 0u || shadows);
+    const bool dof = post_process_.dof_ready() && cfg.depth_of_field != 0u;
+    const bool reflections = post_process_.ssr_ready() && cfg.reflections != 0u;
+    // Motion blur reads the scene's motion vectors (written by the draws of a
+    // scene that began with them: scene_motion_valid_).
+    // A scene whose camera history just restarted (the split opened or closed, the cameras changed hands) has
+    // motion vectors from a camera jump: no motion blur for it.
+    const bool motion = post_process_.motion_blur_ready() && cfg.motion_blur != 0u &&
+                        scene_motion_valid_ && motion_target_ && !scene_split_skip_motion_;
+    if (!occlusion && !reflections && !dof && !motion) {
+        return false;
+    }
+    const float scale = static_cast<float>(efb_scale_);
+    const D3D12_RESOURCE_DESC color_desc = efb_color_->GetDesc();
+    PostProcessor::SsaoInputs in{};
+    in.depth = efb_depth_.Get();
+    in.color_rtv = efb_rtv_;
+    in.width = static_cast<unsigned>(color_desc.Width);
+    in.height = color_desc.Height;
+    for (unsigned i = 0; i < 4u; ++i) in.viewport[i] = scene_viewport_[i] * scale;
+    in.camera_near = scene_camera_[0];
+    in.camera_far = scene_camera_[1];
+    for (unsigned i = 0; i < 4u; ++i) in.proj[i] = scene_proj_[i];
+    static const float radius = env_float("GALAXY_SSAO_RADIUS", 120.0f, 1.0f);
+    in.radius = radius;
+    in.strength = static_cast<float>(std::min(cfg.ssao, 100u)) / 100.0f;
+    if (shadows) {
+        static const float shadow_length = env_float("GALAXY_CONTACT_SHADOW_LENGTH", 80.0f, 1.0f);
+        std::memcpy(in.light, scene_light_, sizeof(in.light));
+        in.shadow_strength = static_cast<float>(std::min(cfg.contact_shadows, 100u)) / 100.0f;
+        in.shadow_length = shadow_length;
+        in.shadow_thickness = shadow_length * 0.4f;
+        // The long ray's reach; GALAXY_CONTACT_SHADOW_LONG=0 keeps only the contact ray.
+        static const float shadow_long = env_float("GALAXY_CONTACT_SHADOW_LONG", 360.0f, 0.0f);
+        in.shadow_long_length = shadow_long;
+    }
+
+    D3D12_RESOURCE_BARRIER bar{};
+    bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    bar.Transition.pResource = efb_depth_.Get();
+    bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    bar.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    command_list_->ResourceBarrier(1, &bar);
+    ID3D12DescriptorHeap* heaps[] = {srv_ring_.heap(), sampler_heap_.Get()};
+    command_list_->SetDescriptorHeaps(2, heaps);
+    bool recorded = occlusion && post_process_.record_ssao(
+        command_list_.Get(), srv_ring_, in, frame_index_, kFramesInFlight);
+    if (reflections) {
+        static const float distance = env_float("GALAXY_REFLECTION_DISTANCE", 2000.0f, 10.0f);
+        PostProcessor::SsaoInputs s = in;
+        s.radius = distance;
+        s.strength = static_cast<float>(std::min(cfg.reflections, 100u)) / 100.0f;
+        recorded |= post_process_.record_ssr(
+            command_list_.Get(), srv_ring_, efb_color_.Get(), s, frame_index_, kFramesInFlight);
+    }
+    if (dof) {
+        PostProcessor::DofInputs d{};
+        d.depth = efb_depth_.Get();
+        d.color = efb_color_.Get();
+        d.color_rtv = efb_rtv_;
+        d.width = in.width;
+        d.height = in.height;
+        std::memcpy(d.viewport, in.viewport, sizeof(d.viewport));
+        d.camera_near = in.camera_near;
+        d.camera_far = in.camera_far;
+        // Full strength blurs the backdrop by 2% of the viewport height.
+        d.max_radius = in.viewport[3] * 0.02f *
+                       static_cast<float>(std::min(cfg.depth_of_field, 100u)) / 100.0f;
+        if (scene_split_per_half_) {
+            // Co-op split screen: each half with its own camera planes, focus point and focus history, inside its
+            // side of the line.
+            for (unsigned h = 0; h < 2u; ++h) {
+                PostProcessor::DofInputs half = d;
+                const std::array<float, 3> plane = split_plane_render(scene_split_.plane[h], scale);
+                half.split[0] = plane[0];
+                half.split[1] = plane[1];
+                half.split[2] = plane[2];
+                half.split[3] = 1.0f;
+                const std::array<float, 2> focus = split_focus_point(plane, in.viewport);
+                half.focus_point[0] = focus[0];
+                half.focus_point[1] = focus[1];
+                half.has_focus_point = true;
+                half.view = h;
+                if (scene_split_.near_plane[h] > 0.0f && scene_split_.far_plane[h] > scene_split_.near_plane[h]) {
+                    half.camera_near = scene_split_.near_plane[h];
+                    half.camera_far = scene_split_.far_plane[h];
+                }
+                recorded |= post_process_.record_dof(
+                    command_list_.Get(), srv_ring_, half, frame_index_, kFramesInFlight);
+            }
+        } else {
+            recorded |= post_process_.record_dof(
+                command_list_.Get(), srv_ring_, d, frame_index_, kFramesInFlight);
+        }
+    }
+    if (motion) {
+        PostProcessor::MotionBlurInputs m{};
+        m.velocity = motion_target_.Get();
+        m.depth = efb_depth_.Get();
+        m.color = efb_color_.Get();
+        m.color_rtv = efb_rtv_;
+        m.width = in.width;
+        m.height = in.height;
+        std::memcpy(m.viewport, in.viewport, sizeof(m.viewport));
+        // 100% is a full-frame (360 degree) shutter; the default 50 is the film 180.
+        m.shutter = static_cast<float>(std::min(cfg.motion_blur, 100u)) / 100.0f;
+        m.max_length = in.viewport[3] * 0.05f;
+        // The motion target rests in RENDER_TARGET; the pass samples it.
+        D3D12_RESOURCE_BARRIER velocity_bar{};
+        velocity_bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        velocity_bar.Transition.pResource = motion_target_.Get();
+        velocity_bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        velocity_bar.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        velocity_bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        command_list_->ResourceBarrier(1, &velocity_bar);
+        if (scene_split_per_half_) {
+            // Each half inside its own side of the line: no tap from the other half's picture.
+            for (unsigned h = 0; h < 2u; ++h) {
+                PostProcessor::MotionBlurInputs half = m;
+                const std::array<float, 3> plane = split_plane_render(scene_split_.plane[h], scale);
+                half.split[0] = plane[0];
+                half.split[1] = plane[1];
+                half.split[2] = plane[2];
+                half.split[3] = 1.0f;
+                recorded |= post_process_.record_motion_blur(
+                    command_list_.Get(), srv_ring_, half, frame_index_, kFramesInFlight);
+            }
+        } else {
+            recorded |= post_process_.record_motion_blur(
+                command_list_.Get(), srv_ring_, m, frame_index_, kFramesInFlight);
+        }
+        std::swap(velocity_bar.Transition.StateBefore, velocity_bar.Transition.StateAfter);
+        command_list_->ResourceBarrier(1, &velocity_bar);
+    }
+    std::swap(bar.Transition.StateBefore, bar.Transition.StateAfter);
+    command_list_->ResourceBarrier(1, &bar);
+    // The upscaler and output-EFB paths do the same after their own passes.
+    command_list_->SetGraphicsRootSignature(root_signature_.Get());
+    invalidate_gx_bindings();
+    bound_scissor_input_scale_ = 0u;
+    bind_efb(nullptr);
+    return recorded;
 }
 
 bool RendererD3D12::record_temporal_upscale(unsigned output_scale) {
@@ -8234,8 +8966,10 @@ void RendererD3D12::clear_efb(
         // REVERSED-Z buffer: GX z24 (near=0, far=2^24) inverts into the D3D depth value.
         // GX_MAX_Z24 (0xFFFFFF = "clear to farthest") becomes about 0.0 here, which the flipped
         // GEQUAL-style funcs pass.
+        // The material stencil clears with the depth it describes.
         command_list_->ClearDepthStencilView(
-            dsv, D3D12_CLEAR_FLAG_DEPTH, clear.reversed_depth, 0, num_rects, rects);
+            dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clear.reversed_depth, 0,
+            num_rects, rects);
     }
 }
 
@@ -8332,6 +9066,10 @@ void RendererD3D12::draw(const DrawCall& call) {
     if (call.pipeline != bound_pipeline_) {
         command_list_->SetPipelineState(call.pipeline);
         bound_pipeline_ = call.pipeline;
+    }
+    if (call.stencil_ref != bound_stencil_ref_) {
+        command_list_->OMSetStencilRef(call.stencil_ref);
+        bound_stencil_ref_ = call.stencil_ref;
     }
     if (call.vs_constants &&
         call.vs_constants != bound_vs_constants_) {
@@ -8765,7 +9503,61 @@ bool RendererD3D12::copy_efb_to_texture(
     }();
     static bool comparison_enabled = policy.native_bloom_workspace || policy.native_effect_copies;
     static ULONGLONG comparison_last_poll = 0u;
-    const bool effect_copy = is_effect_copy(policy, params, is_depth_copy, dw_unscaled, dh_unscaled);
+    // Mario's cast shadow is a silhouette captured into a 160x160 texture and
+    // projected onto the ground. Unlike the blur sources it has no kernel that
+    // depends on the low resolution, and at the scaled EFB a 160x160 capture
+    // shows as big square steps along the shadow's edge, so it is captured at
+    // the scaled resolution. GALAXY_NATIVE_SHADOW_CAPTURE=1 restores the
+    // game-resolution capture.
+    static const bool native_shadow_capture = [] {
+        char value[8]{};
+        std::size_t length = 0u;
+        return getenv_s(&length, value, sizeof(value), "GALAXY_NATIVE_SHADOW_CAPTURE") == 0 &&
+            length == 2u && value[0] == '1';
+    }();
+    // Other actors' shadows (the Toads, enemies) use other sizes; the alpha-format
+    // rule catches them. GALAXY_SHADOW_CAPTURE_ALPHA=0 limits this to 160x160.
+    static const bool shadow_alpha_rule = [] {
+        char value[8]{};
+        std::size_t length = 0u;
+        return !(getenv_s(&length, value, sizeof(value), "GALAXY_SHADOW_CAPTURE_ALPHA") == 0 &&
+                 length == 2u && value[0] == '0');
+    }();
+    const bool shadow_capture = !native_shadow_capture &&
+        is_galaxy_shadow_capture_copy(params, is_depth_copy, dw_unscaled, dh_unscaled,
+                                      shadow_alpha_rule);
+    // GALAXY_TRACE_EFB_COPY=1: log each distinct small texture copy once (size,
+    // format, flags, destination address) and its running count, to see which
+    // copies are shadow silhouettes and which are effect sources.
+    static const bool trace_efb_copy = [] {
+        char value[8]{};
+        std::size_t length = 0u;
+        return getenv_s(&length, value, sizeof(value), "GALAXY_TRACE_EFB_COPY") == 0 && length > 1u;
+    }();
+    if (trace_efb_copy && dw_unscaled <= 320u && dh_unscaled <= 228u && !params.copy_to_xfb) {
+        static std::unordered_map<std::uint64_t, std::uint32_t> seen;
+        const std::uint64_t key = static_cast<std::uint64_t>(dw_unscaled) |
+            (static_cast<std::uint64_t>(dh_unscaled) << 16) |
+            (static_cast<std::uint64_t>(params.target_format) << 32) |
+            (static_cast<std::uint64_t>(params.half_scale) << 40) |
+            (static_cast<std::uint64_t>(params.intensity) << 41) |
+            (static_cast<std::uint64_t>(is_depth_copy) << 42) |
+            (static_cast<std::uint64_t>(params.clear) << 43) |
+            (static_cast<std::uint64_t>(params.dest_addr >> 5) << 44);
+        const std::uint32_t count = ++seen[key];
+        if (count == 1u || count == 600u) {
+            std::fprintf(stderr,
+                "[efb-copy-trace] %ux%u src=(%u,%u %ux%u) fmt=%u depth=%d half=%d intensity=%d gamma=%u "
+                "clear=%d stride=%u addr=%08X shadow=%d count=%u\n",
+                dw_unscaled, dh_unscaled, params.src_x, params.src_y, params.src_width,
+                params.src_height, static_cast<unsigned>(params.target_format),
+                is_depth_copy ? 1 : 0, params.half_scale ? 1 : 0, params.intensity ? 1 : 0,
+                static_cast<unsigned>(params.gamma), params.clear ? 1 : 0, params.dest_stride,
+                params.dest_addr, shadow_capture ? 1 : 0, count);
+        }
+    }
+    const bool effect_copy = is_effect_copy(policy, params, is_depth_copy, dw_unscaled, dh_unscaled) &&
+                             !(policy.native_effect_copies && shadow_capture);
     const bool bloom_copy =
         (policy.native_bloom_workspace || policy.native_effect_copies || !bloom_comparison_file.empty()) &&
         efb_scale_ > 1u && effect_copy;
@@ -8807,7 +9599,7 @@ bool RendererD3D12::copy_efb_to_texture(
 
     // Keyed by (addr, format, depth-source): SMG reuses one address with
     // different copy formats and each needs its own converted texture.
-    const std::uint64_t dest_key =
+    const std::uint64_t view_key =
         static_cast<std::uint64_t>(params.dest_addr) |
         (static_cast<std::uint64_t>(params.target_format) << 32) |
         (is_depth_copy ? (1ull << 40) : 0ull) |
@@ -8819,6 +9611,8 @@ bool RendererD3D12::copy_efb_to_texture(
         // textures, so a sub-frame replaying one frame's copies never
         // overwrites what the next frame's chunks already copied.
         (ring_mode_ == RingMode::Interp ? (replay_serial_ & 1ull) << 42 : 0ull);
+    // Split screen's second view copies into destinations of its own.
+    const std::uint64_t dest_key = view_key | (efb_copy_view_ != 0u ? (1ull << 43) : 0ull);
 
     // Bound the destination map. Each entry is one copy's SCALED destination texture, so its size
     // scales with both the copy's logical extent and `efb_scale_`. At the full 640x456 EFB extent, RGBA8:
@@ -8970,6 +9764,7 @@ bool RendererD3D12::copy_efb_to_texture(
         if (ring_mode_ == RingMode::Interp) note_copy_write(dest.texture.Get());
         ++efb_identity_copies_;
         efb_identity_payload_bytes_ += static_cast<std::uint64_t>(w) * h * 4u;
+        efb_view_copies_[efb_copy_view_][view_key] = {params, dest.texture};
         return textures.register_efb_copy(params.dest_addr, params, dest.texture);
     }
 
@@ -9031,7 +9826,22 @@ bool RendererD3D12::copy_efb_to_texture(
     // textures one address can alternate between resources, and the alias
     // must always point at the most recent copy (register_efb_copy is a
     // cheap no-op when the resource is unchanged).
+    efb_view_copies_[efb_copy_view_][view_key] = {params, dest.texture};
     return textures.register_efb_copy(params.dest_addr, params, dest.texture);
+}
+
+std::vector<EfbCopyParams> RendererD3D12::set_efb_copy_view(unsigned view, TextureCache& textures) {
+    std::vector<EfbCopyParams> changed;
+    view = view != 0u ? 1u : 0u;
+    if (view == efb_copy_view_) return changed;
+    efb_copy_view_ = view;
+    for (const auto& [key, copy] : efb_view_copies_[view]) {
+        (void)key;
+        if (copy.texture && textures.register_efb_copy(copy.params.dest_addr, copy.params, copy.texture)) {
+            changed.push_back(copy.params);
+        }
+    }
+    return changed;
 }
 
 bool RendererD3D12::ensure_peek_resources() {
@@ -9976,6 +10786,7 @@ void RendererD3D12::debug_log_readback() {
 // ---------------------------------------------------------------------------
 
 
+
 bool RendererD3D12::present(
     const XfbTexture* source, bool capture_backbuffer, bool black) {
     // Diagnostic stall watch, gated on its own opt-in flag. GALAXY_TRACE_STALL_WATCH is unset in the
@@ -10235,9 +11046,24 @@ bool RendererD3D12::present(
         const auto stall_watch_overlay_start = stall_watch_overlay
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
+        // The host menus (host_menus.h) in the game's style once its art is loaded; until then, and without it,
+        // the overlay's plain look.
+        const galaxy::gx::menu::Assets* const kit = menu_kit_assets();
+        host_window::draw_file_select_options(*this, kit != nullptr);
+        host_window::settings_kit_active.store(kit != nullptr, std::memory_order_relaxed);
         host_window::draw_native_settings_overlay(*this);
+        if (kit != nullptr) {
+            host_window::draw_native_settings_kit(*kit);
+        }
         host_window::draw_native_settings_hint(*this);
         host_window::draw_home_menu(*this);
+        host_window::draw_net_lobby_banner(*this, kit != nullptr);
+        host_window::draw_online_menu(*this, kit != nullptr);
+        draw_host_menus(*this,
+                        {static_cast<float>(content_viewport.left), static_cast<float>(content_viewport.top),
+                         static_cast<float>(content_viewport.width), static_cast<float>(content_viewport.height)},
+                        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                        native_settings_overlay_visible());
         if (stall_watch_overlay) {
             const double stall_watch_ms =
                 std::chrono::duration<double, std::milli>(

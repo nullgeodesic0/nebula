@@ -41,6 +41,7 @@
 #include "galaxy/gx/shader_keys.h"
 #include "galaxy/gx/render_config.h"
 #include "galaxy/gx/ui_canvas.h"
+#include "galaxy/gx/split_effects.h"
 #include "galaxy/gx/window_owner.h"
 #include "galaxy/gx_d3d12.h"
 
@@ -50,6 +51,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <future>
+#include <memory>
 #include <optional>
 #include <string>
 #include <span>
@@ -59,6 +61,11 @@
 #include <vector>
 
 namespace galaxy::gx {
+
+namespace menu {
+struct Quad;
+struct Assets;
+}  // namespace menu
 
 class TextureCache;
 struct TextureHandle;
@@ -281,6 +288,9 @@ public:
     // After a temporal scene_temporal_begin: clears the motion target for
     // the scene. False when it could not be created (no motion writers).
     [[nodiscard]] bool begin_motion_scene();
+    // At a scene begin without the temporal upscaler: true when motion blur
+    // wants this scene's motion vectors (begin_motion_scene then clears them).
+    [[nodiscard]] bool scene_motion_blur_begin();
     // GALAXY_MOTION_DEBUG: at the scene's end, replaces the EFB color with
     // the motion field (grey = still; red/green = +x/+y towards the previous
     // position, 8 pixels to full scale).
@@ -525,12 +535,36 @@ public:
     // The scene camera's clip planes and vertical field of view (radians).
     void set_scene_camera(float near_plane, float far_plane, float fov_y) noexcept;
     // Render thread, at each scene's start: its camera (world to eye), or null when unknown.
+    // (Our scene effects keep the scene before's camera too, for camera motion blur.)
     void set_scene_view(const std::array<float, 12>* view) noexcept {
+        scene_prev_view_ = scene_view_;
+        scene_prev_view_valid_ = scene_view_known_;
         scene_view_known_ = view != nullptr;
         if (view != nullptr) {
             scene_view_ = *view;
         }
     }
+    // GX projection terms A..D (clip x = A x + B z, clip y = C y + D z) and the XF
+    // viewport (x, y, w, h in unscaled EFB pixels) of the scene's first perspective
+    // draw; with set_scene_camera this makes the scene's depth usable for ambient
+    // occlusion. Cleared at every scene begin.
+    void set_scene_projection(const float abcd[4], const float viewport[4]) noexcept;
+    // View-space position of the light the scene's contact shadows are cast
+    // from (the XF light position, which the game places in view space).
+    // Cleared at every scene begin.
+    void set_scene_light(const float position[3]) noexcept;
+    // Co-op split screen, for this scene's effects (split_effects.h): each half's side and camera planes, whether
+    // the effects run per half, and whether this scene's motion vectors are a camera jump (no motion blur).
+    void set_scene_split(const SplitScene& scene, bool per_half, bool skip_motion) noexcept {
+        scene_split_ = scene;
+        scene_split_per_half_ = per_half;
+        scene_split_skip_motion_ = skip_motion;
+    }
+    // At scene end: ambient occlusion and contact shadows from the EFB depth,
+    // multiplied onto the EFB colour, then reflections, depth of field and
+    // camera motion blur. True when it
+    // recorded (GX bindings are then stale).
+    [[nodiscard]] bool record_scene_effects();
     // GX copy-clear: color from the latched AR/GB regs, depth from z24
     // (converted z24 / 0xFFFFFF into the D24 target).  The clear is scoped to
     // the given rect in unscaled EFB pixels (w==0 -> full target), matching
@@ -565,6 +599,12 @@ public:
         const EfbCopyParams& params,
         TextureCache& textures,
         bool is_depth_copy);
+    // Split screen: view 1 while the second player's half is drawn, else 0. Re-registers that view's
+    // latest copies with `textures`; returns the copies whose alias changed (their bindings are stale).
+    [[nodiscard]] std::vector<EfbCopyParams> set_efb_copy_view(unsigned view, TextureCache& textures);
+    // Split screen: the black separator along `plane` (logical EFB pixels), `half_width` logical pixels each
+    // side, at `opacity`, over the current EFB.
+    void draw_split_line(const std::array<float, 3>& plane, float half_width, float opacity);
 
     // Stretch-blit `source` to the backbuffer. A null/invalid source is a
     // runtime bug: callers must keep the last valid swap-chain image instead
@@ -742,7 +782,16 @@ public:
         int x, int y, int scale, std::uint64_t bitmap,
         const std::array<float, 4>& color) override;
 
+    // The host menus (menu_kit.h): the game's font and menu art read from game.pak on the first call (recorded on
+    // the open frame), then false for good if that failed. draw_menu_kit draws a frame's whole draw list in one
+    // call; call it at most once a frame (its vertices live in this frame's ring segment).
+    bool ensure_menu_kit_loaded();
+    [[nodiscard]] const menu::Assets* menu_kit_assets() const noexcept;
+    void draw_menu_kit(std::span<const menu::Quad> quads);
+
 private:
+    struct MenuKitState;
+    std::shared_ptr<MenuKitState> menu_kit_;
     void invalidate_gx_bindings();
     // VSYNC ON presents each frame for round(refresh / rate) refreshes when
     // the refresh is a multiple of the present rate (60 at 120 Hz, 30 at
@@ -918,6 +967,7 @@ private:
                          D3D12_CPU_DESCRIPTOR_HANDLE& rtv, D3D12_CPU_DESCRIPTOR_HANDLE& dsv);
     void write_msaa_depth_view(EfbMsaa& msaa);
     [[nodiscard]] ID3D12PipelineState* clear_pipeline(bool color);
+    [[nodiscard]] ID3D12PipelineState* split_line_pipeline();
     EfbMsaa efb_msaa_;
     mutable unsigned msaa_max_samples_ = 0u;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> depth_resolve_pso_;
@@ -972,10 +1022,22 @@ private:
     std::uint64_t temporal_frame_ = 0;
     bool temporal_history_valid_ = false;
     bool scene_temporal_ = false;
+    bool scene_motion_only_ = false;   // motion vectors for blur, without the upscaler
+    bool scene_motion_valid_ = false;  // this scene's motion target holds its vectors
     float scene_jitter_[2]{};
     float scene_camera_[3]{1.0f, 100000.0f, 1.0f};
     std::array<float, 12> scene_view_{};
     bool scene_view_known_ = false;
+    float scene_proj_[4]{};
+    float scene_viewport_[4]{};
+    bool scene_projection_valid_ = false;
+    float scene_light_[3]{};
+    bool scene_light_valid_ = false;
+    std::array<float, 12> scene_prev_view_{};
+    SplitScene scene_split_{};
+    bool scene_split_per_half_ = false;
+    bool scene_split_skip_motion_ = false;
+    bool scene_prev_view_valid_ = false;
     Microsoft::WRL::ComPtr<ID3D12Resource> motion_target_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> motion_rtv_heap_;
     D3D12_CPU_DESCRIPTOR_HANDLE motion_rtv_{};
@@ -1064,6 +1126,12 @@ private:
     // and the sampler heap advance once per game frame.
     enum class RingMode : std::uint8_t { Normal, Temporal, Interp };
     RingMode ring_mode_ = RingMode::Normal;
+    // Upload-ring budgets per frame (the constant ring's before the Interp multiplier). They start at
+    // the configured sizes and grow when a frame runs into a ring's headroom (UploadRing::growth_requested).
+    std::size_t vertex_ring_bytes_ = 0;
+    std::size_t index_ring_bytes_ = 0;
+    std::size_t constant_ring_bytes_ = 0;
+    std::size_t matrix_ring_bytes_ = 0;
     unsigned ring_segment_ = 0;
     std::array<std::uint64_t, kInterpSegments> ring_segment_fence_{};
     bool ring_advance_pending_ = true;
@@ -1530,6 +1598,7 @@ private:
     // The vertex view is part of the set: its GPU VA comes from the per-frame
     // vertex ring, so a stale entry can never survive that rewind.
     ID3D12PipelineState* bound_pipeline_ = nullptr;
+    std::uint16_t bound_stencil_ref_ = 0xFFFFu;  // 0xFFFF: unknown
     D3D12_GPU_VIRTUAL_ADDRESS bound_vs_constants_ = 0;
     D3D12_GPU_VIRTUAL_ADDRESS bound_ps_constants_ = 0;
     D3D12_GPU_DESCRIPTOR_HANDLE bound_texture_table_{};
@@ -1672,6 +1741,16 @@ private:
     // either way. The bound exists because the map was unbounded, not because it
     // oversubscribes a reported 128 MB pool; there is no such pool.
     std::unordered_map<std::uint64_t, EfbCopyDest> efb_copy_dests_;
+    // Split screen: the second player's half copies into destinations of its own (a key bit), and each view
+    // remembers its latest copy per destination, so set_efb_copy_view can point the game's addresses back at
+    // that view's copies when its half starts. Effects that sample their own earlier copies (bloom, blur,
+    // the final scene capture) then never see the other half's picture.
+    struct ViewCopy {
+        EfbCopyParams params{};
+        Microsoft::WRL::ComPtr<ID3D12Resource> texture;
+    };
+    std::array<std::unordered_map<std::uint64_t, ViewCopy>, 2> efb_view_copies_;
+    unsigned efb_copy_view_ = 0;
     std::uint64_t efb_copy_dests_tick_ = 0;
     std::uint64_t efb_copy_dests_bytes_ = 0;
     // Render-owner-only aggregate work counts, reported once at shutdown.
@@ -1707,6 +1786,10 @@ private:
     std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, 8> clear_alpha_pipelines_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> motion_debug_root_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_debug_pipeline_;
+    // Split screen's separator (draw_split_line), a pipeline per EFB variant.
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> split_line_root_sig_;
+    Microsoft::WRL::ComPtr<ID3DBlob> split_line_ps_;
+    std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, 8> split_line_pipelines_;
 
     // Synchronous GXPeekARGB/GXPeekZ bridge. Peeks execute on the render
     // thread through a tiny 1x1 conversion target and readback buffer, so

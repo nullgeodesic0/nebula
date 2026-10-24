@@ -93,7 +93,7 @@ struct RenderConfig {
     // per_pixel_lighting for the draws it shades.
     bool     enhanced_lighting   = false;
     // Ambient occlusion of the 3D scene (ambient_occlusion.h); ray-traced lighting has its own.
-    bool     ambient_occlusion   = false;
+    bool     ambient_occlusion   = true;
 
     // Presentation image quality (post_process.h), applied to the presented
     // frame on the render thread. aa_mode: 0 off, 1 SMAA, 2 auto (SMAA unless
@@ -139,6 +139,34 @@ struct RenderConfig {
     // divided by 1.5, 1.7, 2 or 3 (the temporal_quality ratios).
     unsigned spatial_quality     = 0;
     unsigned sharpness           = 0;
+    // Look pass after scaling (percent): bloom 0-100 (0 = no bloom pyramid),
+    // saturation and contrast 0-200 (100 = unchanged), vignette 0-100. Keys
+    // bloom / saturation / contrast / vignette, env GALAXY_BLOOM etc.
+    unsigned bloom               = 30;
+    unsigned saturation          = 108;
+    unsigned contrast            = 104;
+    unsigned vignette            = 8;
+    // The fork's own ambient occlusion strength 0-100 on the 3D scene (0 = off; key ssao, env GALAXY_SSAO,
+    // world-unit radius GALAXY_SSAO_RADIUS). Off: upstream's AMBIENT OCCLUSION (ambient_occlusion) is the one the
+    // menu offers; this stays for comparisons only.
+    unsigned ssao                = 0;
+    // Screen-space contact shadows 0-100 from the scene's main light (0 = off);
+    // key contact_shadows, env GALAXY_CONTACT_SHADOWS, world-unit ray length
+    // GALAXY_CONTACT_SHADOW_LENGTH.
+    unsigned contact_shadows     = 50;
+    // Far-field depth of field 0-100 (0 = off); key depth_of_field, env
+    // GALAXY_DEPTH_OF_FIELD.
+    unsigned depth_of_field      = 40;
+    // Camera-rotation motion blur 0-100 (shutter, 0 = off); key motion_blur,
+    // env GALAXY_MOTION_BLUR.
+    unsigned motion_blur         = 0;
+    // Screen-space reflections 0-100 on reflective materials (0 = off); key
+    // reflections, env GALAXY_REFLECTIONS, world-unit ray length
+    // GALAXY_REFLECTION_DISTANCE.
+    unsigned reflections         = 60;
+    // Lens flare 0-100 from the bloom bright pass (0 = off, needs bloom); key
+    // lens_flare, env GALAXY_LENS_FLARE.
+    unsigned lens_flare          = 40;
 
     // Ray-traced effects (ambient occlusion) on adapters with DXR 1.1, shader
     // model 6.5 and dedicated video memory; ignored elsewhere. The other rt_*
@@ -381,6 +409,10 @@ bool reload_render_config_if_changed();
 // GALAXY_TEXTURE_PACK_DIR names a pack folder for tests, below every mod. Empty when unknown or unset.
 [[nodiscard]] std::filesystem::path texture_pack_directory();
 [[nodiscard]] std::filesystem::path texture_pack_test_directory();
+// A pack installed for Dolphin, below every mod: NEBULA_TEXTURE_PACK=<folder> (or "off"), else Dolphin's
+// %APPDATA%\Dolphin Emulator\Load\Textures\RMGE01 or Documents\Dolphin Emulator\Load\Textures\RMGE01 when it
+// exists. Empty when none.
+[[nodiscard]] std::filesystem::path dolphin_texture_pack_directory();
 [[nodiscard]] std::filesystem::path texture_dump_directory();
 // The enabled mods' textures/ folders in load order (the host sets them at start); the generation
 // changes with each set.

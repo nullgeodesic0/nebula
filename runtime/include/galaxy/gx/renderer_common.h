@@ -187,6 +187,8 @@ struct EffectCopyPolicy {
 // GALAXY_SMOOTH_REALTIME_PRESENT_MAX_WAIT_US, 2000, at most 8000).
 [[nodiscard]] bool realtime_vi_paces_present();
 [[nodiscard]] bool smooth_realtime_present_enabled();
+// GALAXY_SKIP_PRESENT=1: frames are rendered but never shown (deterministic unpaced replays).
+[[nodiscard]] bool skip_present_enabled();
 [[nodiscard]] std::uint64_t smooth_realtime_present_max_wait_us();
 
 // Holds each present to the frame-rate cap when the display does not (vsync off), and smooths a VI-paced present
@@ -235,6 +237,9 @@ struct DrawCall {
     // Render target 1 in temporal scenes: 1 the motion target (opaque
     // motion writers), 2 the reactive mask (blended draws), 0 none.
     std::uint8_t aux_target = 0;
+    // Material class written to the EFB stencil where the draw writes depth
+    // (kMaterial* in shader_keys.h; the D3D12 scene effects read it).
+    std::uint8_t stencil_ref = 0;
     // Interpolated redraw: the scene transform record whose VS constants a
     // sub-frame replaces, -1 for draws outside the 3D scene.
     std::int32_t replay_record = -1;

@@ -257,6 +257,15 @@ public:
     void reset_matrix_load_signature() noexcept { matrix_load_signature_ = kMatrixLoadSignatureSeed; }
     [[nodiscard]] std::uint64_t matrix_load_signature() const noexcept { return matrix_load_signature_; }
     static constexpr std::uint64_t kMatrixLoadSignatureSeed = 0x6D6C6F6164736967ull;
+    // Takes `other`'s CP registers and BP write mask, the state a PE-event classification parse keeps exact
+    // (FifoParser::set_event_classification_only); XF and the other BP registers stay as they are.
+    void adopt_command_processor_state(const GxState& other) {
+        if (cp_ != other.cp_) {
+            cp_ = other.cp_;
+            invalidate_dependency_shape();
+        }
+        bp_mask_ = other.bp_mask_;
+    }
 
 private:
     void note_matrix_load(std::uint16_t base, std::uint16_t count, std::uint32_t source) noexcept {

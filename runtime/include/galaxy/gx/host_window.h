@@ -18,6 +18,10 @@
 #include <vulkan/vulkan_core.h>
 #endif
 
+namespace galaxy::gx::menu {
+struct Assets;
+}  // namespace galaxy::gx::menu
+
 namespace galaxy::gx::host_window {
 
 #if defined(_WIN32)
@@ -89,6 +93,15 @@ void show_window(NativeWindow window) noexcept;
 void draw_native_settings_overlay(UiCanvas& renderer);
 void draw_home_menu(UiCanvas& renderer);
 void draw_native_settings_hint(UiCanvas& renderer);
+// The fork's host-side menus. With `kit` (the game's art loaded, menu_kit.h) the host menus draw them in the game's
+// style (host_menus.cpp); otherwise these draw them in the overlay's plain look.
+void draw_file_select_options(UiCanvas& renderer, bool kit);
+void draw_online_menu(UiCanvas& renderer, bool kit);
+void draw_net_lobby_banner(UiCanvas& renderer, bool kit);
+// F1 in the game's style: added to the host menus' draw list (host_menus.h host_menu_list) while it is open.
+// settings_kit_active (render thread): draw_native_settings_overlay runs its test hooks but leaves the drawing to it.
+extern std::atomic<bool> settings_kit_active;
+void draw_native_settings_kit(const menu::Assets& assets);
 
 #if defined(NEBULA_GPU_VULKAN)
 // The instance extensions the window's surface needs, and the surface (VK_NULL_HANDLE when it cannot be made).

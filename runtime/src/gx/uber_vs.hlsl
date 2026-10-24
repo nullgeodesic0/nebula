@@ -32,6 +32,8 @@ cbuffer GxVsConstants : register(b0) {
     // Physical ray tracing (flags bit 6): the model's baked light by facing (uber_constants.h).
     float4   debake_sh[7];
     float4   debake_peak;
+    // Split screen: x the line's angle + 16 (0: no line), y its offset, in clip space (uber_constants.h).
+    uint4    split_clip_params;
 };
 StructuredBuffer<float4> mtx_palette : register(t0, space1);
 
@@ -50,7 +52,15 @@ struct VSOut {
     float4   col0     : COLOR0;
     float4   col1     : COLOR1;
     float3   uv[8]    : TEXCOORD;
+    // Split screen: clips away the other player's side of the line (shader_gen.cpp kSplitClipMember).
+    float    split_clip : SV_ClipDistance0;
 };
+
+float split_clip_distance(float4 pos) {
+    if (split_clip_params.x == 0u) return 1.0;
+    float angle = asfloat(split_clip_params.x) - 16.0;
+    return cos(angle) * pos.x + sin(angle) * pos.y + asfloat(split_clip_params.y) * pos.w;
+}
 
 float xfw(uint w) {
     float4 v = mtx_palette[mtx_palette_base + (w >> 2u)];
@@ -482,5 +492,6 @@ VSOut main(VSIn v, uint vertex_id : SV_VertexID) {
     o.uv[5] = uv5;
     o.uv[6] = uv6;
     o.uv[7] = uv7;
+    o.split_clip = split_clip_distance(o.pos);
     return o;
 }

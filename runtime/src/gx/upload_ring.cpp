@@ -36,13 +36,16 @@ void UploadRing::reset() noexcept {
 
 bool UploadRing::initialize(
     gpu::Device* device, const char* name, std::size_t bytes_per_frame,
-    unsigned frames_in_flight, std::size_t capacity) {
+    unsigned frames_in_flight, std::size_t capacity, std::size_t headroom_bytes_per_frame) {
     if (device == nullptr || bytes_per_frame == 0u || frames_in_flight == 0u ||
-        bytes_per_frame > std::numeric_limits<std::size_t>::max() / frames_in_flight) {
+        headroom_bytes_per_frame > std::numeric_limits<std::size_t>::max() - bytes_per_frame ||
+        bytes_per_frame + headroom_bytes_per_frame >
+            std::numeric_limits<std::size_t>::max() / frames_in_flight) {
         return false;
     }
     // Prepare all fallible state before replacing the retained mapped buffer.
-    const std::size_t total = std::max(bytes_per_frame * frames_in_flight, capacity);
+    const std::size_t stride = bytes_per_frame + headroom_bytes_per_frame;
+    const std::size_t total = std::max(stride * frames_in_flight, capacity);
     gpu::UploadMemory memory = gpu::create_upload_memory(device, total, name);
     if (!memory) {
         return false;
@@ -58,6 +61,9 @@ bool UploadRing::initialize(
     gpu_base_ = gpu_base;
     name_ = name != nullptr ? name : "";
     bytes_per_frame_ = bytes_per_frame;
+    headroom_bytes_per_frame_ = headroom_bytes_per_frame;
+    segment_stride_ = stride;
+    growth_requested_ = false;
     frames_in_flight_ = frames_in_flight;
     capacity_ = total;
     resource_identity_ = g_upload_ring_identity.fetch_add(1, std::memory_order_relaxed);
@@ -77,6 +83,11 @@ bool UploadRing::resegment(std::size_t bytes_per_frame, unsigned frames_in_fligh
         bytes_per_frame > capacity_ / frames_in_flight) {
         return false;
     }
+    // The headroom stays while it fits beside the new segments; otherwise the segments go without it.
+    const std::size_t room = capacity_ / frames_in_flight - bytes_per_frame;
+    headroom_bytes_per_frame_ = std::min(headroom_bytes_per_frame_, room);
+    segment_stride_ = bytes_per_frame + headroom_bytes_per_frame_;
+    growth_requested_ = false;
     bytes_per_frame_ = bytes_per_frame;
     frames_in_flight_ = frames_in_flight;
     // A new identity: no immutable-upload token of the old segmentation matches.
@@ -101,9 +112,19 @@ void UploadRing::begin_frame(unsigned frame_slot) {
     reused_bytes_ = 0;
     copied_bytes_ = 0;
     immutable_upload_calls_ = 0;
-    segment_base_ = static_cast<std::size_t>(frame_slot) * bytes_per_frame_;
+    segment_base_ = static_cast<std::size_t>(frame_slot) * segment_stride_;
     cursor_       = segment_base_;
     frame_ready_ = true;
+}
+
+std::size_t UploadRing::grown_bytes_per_frame() const {
+    constexpr std::size_t kMegabyte = std::size_t{1} << 20;
+    std::size_t grown = bytes_per_frame_ <= kMaxBytesPerFrame / 2u ? bytes_per_frame_ * 2u : kMaxBytesPerFrame;
+    const std::size_t from_peak = peak_bytes_per_frame_ <= kMaxBytesPerFrame / 3u * 2u
+        ? peak_bytes_per_frame_ + peak_bytes_per_frame_ / 2u : kMaxBytesPerFrame;
+    grown = std::max(grown, from_peak);
+    grown = std::min(kMaxBytesPerFrame, (grown + kMegabyte - 1u) / kMegabyte * kMegabyte);
+    return std::max(grown, bytes_per_frame_);
 }
 
 UploadRing::Allocation UploadRing::allocate(std::size_t size, std::size_t alignment) {
@@ -116,15 +137,21 @@ UploadRing::Allocation UploadRing::allocate(std::size_t size, std::size_t alignm
     // Unsigned negation gives the exact padding without cursor+alignment
     // overflow. Prove both padding and payload fit before forming addresses.
     const std::size_t padding = (std::size_t{0} - cursor_) & (alignment - 1u);
-    const std::size_t remaining = bytes_per_frame_ - (cursor_ - segment_base_);
+    const std::size_t remaining = segment_stride_ - (cursor_ - segment_base_);
     if (padding > remaining || size > remaining - padding)
         throw std::runtime_error(
             std::string("UploadRing '") + name_ + "' exhausted: request " +
             std::to_string(size) + " B at frame-used " +
             std::to_string(cursor_ - segment_base_) + "/" +
-            std::to_string(bytes_per_frame_) + " B");
+            std::to_string(bytes_per_frame_) + " B (+" +
+            std::to_string(segment_stride_ - bytes_per_frame_) + " B headroom)");
     const std::size_t aligned = cursor_ + padding;
     cursor_ = aligned + size;
+    if (cursor_ - segment_base_ > bytes_per_frame_ && !growth_requested_) {
+        growth_requested_ = true;
+        std::cerr << "[ring] name=" << name_ << " over budget: " << (cursor_ - segment_base_)
+                  << "/" << bytes_per_frame_ << " B this frame; growing at the next frame\n";
+    }
     // Peak within the segment, i.e. the bytes of this frame's segment that were
     // actually handed out. This is the only sound floor for shrinking
     // `bytes_per_frame_`, and it is what separates the ring's reserved size from

@@ -14,6 +14,8 @@
 
 #include "galaxy/gx/texture_cache.h"
 #include "galaxy/gx/rt_materials.h"
+
+#include "galaxy/button_prompts.h"
 #include "galaxy/gx/dependency_event_capture.h"
 
 #include "galaxy/gx/render_config.h"
@@ -2154,6 +2156,95 @@ std::size_t TextureCache::invalidate_guest_ranges(
 }
 
 // ---------------------------------------------------------------------------
+// Generated replacements (controller button prompts)
+// ---------------------------------------------------------------------------
+
+bool TextureCache::try_generated_replacement(
+    const Key& key, const TexImage& image, const std::uint8_t* src, std::uint32_t total_guest_size,
+    TextureHandle& out) {
+    if (!backend_.has_upload_list() || upload_arenas_.empty()) {
+        return false;
+    }
+    // The picture font and the HUD A icon come back enlarged with the prompts of the controller in use.
+    if (image.format != TexFormat::RGB5A3 && image.format != TexFormat::IA4 && image.format != TexFormat::RGB565) {
+        return false;
+    }
+    prompts::HdImage generated;
+    if (!prompts::hd_replacement(image.guest_addr, image.width, image.height,
+                                 static_cast<std::uint8_t>(image.format), src, total_guest_size, generated) ||
+        generated.width == 0u || generated.height == 0u ||
+        generated.rgba.size() < static_cast<std::size_t>(generated.width) * generated.height * 4u) {
+        return false;
+    }
+    TextureReplacement* replacement = nullptr;
+    if (const auto cached = generated_cache_.find(generated.key); cached != generated_cache_.end()) {
+        generated_lru_.splice(generated_lru_.begin(), generated_lru_, cached->second.lru);
+        replacement = &cached->second.replacement;
+    } else {
+        const std::uint32_t pitch = (generated.width * 4u + TextureBackend::kPitchAlignment - 1u) &
+                                    ~(TextureBackend::kPitchAlignment - 1u);
+        const std::uint64_t staging_size = static_cast<std::uint64_t>(pitch) * generated.height;
+        const UploadAllocation staging = allocate_upload_bytes(staging_size, TextureBackend::kPlacementAlignment);
+        if (staging.cpu_base == nullptr) {
+            return false;
+        }
+        std::uint8_t* const base = staging.cpu_base + staging.offset;
+        for (std::uint32_t row = 0; row < generated.height; ++row) {
+            std::memcpy(base + static_cast<std::uint64_t>(row) * pitch,
+                        generated.rgba.data() + static_cast<std::size_t>(row) * generated.width * 4u,
+                        generated.width * 4u);
+        }
+        std::uint64_t allocation_bytes = 0;
+        gpu::TextureRef texture = backend_.create_texture(generated.width, generated.height, 1u, allocation_bytes);
+        if (!texture) {
+            return false;
+        }
+        const std::uint64_t offsets[1] = {0u};
+        const std::uint32_t pitches[1] = {pitch};
+        backend_.record_upload(gpu::raw(texture), false, *staging.chunk, staging.offset, generated.width,
+                               generated.height, 1u, offsets, pitches);
+        // A few prompt sets at most stay resident (each a handful of sheets).
+        constexpr std::size_t kGeneratedResident = 48u;
+        while (generated_cache_.size() >= kGeneratedResident && !generated_lru_.empty()) {
+            generated_cache_.erase(generated_lru_.back());
+            generated_lru_.pop_back();
+        }
+        generated_lru_.push_front(generated.key);
+        GeneratedCached& slot = generated_cache_[generated.key];
+        slot.replacement.texture = std::move(texture);
+        slot.replacement.width = generated.width;
+        slot.replacement.height = generated.height;
+        slot.replacement.levels = 1u;
+        slot.replacement.bytes = allocation_bytes;
+        slot.lru = generated_lru_.begin();
+        replacement = &slot.replacement;
+    }
+    const std::uint32_t srv_idx = allocate_srv_index();
+    backend_.write_view(srv_idx, gpu::raw(replacement->texture), 1u);
+    Entry entry{};
+    entry.texture = replacement->texture;
+    // Shared with generated_cache_, which keeps its own count; never pooled.
+    entry.allocation_bytes = 0u;
+    entry.handle.resource = gpu::raw(replacement->texture);
+    entry.handle.srv_index = srv_idx;
+    // The guest-visible size stays the original: UVs are normalized, so a larger image needs no
+    // coordinate changes.
+    entry.handle.width = static_cast<std::uint16_t>(image.width);
+    entry.handle.height = static_cast<std::uint16_t>(image.height);
+    entry.handle.mip_levels = 1u;
+    entry.handle.from_efb_copy = false;
+    entry.handle.generated_mips = false;
+    entry.handle.guest_byte_size = total_guest_size;
+    const TextureHandle handle = entry.handle;
+    if (entries_.empty()) decoded_guest_envelope_.clear();
+    decoded_guest_envelope_.include(image.guest_addr, total_guest_size);
+    entries_.emplace(key, std::move(entry));
+    decoded_lru_track(key);
+    out = handle;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Texture packs
 // ---------------------------------------------------------------------------
 
@@ -2575,6 +2666,12 @@ TextureHandle TextureCache::get(
             std::span<const std::byte>(guest_bytes, total_guest_size));
     }
     const auto* src = reinterpret_cast<const std::uint8_t*>(guest_bytes);
+    {
+        TextureHandle replaced{};
+        if (try_generated_replacement(key, image, src, total_guest_size, replaced)) {
+            return replaced;
+        }
+    }
     // The ray tracer's material table names textures by the texture-pack key of their base level.
     std::uint16_t rt_material = 0u;
     std::uint64_t pack = 0u;

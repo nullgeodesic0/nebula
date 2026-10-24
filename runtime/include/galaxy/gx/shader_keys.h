@@ -150,6 +150,14 @@ inline constexpr unsigned kEnhancedTableMetalShift = 26u;
 inline constexpr std::uint32_t kEnhancedTableKnown = 1u << 30u;
 inline constexpr std::uint32_t kEnhancedView = 1u << 18u;
 inline constexpr std::uint32_t kEnhancedViewChannel = 1u << 19u;
+// Material classes, written to the EFB stencil by every depth-writing GX draw
+// (see make_gx_pso_desc) and read by the scene effects (post_process.hlsl).
+// Derived from GX state per draw by GxBackend::classify_material.
+inline constexpr std::uint8_t kMaterialWritten  = 0x80u;  // a GX draw wrote this pixel
+inline constexpr std::uint8_t kMaterialLit      = 0x01u;  // colour channel 0 is lit by a light
+inline constexpr std::uint8_t kMaterialGlossy   = 0x02u;  // environment-mapped or specular
+inline constexpr std::uint8_t kMaterialIndirect = 0x04u;  // indirect texturing (water, glass)
+inline constexpr std::uint8_t kMaterialSkinned  = 0x08u;  // per-vertex matrix index: characters, enemies, actors
 
 struct PixelShaderKey {
     std::uint8_t num_tev_stages;    // 1-16

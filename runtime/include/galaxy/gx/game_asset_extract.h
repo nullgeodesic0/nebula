@@ -56,6 +56,12 @@ struct DecodedTexture {
 [[nodiscard]] std::optional<DecodedTexture> decode_tpl(
     std::span<const std::byte> data) noexcept;
 
+// Decodes `width` x `height` tiled GX texels of `format` (0 I4, 2 IA4, 5 RGB5A3) starting at `offset`: a
+// TPL image, or a BRFNT glyph sheet. std::nullopt for other formats or data that is too short.
+[[nodiscard]] std::optional<DecodedTexture> decode_gx_texels(
+    std::uint32_t format, std::span<const std::byte> data, std::size_t offset, unsigned width,
+    unsigned height) noexcept;
+
 // Reads `<content_root>/<relative_arc_path>` from disk, Yaz0-decompresses it if needed, and decodes one
 // named texture from the parsed RARC. Returns std::nullopt on any failure (missing file, unsupported
 // format, entry not found). Callers treat a missing or unsupported asset as the solid-color fallback,

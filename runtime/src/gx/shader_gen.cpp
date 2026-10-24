@@ -456,6 +456,20 @@ void vertex_blend(inout VSIn v, uint id) {
 }
 )HLSL";
 
+// Split screen (coop_guest.cpp): the vertex output's last member clips away the other player's side of a
+// line before rasterizing, so nothing there is written (colour, depth or stencil). GxVsConstants::split_clip
+// (at the constants' tail, after the de-bake members) holds the line's angle + 16 (0: no line) and its offset,
+// in clip space (GxBackend::flush_constants).
+static constexpr const char* kSplitClipConstant = "    uint4    split_clip_params;\n";
+static constexpr const char* kSplitClipMember = "    float    split_clip : SV_ClipDistance0;\n";
+static constexpr const char* kSplitClipFunction = R"HLSL(
+float split_clip_distance(float4 pos) {
+    if (split_clip_params.x == 0u) return 1.0;
+    float angle = asfloat(split_clip_params.x) - 16.0;
+    return cos(angle) * pos.x + sin(angle) * pos.y + asfloat(split_clip_params.y) * pos.w;
+}
+)HLSL";
+
 static std::string insert_before_close(const char* text, const char* members, bool last) {
     std::string out(text);
     const std::size_t at = last ? out.rfind("};") : out.find("};");
@@ -1126,15 +1140,20 @@ std::string ShaderGenerator::generate_vs(const VertexShaderKey& key) const {
     // Physical ray tracing's facing fit (flags bit 6) at the struct's end (c80, uber_constants.h).
     static constexpr const char* kVsDebakeMembers = "    float4   debake_sh[7];\n    float4   debake_peak;\n";
     if (motion) {
-        s << insert_before_close(kVsConstantsDef, (std::string(kVsMotionConstantMembers) + kVsDebakeMembers).c_str(),
-                                 false);
-        s << insert_before_close(ppl_outputs ? kVsStructsPpl : kVsStructs, kMotionInterpolants, true);
-    } else {
         s << insert_before_close(kVsConstantsDef,
-                                 (std::string("    float4   debake_skip_[15];\n") + kVsDebakeMembers).c_str(), false);
-        s << (ppl_outputs ? kVsStructsPpl : kVsStructs);
+                                 (std::string(kVsMotionConstantMembers) + kVsDebakeMembers + kSplitClipConstant).c_str(),
+                                 false);
+        const std::string structs =
+            insert_before_close(ppl_outputs ? kVsStructsPpl : kVsStructs, kMotionInterpolants, true);
+        s << insert_before_close(structs.c_str(), kSplitClipMember, true);
+    } else {
+        s << insert_before_close(
+            kVsConstantsDef,
+            (std::string("    float4   debake_skip_[15];\n") + kVsDebakeMembers + kSplitClipConstant).c_str(), false);
+        s << insert_before_close(ppl_outputs ? kVsStructsPpl : kVsStructs, kSplitClipMember, true);
     }
     s << kVertexBlendDef;
+    s << kSplitClipFunction;
 
     const bool dual_tex = (key.flags & 0x04u) != 0u;
 
@@ -1545,7 +1564,8 @@ float3 nebula_debake_gain(float3 nrm) {
         }
         s << "    }\n";
     }
-    s << "\n    return o;\n}\n";
+    s << "\n    o.split_clip = split_clip_distance(o.pos);\n";
+    s << "    return o;\n}\n";
 
     return s.str();
 }

@@ -100,6 +100,10 @@ void attach_stripe_particle(std::size_t stream_offset, std::uint32_t particle, s
     backend().attach_stripe_particle({stream_offset, particle, age_lifetime, strip});
 }
 
+void attach_split_clip(const float plane[3], unsigned pass, const float separator[4], std::size_t fifo_offset) noexcept {
+    backend().attach_split_clip(plane, pass, separator, fifo_offset);
+}
+
 bool capture_pointer_depth(std::span<std::uint32_t> pixels) {
     return backend().capture_pointer_depth(pixels);
 }
@@ -149,6 +153,26 @@ void set_indexed_load_host_order(bool host_order) noexcept {
     g_indexed_load_host_order.store(host_order, std::memory_order_relaxed);
 }
 
+struct GxRollbackState {
+    GxBackend::RollbackState state;
+};
+
+std::shared_ptr<GxRollbackState> make_rollback_state() {
+    return std::make_shared<GxRollbackState>();
+}
+
+void save_rollback_state(GxRollbackState& out) {
+    backend().save_rollback_state(out.state);
+}
+
+void restore_rollback_state(const GxRollbackState& in) {
+    backend().restore_rollback_state(in.state);
+}
+
+void set_render_suppressed(bool suppressed) {
+    backend().set_render_suppressed(suppressed);
+}
+
 void install_guest_dirty_tracker(GuestMemoryV1* memory) noexcept {
     backend().install_guest_dirty_tracker(memory);
 }
@@ -157,6 +181,13 @@ void notify_guest_memory_write(
     std::uint32_t address,
     std::uint32_t size) noexcept {
     backend().notify_guest_memory_write(address, size);
+}
+
+static_assert(kRollbackDirtyWords == GxBackend::kRollbackDirtyWords &&
+              kRollbackBlockBytes == GxBackend::kRollbackBlockBytes);
+
+void harvest_rollback_dirty(std::uint64_t* out) noexcept {
+    backend().harvest_rollback_dirty(out);
 }
 
 void pump_messages() {

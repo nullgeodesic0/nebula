@@ -73,12 +73,16 @@
 #include <mutex>
 #include <span>
 #include <thread>
+#include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace galaxy::gx {
+
+// The next presented frame read back to `path` (a .ppm), once: the agent's screenshot (docs/AGENT_TESTING.md).
+void request_present_snapshot(std::string path);
 class DependencyEventSink;
 
 struct GuestMemoryRange {
@@ -276,6 +280,18 @@ public:
         }
         producer_scene_view_valid_ = false;
     }
+    // Simulation thread: a SplitClip marker; its plane and pass ride in the marker's view slot.
+    void attach_split_clip(const float plane[3], unsigned pass, const float separator[4], std::size_t fifo_offset) noexcept {
+        if (producer_fifo_marker_count_ < producer_fifo_markers_.size()) {
+            const std::uint8_t index = producer_fifo_marker_count_++;
+            producer_fifo_markers_[index] = {fifo_offset, FifoMarker::SplitClip};
+            producer_fifo_marker_views_[index] = {};
+            for (unsigned i = 0; i < 3u; ++i) producer_fifo_marker_views_[index][i] = plane[i];
+            producer_fifo_marker_views_[index][3] = static_cast<float>(pass);
+            for (unsigned i = 0; i < 4u; ++i) producer_fifo_marker_views_[index][4u + i] = separator[i];
+            producer_fifo_marker_view_mask_ |= static_cast<std::uint8_t>(1u << index);
+        }
+    }
     [[nodiscard]] bool rt_shadow_casters_wanted() const noexcept {
         return rt_shadow_casters_wanted_.load(std::memory_order_relaxed);
     }
@@ -377,6 +393,24 @@ public:
         std::size_t fifo_size,
         GuestMemoryV1* memory,
         const NativeServicesV1* services);
+    // Rollback: the FIFO parse state that carries across frames (an incomplete command's tail and the GX register
+    // state of the simulation thread's PE-event and dependency parsers and of the renderer), taken and put back
+    // with the render queue drained.
+    struct RollbackState {
+        GxState event_state;
+        std::vector<std::byte> event_pending;
+        GxState dependency_state;
+        std::vector<std::byte> dependency_pending;
+        GxState render_state;
+        std::vector<std::byte> render_pending;
+    };
+    void save_rollback_state(RollbackState& out);
+    void restore_rollback_state(const RollbackState& in);
+    // Rollback re-simulation: while suppressed, render_frame raises a capture's PE events on the simulation
+    // thread exactly as when rendering and returns an already-complete receipt, with no GPU work and no present.
+    // The first frame after suppression ends takes the PE-event parser's GX state for the renderer.
+    void set_render_suppressed(bool suppressed);
+    [[nodiscard]] bool render_suppressed() const noexcept { return render_suppressed_; }
     void install_guest_dirty_tracker(GuestMemoryV1* memory) noexcept;
     void notify_guest_memory_write(
         std::uint32_t address,
@@ -855,6 +889,18 @@ private:
     std::uint64_t interp_threshold_cuts_ = 0;   // cuts from the turn/move thresholds only
     // GALAXY_MOTION_TRACE_SIGNALS: identity epoch changes per object.
     std::unordered_map<std::uint32_t, std::uint16_t> trace_object_epochs_;
+    // Render thread: split screen's line from the last SplitClip marker (logical EFB pixels; zero: none),
+    // and the one in the last uploaded vertex-shader constants (split_clip_vs_words).
+    std::array<float, 3> split_clip_{};
+    // Co-op split screen and the scene effects (split_effects.h): this scene's halves as their SplitClip markers
+    // and camera planes showed them, the half being drawn (1, 2; 0 outside them), and the separator, drawn once the
+    // scene's effects are done so they never blur it.
+    SplitScene split_scene_{};
+    unsigned split_draw_pass_ = 0u;
+    SplitEffectTracker split_tracker_{};
+    bool split_line_pending_ = false;
+    std::array<float, 4> split_line_{};
+    std::array<std::uint32_t, 2> uploaded_split_clip_{};
     // Temporal upscaling for the current scene: perspective projections carry
     // this sub-pixel jitter (render pixels).
     bool temporal_scene_ = false;
@@ -1345,6 +1391,9 @@ private:
     static void interp_sleep_us(std::int64_t us);
     std::uint64_t motion_trace_scenes_ = 0;
     bool scene_camera_captured_ = false;
+    bool scene_light_captured_ = false;
+    // The current draw's material class for the EFB stencil (kMaterial*).
+    std::uint8_t current_material_ = kMaterialWritten;
     float scene_jitter_px_[2]{};
     std::uint64_t scene_markers_seen_ = 0;
     bool producer_movie_content_{},render_movie_content_{};
@@ -1447,7 +1496,23 @@ private:
     // (Render-thread state, like everything below it down to the stats.)
     std::vector<std::byte> pending_fifo_;
     GxState event_state_;
+    // GALAXY_GX_RESUME_VERIFY=1: a full-state parse beside the event parser (events not raised), compared with
+    // the renderer's state where it resumes after re-simulation, to show how far the adopted state is from it.
+    struct ResumeVerifyParse {
+        FifoParser parser;
+        GxState state;
+        std::vector<std::byte> pending;
+        GxState saved_state;
+        std::vector<std::byte> saved_pending;
+    };
+    std::unique_ptr<ResumeVerifyParse> resume_verify_;
+    unsigned resume_verify_submissions_ = 0u;  // submissions after a resume still to compare
+    void resume_verify_scan(const std::byte* fifo_data, std::size_t fifo_size, GuestMemoryV1* memory);
+    void resume_verify_compare(unsigned submissions_since_resume) const;
     std::vector<std::byte> event_pending_fifo_;
+    bool render_suppressed_ = false;
+    bool resume_from_event_state_ = false;  // suppression ended: the renderer adopts event_state_ next frame
+    void invalidate_guest_derived_caches();
     GxState dependency_state_;
     std::vector<std::byte> dependency_pending_fifo_;
 
@@ -1536,6 +1601,15 @@ private:
     // `jitter_ndc` receives the offset (zero for orthographic draws).
     void apply_scene_jitter(const GxVsConstants& cpu, GxVsConstants& upload,
                             float jitter_ndc[2]);
+    // The scene's first perspective draw supplies the camera planes, projection
+    // terms and viewport (renderer set_scene_camera / set_scene_projection).
+    void capture_scene_camera();
+    // The scene's first lit perspective draw supplies the light that casts
+    // contact shadows: the brightest light in its colour channel 0 mask
+    // (renderer set_scene_light).
+    void capture_scene_light();
+    // Material class of the current GX state (kMaterial* in shader_keys.h).
+    [[nodiscard]] std::uint8_t classify_material() const;
     void adopt_pointer_depth_fence_if_needed();
     // Asynchronous EFB fields for simulation-thread GXPeekZ/GXPeekARGB, one per channel. A channel
     // answers one peek kind at one draw-sync token (`key`, bound by the simulation thread at the
@@ -1802,6 +1876,18 @@ private:
     std::array<std::atomic_uint64_t, kDirtyPageWordCount> dirty_page_words_{};
     std::array<std::atomic_uint64_t, kDirtyWordSummaryCount>
         dirty_word_summary_{};
+    // Rollback's dirty record (harvest_rollback_dirty): a bit per bitmap word (2 KiB of guest memory) the drain
+    // found written since the last harvest. The simulation thread alone drains and harvests.
+    std::array<std::uint64_t, kDirtyWordSummaryCount> rollback_dirty_{};
+
+public:
+    static constexpr std::size_t kRollbackDirtyWords = kDirtyWordSummaryCount;
+    static constexpr std::uint32_t kRollbackBlockBytes = kDirtyPageSize * 64u;  // 2 KiB, physical addresses
+    // ORs into `out` (kRollbackDirtyWords words) every 2 KiB block written since the last harvest, drained or not
+    // yet drained, and starts the record again. Simulation thread only.
+    void harvest_rollback_dirty(std::uint64_t* out) noexcept;
+
+private:
 
     // Cached per-draw bindings, rebuilt when the matching dirty bit fires.
     PixelShaderKey ps_key_{};

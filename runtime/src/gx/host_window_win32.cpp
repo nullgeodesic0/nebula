@@ -7,6 +7,9 @@
 #include "galaxy/achievements.h"
 #include "galaxy/gx/display_modes.h"
 #include "galaxy/gx/galaxy_select.h"
+#include "galaxy/gx/host_menus.h"
+#include "galaxy/gx/menu_kit.h"
+#include "galaxy/gx/menu_screens.h"
 #include "galaxy/gx/post_process_settings.h"
 #include "galaxy/gx/render_config.h"
 #include "galaxy/gx/renderer_common.h"
@@ -19,6 +22,8 @@
 #include "galaxy/native_host.h"
 #include "galaxy/platform_time.h"
 #include "galaxy/runtime_settings.h"
+#include "galaxy/button_prompts.h"
+#include "galaxy/net_lobby.h"
 
 #include <algorithm>
 #include <array>
@@ -48,6 +53,7 @@ namespace galaxy::gx {
 
 namespace host_window {
 
+std::atomic<bool> settings_kit_active{false};
 UINT backbuffer_width = 1280;
 UINT backbuffer_height = 720;
 std::atomic<double> measured_present_hz{0.0};
@@ -316,7 +322,18 @@ unsigned s_settings_first_row = 0u;
 // The window thread's left/right-resolved code for the key being handled.
 std::uint32_t s_handled_key_normalized = 0u;
 
-constexpr unsigned kNativeSettingsTabCount = 7;
+constexpr unsigned kNativeSettingsTabCount = 8;
+// ONLINE page (the last tab): online co-op's lobby (net_lobby.h): Joinable, its port, the address to join and the
+// lobby's state. Its settings save at once; the address row takes typed text (handle_online_key).
+constexpr unsigned kOnlineTab = 7u;
+galaxy::NetLobbyHooks s_net_lobby{};
+// The online menu (net_lobby.h online_menu_poll): this PC's own, while the session plays on.
+std::atomic<bool> s_online_menu_open{false};
+std::atomic<int> s_online_menu_row{0};
+// It was opened on a join request: its rows are Accept and Not now.
+std::atomic<bool> s_online_menu_answering{false};
+constexpr const char* kOnlineMenuRows[] = {"RESUME", "EXIT THE GALAXY (BOTH PLAYERS)", "LEAVE THE SESSION"};
+
 
 // The GENERAL page's languages, in the order LEFT/RIGHT steps through them.
 constexpr GameLanguage kGameLanguages[] = {GameLanguage::English, GameLanguage::French, GameLanguage::Spanish};
@@ -700,6 +717,16 @@ unsigned pending_settings_changes() {
     changes += d.temporal_quality != live.temporal_quality;
     changes += d.spatial_quality != live.spatial_quality;
     changes += d.sharpness != live.sharpness;
+    changes += d.bloom != live.bloom;
+    changes += d.saturation != live.saturation;
+    changes += d.contrast != live.contrast;
+    changes += d.vignette != live.vignette;
+    changes += d.ssao != live.ssao;
+    changes += d.contact_shadows != live.contact_shadows;
+    changes += d.depth_of_field != live.depth_of_field;
+    changes += d.motion_blur != live.motion_blur;
+    changes += d.reflections != live.reflections;
+    changes += d.lens_flare != live.lens_flare;
     changes += d.anisotropic_filtering != live.anisotropic_filtering;
     changes += d.enhanced_mipmaps != live.enhanced_mipmaps;
     changes += lighting_mode(d) != lighting_mode(live);
@@ -1005,6 +1032,16 @@ void apply_native_settings_draft() {
     applied.temporal_quality = next.temporal_quality;
     applied.spatial_quality = next.spatial_quality;
     applied.sharpness = next.sharpness;
+    applied.bloom = next.bloom;
+    applied.saturation = next.saturation;
+    applied.contrast = next.contrast;
+    applied.vignette = next.vignette;
+    applied.ssao = next.ssao;
+    applied.contact_shadows = next.contact_shadows;
+    applied.depth_of_field = next.depth_of_field;
+    applied.motion_blur = next.motion_blur;
+    applied.reflections = next.reflections;
+    applied.lens_flare = next.lens_flare;
     applied.anisotropic_filtering = next.anisotropic_filtering;
     applied.enhanced_mipmaps = next.enhanced_mipmaps;
     applied.per_pixel_lighting = next.per_pixel_lighting;
@@ -1197,6 +1234,58 @@ void adjust_native_setting_unlogged(int delta) {
     }
 }
 
+// Keys on the ONLINE page: Enter toggles Joinable, joins from the address row and accepts a joiner on the
+// status row; the address row takes typed characters and Backspace; Backspace on the status row declines or
+// stops asking. Returns true when the key was handled here.
+bool handle_online_key(WPARAM key, bool was_down) {
+    const unsigned tab = s_native_settings_tab.load(std::memory_order_relaxed) % kNativeSettingsTabCount;
+    if (tab != kOnlineTab) return false;
+    const unsigned row = s_native_settings_row.load(std::memory_order_relaxed);
+    RuntimeSettings settings = get_runtime_settings();
+    if (key == VK_RETURN) {
+        if (was_down) return true;
+        if (row == 0u) {
+            adjust_native_setting(1);
+        } else if (row == 2u) {
+            flush_native_settings_if_dirty();
+            if (s_net_lobby.join != nullptr) s_net_lobby.join(settings.net_join_address.data());
+        } else if (row == 3u && s_net_lobby.answer != nullptr) {
+            s_net_lobby.answer(true);
+        }
+        return true;
+    }
+    if (key == VK_BACK) {
+        if (row == 2u) {
+            const std::size_t length = std::strlen(settings.net_join_address.data());
+            if (length != 0u) settings.net_join_address[length - 1u] = '\0';
+            set_runtime_settings(settings);
+            s_native_settings_dirty.store(true, std::memory_order_release);
+        } else if (row == 3u && s_net_lobby.cancel != nullptr && !was_down) {
+            s_net_lobby.cancel();
+        }
+        return true;
+    }
+    if (row != 2u) return false;
+    // An address: letters, digits, '.', '-' and ':' (Shift+;).
+    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    char typed = '\0';
+    if (key >= '0' && key <= '9' && !shift) typed = static_cast<char>(key);
+    if (key >= VK_NUMPAD0 && key <= VK_NUMPAD9) typed = static_cast<char>('0' + (key - VK_NUMPAD0));
+    if (key >= 'A' && key <= 'Z') typed = static_cast<char>(key - 'A' + 'a');
+    if (key == VK_OEM_PERIOD || key == VK_DECIMAL) typed = '.';
+    if (key == VK_OEM_MINUS || key == VK_SUBTRACT) typed = '-';
+    if (key == VK_OEM_1 && shift) typed = ':';
+    if (typed == '\0') return false;
+    const std::size_t length = std::strlen(settings.net_join_address.data());
+    if (length + 1u < settings.net_join_address.size()) {
+        settings.net_join_address[length] = typed;
+        settings.net_join_address[length + 1u] = '\0';
+        set_runtime_settings(settings);
+        s_native_settings_dirty.store(true, std::memory_order_release);
+    }
+    return true;
+}
+
 void move_native_setting_row(int delta) {
     end_controls_capture();
     const unsigned tab =
@@ -1366,6 +1455,10 @@ bool handle_native_settings_key(WPARAM key, bool was_down, bool from_pad = false
     }
     if (key != VK_F1 && s_native_settings_visible.load(std::memory_order_relaxed) &&
         handle_controls_key(key, was_down, from_pad)) {
+        return true;
+    }
+    if (key != VK_F1 && s_native_settings_visible.load(std::memory_order_relaxed) && !from_pad &&
+        handle_online_key(key, was_down)) {
         return true;
     }
     if (key == VK_F1) {
@@ -2317,6 +2410,33 @@ std::vector<SettingsRow> graphics_page(const RenderConfig& render) {
                         },
                         "HIGH: MORE LIGHTS PER PIXEL, FULL-RESOLUTION WATER. APPLIES AT THE NEXT START"});
     }
+    // The scene effects and the look pass (post_process.hlsl), 0-100 % (saturation and contrast 0-200 %, 100
+    // unchanged). They run on the plain scene EFB: not with MSAA, ray tracing's HDR scene or a temporal upscaler.
+    rows.push_back({"SCENE EFFECTS", {}, nullptr, {}, true});
+    const auto percent_row = [&rows](const char* label, unsigned value, unsigned unsigned_max, unsigned RenderConfig::*field,
+                                     int lowest, const char* help) {
+        char line[24]{};
+        std::snprintf(line, sizeof(line), "%u%%", std::min(value, unsigned_max));
+        rows.push_back({label, line,
+                        [field, unsigned_max, lowest](RenderConfig& draft, int delta) {
+                            draft.*field = static_cast<unsigned>(std::clamp(
+                                static_cast<int>(std::min(draft.*field, unsigned_max)) + delta * 5, lowest,
+                                static_cast<int>(unsigned_max)));
+                        },
+                        help});
+    };
+    percent_row("BLOOM", render.bloom, 100u, &RenderConfig::bloom, 0, "GLOW AROUND BRIGHT LIGHTS");
+    percent_row("SATURATION", render.saturation, 200u, &RenderConfig::saturation, 0, "COLOUR STRENGTH. 100% IS THE GAME'S");
+    percent_row("CONTRAST", render.contrast, 200u, &RenderConfig::contrast, 50, "100% IS THE GAME'S");
+    percent_row("VIGNETTE", render.vignette, 100u, &RenderConfig::vignette, 0, "DARKER CORNERS");
+    percent_row("CONTACT SHADOWS", render.contact_shadows, 100u, &RenderConfig::contact_shadows, 0,
+                "SHORT SHADOWS WHERE THINGS TOUCH, FROM THE SCENE'S LIGHT");
+    percent_row("DEPTH OF FIELD", render.depth_of_field, 100u, &RenderConfig::depth_of_field, 0,
+                "BLURS THE FAR DISTANCE");
+    percent_row("MOTION BLUR", render.motion_blur, 100u, &RenderConfig::motion_blur, 0, "BLUR ALONG FAST MOTION");
+    percent_row("REFLECTIONS", render.reflections, 100u, &RenderConfig::reflections, 0,
+                "SCREEN-SPACE REFLECTIONS ON SHINY AND WET SURFACES");
+    percent_row("LENS FLARE", render.lens_flare, 100u, &RenderConfig::lens_flare, 0, "GHOSTS AND A HALO FROM BRIGHT LIGHTS");
     return rows;
 }
 
@@ -2933,6 +3053,65 @@ std::vector<SettingsRow> game_page(const RuntimeSettings& runtime) {
                         s_native_settings_dirty.store(true, std::memory_order_release);
                     },
                     "SHOWS YOUR GALAXY AND STAR IN DISCORD WHILE IT RUNS"});
+    {
+        static constexpr const char* kPrompts[] = {"AUTO", "WII REMOTE", "XBOX", "PLAYSTATION"};
+        rows.push_back({"BUTTON PROMPTS", kPrompts[static_cast<unsigned>(runtime.button_prompts) % 4u],
+                        [](RenderConfig&, int delta) {
+                            // Changes live.
+                            RuntimeSettings settings = get_runtime_settings();
+                            const auto next = static_cast<galaxy::ButtonPrompts>(
+                                settings_step(static_cast<unsigned>(settings.button_prompts), 4u, delta));
+                            if (next != settings.button_prompts) {
+                                settings.button_prompts = next;
+                                set_runtime_settings(settings);
+                                s_native_settings_dirty.store(true, std::memory_order_release);
+                            }
+                        },
+                        "WHICH CONTROLLER'S BUTTONS THE GAME SHOWS. AUTO FOLLOWS THE ONE IN USE"});
+    }
+    {
+        static constexpr const char* kMotion[] = {"ORIGINAL", "SMOOTH", "MODERN"};
+        rows.push_back({"MOTION", kMotion[std::min(static_cast<unsigned>(runtime.motion_style), 2u)],
+                        [](RenderConfig&, int delta) {
+                            // Changes live.
+                            RuntimeSettings settings = get_runtime_settings();
+                            const auto next = static_cast<MotionStyle>(
+                                settings_step(std::min(static_cast<unsigned>(settings.motion_style), 2u), 3u, delta));
+                            if (next != settings.motion_style) {
+                                settings.motion_style = next;
+                                set_runtime_settings(settings);
+                                s_native_settings_dirty.store(true, std::memory_order_release);
+                            }
+                        },
+                        "SMOOTH EASES ANIMATIONS. MODERN ALSO MAKES MARIO QUICKER TO START, STOP AND TURN"});
+    }
+    const auto switch_row = [&rows](const char* label, bool on, bool RuntimeSettings::*field, const char* help) {
+        rows.push_back({label, on ? std::string("ON") : std::string("OFF"),
+                        [field](RenderConfig&, int delta) {
+                            if (delta == 0) return;
+                            RuntimeSettings settings = get_runtime_settings();
+                            settings.*field = !(settings.*field);
+                            set_runtime_settings(settings);
+                            s_native_settings_dirty.store(true, std::memory_order_release);
+                        },
+                        help});
+    };
+    switch_row("CUSTOM ANIMATIONS", runtime.custom_animations, &RuntimeSettings::custom_animations,
+               "MARIO'S ANIMATIONS FROM THE CONTENT'S MODS\\ANIMATIONS. APPLIES AT THE NEXT START");
+    switch_row("CUSTOM MODEL", runtime.custom_model, &RuntimeSettings::custom_model,
+               "MARIO'S MODEL FROM THE CONTENT'S MODS\\MODEL. APPLIES AT THE NEXT START");
+    switch_row("CUSTOM VOICE", runtime.custom_voice, &RuntimeSettings::custom_voice,
+               "MARIO'S VOICE FROM THE CONTENT'S MODS\\VOICE");
+    rows.push_back({"ODYSSEY MOVES", runtime.moveset.enabled ? std::string("ON") : std::string("OFF"),
+                    [](RenderConfig&, int delta) {
+                        // Changes live (the per-move switches are in runtime_settings.ini).
+                        if (delta == 0) return;
+                        RuntimeSettings settings = get_runtime_settings();
+                        settings.moveset.enabled = !settings.moveset.enabled;
+                        set_runtime_settings(settings);
+                        s_native_settings_dirty.store(true, std::memory_order_release);
+                    },
+                    "ROLL, DIVE, GROUND-POUND JUMP AND CAP BUTTON MOVES"});
     rows.push_back({"ACHIEVEMENTS", {}, nullptr, {}, true});
     for (const galaxy::achievements::Info& info : galaxy::achievements::list()) {
         std::string name = info.name;
@@ -3047,6 +3226,42 @@ std::vector<SettingsRow> system_page(const RenderFeatureCaps& caps) {
     return rows;
 }
 
+// ONLINE: rows 0-3 are fixed (handle_online_key reads them by index).
+std::vector<SettingsRow> online_page(const RuntimeSettings& runtime) {
+    std::vector<SettingsRow> rows;
+    rows.push_back({"JOINABLE", runtime.net_joinable ? std::string("ON") : std::string("OFF"),
+                    [](RenderConfig&, int delta) {
+                        // Changes live: the lobby listens, or stops, at once.
+                        if (delta == 0) return;
+                        RuntimeSettings settings = get_runtime_settings();
+                        settings.net_joinable = !settings.net_joinable;
+                        set_runtime_settings(settings);
+                        s_native_settings_dirty.store(true, std::memory_order_release);
+                    },
+                    "WHETHER ANOTHER PC MAY JOIN THIS GAME AS THE OTHER BROTHER"});
+    rows.push_back({"PORT", std::to_string(runtime.net_port),
+                    [](RenderConfig&, int delta) {
+                        RuntimeSettings settings = get_runtime_settings();
+                        settings.net_port =
+                            static_cast<unsigned>(std::clamp(static_cast<int>(settings.net_port) + delta, 1024, 65535));
+                        set_runtime_settings(settings);
+                        s_native_settings_dirty.store(true, std::memory_order_release);
+                    },
+                    "THE UDP PORT THIS PC LISTENS ON"});
+    {
+        const bool caret = (GetTickCount64() / 500u) % 2u == 0u;
+        rows.push_back({"JOIN", upper_ascii(runtime.net_join_address.data()) + (caret ? "_" : " "), nullptr,
+                        "TYPE THE HOST'S ADDRESS, THEN ENTER"});
+    }
+    {
+        const galaxy::NetLobbyView lobby = s_net_lobby.view != nullptr ? s_net_lobby.view() : galaxy::NetLobbyView{};
+        std::string status = s_net_lobby.view == nullptr ? std::string("NOT AVAILABLE") : std::string(lobby.status);
+        if (lobby.asking) status += "  ENTER ACCEPT";
+        rows.push_back({"STATUS", status, nullptr, "ENTER ACCEPTS A JOIN REQUEST, BACKSPACE DECLINES"});
+    }
+    return rows;
+}
+
 std::vector<SettingsRow> settings_page(unsigned tab, const RenderConfig& draft, const RuntimeSettings& runtime,
                                        const RenderFeatureCaps& caps) {
     switch (tab % kNativeSettingsTabCount) {
@@ -3055,6 +3270,7 @@ std::vector<SettingsRow> settings_page(unsigned tab, const RenderConfig& draft, 
     case 4: return game_page(runtime);
     case 5: return mods_page(draft);
     case 6: return system_page(caps);
+    case kOnlineTab: return online_page(runtime);
     default: return {};
     }
 }
@@ -3789,6 +4005,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                     std::memory_order_release);
         seed_pointer_from_client(hwnd, false);
     }
+    if (msg == WM_CHAR && host_menu_text_focus()) {
+        if (wp >= 0x20u && wp != 0x7Fu) push_host_menu_key(static_cast<char32_t>(wp));
+        return 0;
+    }
     if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
         // Alt+Space belongs to the native system menu, not the game's A key.
         if (msg == WM_SYSKEYDOWN && wp == VK_SPACE) {
@@ -3804,6 +4024,11 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
             s_handled_key_normalized = galaxy::input::normalize_native_window_key(
                 raw, shift, (static_cast<UINT>(lp) & (1u << 24u)) != 0u);
+        }
+        // The host menus' address box takes the editing keys (its characters come as WM_CHAR below).
+        if (host_menu_text_focus() && (wp == VK_BACK || wp == VK_RETURN || wp == VK_ESCAPE)) {
+            push_host_menu_key(wp == VK_BACK ? U'\b' : wp == VK_RETURN ? U'\r' : U'\x1B');
+            return 0;
         }
         if (native_settings_handle_window_key(wp, was_down)) {
             return 0;
@@ -4004,12 +4229,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (msg == WM_CLOSE) {
+        std::cerr << "[exit] window close requested (WM_CLOSE)\n";
         save_native_settings_now();
         host_window::quit_request.store(true, std::memory_order_release);
         DestroyWindow(hwnd);
         return 0;
     }
     if (msg == WM_DESTROY) {
+        std::cerr << "[exit] window destroyed (WM_DESTROY)\n";
         save_native_settings_now();
         host_window::quit_request.store(true, std::memory_order_release);
         hold_display_on(false);
@@ -4022,6 +4249,77 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// F1's status line (its words, upper case) and its kind: 0 plain, 1 news, 2 a problem. Both looks show it; `help` is
+// the selected row's help line, shown when there is nothing else to say.
+std::string native_settings_status(unsigned tab, const RenderConfig& row_render, const RuntimeSettings& row_runtime,
+                                   const RenderFeatureCaps& row_caps, const std::string& help, int& kind) {
+    kind = 0;
+    std::string status;
+    const std::uint64_t now_ms = GetTickCount64();
+    const bool controls_page = tab == kControlsTab;
+    if (controls_capturing()) {
+        status = s_controls_scheme == galaxy::input::ControlScheme::Keyboard
+            ? "PRESS A KEY OR MOUSE BUTTON  ESC CANCEL"
+            : "PRESS A BUTTON, STICK OR TRIGGER  ESC CANCEL";
+        kind = 1;
+    } else if (s_controls_message_until_ms > now_ms) {
+        status = s_controls_message;
+        kind = 2;
+    } else if (bool dlss_error = false; !(status = dlss_footer(now_ms, dlss_error)).empty()) {
+        kind = dlss_error ? 2 : 1;
+    } else if (settings_display_confirming()) {
+        const std::uint64_t left_ms = s_display_confirm_deadline_ms > now_ms
+            ? s_display_confirm_deadline_ms - now_ms : 0u;
+        char line[96]{};
+        std::snprintf(line, sizeof(line),
+                      "KEEP DISPLAY? ENTER/Y KEEP  ESC/B UNDO  %u",
+                      static_cast<unsigned>((left_ms + 999u) / 1000u));
+        status = pad_hints(line);
+        kind = 1;
+    } else if (s_native_settings_save_error.load(std::memory_order_acquire)) {
+        status = "SAVE FAILED - RETRY ON NEXT CLOSE";
+        kind = 2;
+    } else if (const unsigned pending = pending_settings_changes(); pending != 0u) {
+        char line[96]{};
+        std::snprintf(line, sizeof(line),
+                      controls_page ? "%u CHANGE%s  SPACE/Y APPLY  ESC/B DISCARD"
+                                    : "%u CHANGE%s  ENTER/Y APPLY  BACKSPACE/X UNDO",
+                      pending, pending == 1u ? "" : "S");
+        status = pad_hints(line);
+        kind = 1;
+    } else if (s_settings_applied_ms != 0u && now_ms - s_settings_applied_ms < 2500u) {
+        status = "APPLIED";
+        kind = 1;
+    } else if (GameLanguage running{}; tab == 4u && running_game_language(running) && running != row_runtime.language) {
+        status = "THE NEW LANGUAGE APPLIES WHEN NEBULA RESTARTS";
+        kind = 1;
+    } else if (bool running_animations = false; tab == 4u && running_custom_animations(running_animations) &&
+               running_animations != row_runtime.custom_animations) {
+        status = "CUSTOM ANIMATIONS CHANGE WHEN NEBULA RESTARTS";
+        kind = 1;
+    } else if (bool running_model = false; tab == 4u && running_custom_model(running_model) &&
+               running_model != row_runtime.custom_model) {
+        status = "CUSTOM MODEL CHANGES WHEN NEBULA RESTARTS";
+        kind = 1;
+    } else if (tab == 5u && mods_restart_pending()) {
+        status = "MOD CHANGES APPLY WHEN NEBULA RESTARTS";
+        kind = 1;
+    } else if (tab == 6u && gpu_change_pending(row_render, row_caps)) {
+        status = "THE NEW GRAPHICS CARD APPLIES WHEN NEBULA RESTARTS";
+        kind = 1;
+    } else if (!help.empty()) {
+        status = help;
+    }
+    return status;
+}
+
+// F1's key hint (upper case).
+const char* native_settings_hint(unsigned tab) {
+    return tab == kControlsTab ? "ENTER/A ADD INPUT  BACKSPACE/X CLEAR  ESC/B CLOSE"
+           : tab == kOnlineTab ? "TYPE THE HOST'S ADDRESS  ENTER JOIN/ACCEPT  BACKSPACE DECLINE"
+                               : "ARROWS/D-PAD MOVE+CHANGE  ESC/B CLOSE";
 }
 
 void draw_native_settings_overlay(UiCanvas& renderer) {
@@ -4084,7 +4382,8 @@ void draw_native_settings_overlay(UiCanvas& renderer) {
             ++next_key;
         }
     }
-    if (!s_native_settings_visible.load(std::memory_order_relaxed)) {
+    if (!s_native_settings_visible.load(std::memory_order_relaxed) ||
+        host_window::settings_kit_active.load(std::memory_order_relaxed)) {
         return;
     }
 
@@ -4151,7 +4450,7 @@ void draw_native_settings_overlay(UiCanvas& renderer) {
         "SETTINGS",
         text);
 
-    const char* tabs[] = {"DISPLAY", "GRAPHICS", "CONTROLS", "AUDIO", "GENERAL", "MODS", "SYSTEM"};
+    const char* tabs[] = {"DISPLAY", "GRAPHICS", "CONTROLS", "AUDIO", "GENERAL", "MODS", "SYSTEM", "ONLINE"};
     static_assert(std::size(tabs) == kNativeSettingsTabCount);
     int tab_x = panel_x + 28;
     // The labels share the panel width; the longest is eight 6-unit glyphs
@@ -4258,55 +4557,9 @@ void draw_native_settings_overlay(UiCanvas& renderer) {
     const int footer_y = layout.footer_y;
     const int footer_scale = std::min(2, scale);
     const int footer_step = footer_scale == 1 ? 18 : 28;
-    std::string status;
-    std::array<float, 4> status_color = muted;
-    const std::uint64_t now_ms = GetTickCount64();
-    const bool controls_page = tab == kControlsTab;
-    if (controls_capturing()) {
-        status = s_controls_scheme == galaxy::input::ControlScheme::Keyboard
-            ? "PRESS A KEY OR MOUSE BUTTON  ESC CANCEL"
-            : "PRESS A BUTTON, STICK OR TRIGGER  ESC CANCEL";
-        status_color = accent;
-    } else if (s_controls_message_until_ms > now_ms) {
-        status = s_controls_message;
-        status_color = error;
-    } else if (bool dlss_error = false; !(status = dlss_footer(now_ms, dlss_error)).empty()) {
-        status_color = dlss_error ? error : accent;
-    } else if (settings_display_confirming()) {
-        const std::uint64_t left_ms = s_display_confirm_deadline_ms > now_ms
-            ? s_display_confirm_deadline_ms - now_ms : 0u;
-        char line[96]{};
-        std::snprintf(line, sizeof(line),
-                      "KEEP DISPLAY? ENTER/Y KEEP  ESC/B UNDO  %u",
-                      static_cast<unsigned>((left_ms + 999u) / 1000u));
-        status = pad_hints(line);
-        status_color = accent;
-    } else if (s_native_settings_save_error.load(std::memory_order_acquire)) {
-        status = "SAVE FAILED - RETRY ON NEXT CLOSE";
-        status_color = error;
-    } else if (const unsigned pending = pending_settings_changes(); pending != 0u) {
-        char line[96]{};
-        std::snprintf(line, sizeof(line),
-                      controls_page ? "%u CHANGE%s  SPACE/Y APPLY  ESC/B DISCARD"
-                                    : "%u CHANGE%s  ENTER/Y APPLY  BACKSPACE/X UNDO",
-                      pending, pending == 1u ? "" : "S");
-        status = pad_hints(line);
-        status_color = accent;
-    } else if (s_settings_applied_ms != 0u && now_ms - s_settings_applied_ms < 2500u) {
-        status = "APPLIED";
-        status_color = accent;
-    } else if (GameLanguage running{}; tab == 4u && running_game_language(running) && running != row_runtime.language) {
-        status = "THE NEW LANGUAGE APPLIES WHEN NEBULA RESTARTS";
-        status_color = accent;
-    } else if (tab == 5u && mods_restart_pending()) {
-        status = "MOD CHANGES APPLY WHEN NEBULA RESTARTS";
-        status_color = accent;
-    } else if (tab == 6u && gpu_change_pending(row_render, row_caps)) {
-        status = "THE NEW GRAPHICS CARD APPLIES WHEN NEBULA RESTARTS";
-        status_color = accent;
-    } else if (!help.empty()) {
-        status = help;
-    }
+    int status_kind = 0;
+    std::string status = native_settings_status(tab, row_render, row_runtime, row_caps, help, status_kind);
+    const std::array<float, 4> status_color = status_kind == 2 ? error : status_kind == 1 ? accent : muted;
     if (!status.empty()) {
         ui_text(renderer, panel_x + 28, footer_y, footer_scale, ui_fit_text(std::move(status), footer_scale, panel_w - 56),
                 status_color);
@@ -4323,9 +4576,271 @@ void draw_native_settings_overlay(UiCanvas& renderer) {
         panel_x + 28,
         footer_y + footer_step * 2,
         footer_scale,
-        pad_hints(controls_page ? "ENTER/A ADD INPUT  BACKSPACE/X CLEAR  ESC/B CLOSE"
-                                : "ARROWS/D-PAD MOVE+CHANGE  ESC/B CLOSE"),
+        pad_hints(native_settings_hint(tab)),
         muted);
+}
+
+// F1 in the game's style (menu_kit.h): the info window, the pages as its buttons, each row's words and value, the
+// selection as a pale band, the status and the key hint below. Added to the host menus' draw list (one draw a
+// frame, draw_host_menus); the plain look stays for when the game's art cannot be read.
+void draw_native_settings_kit(const galaxy::gx::menu::Assets& assets) {
+    namespace menu = galaxy::gx::menu;
+    if (!s_native_settings_visible.load(std::memory_order_relaxed)) {
+        return;
+    }
+    const unsigned tab = s_native_settings_tab.load(std::memory_order_relaxed) % kNativeSettingsTabCount;
+    const menu::Space space = menu::Space::for_picture(0.0f, 0.0f, static_cast<float>(host_window::backbuffer_width),
+                                                       static_cast<float>(host_window::backbuffer_height));
+    const float extent = static_cast<float>(host_window::backbuffer_width) * 0.5f / space.unit;
+    menu::DrawList& list = galaxy::gx::host_menu_list();
+    const float width = std::min(2.0f * extent - 40.0f, 860.0f);
+    const float height = 424.0f;
+    const float left = -width * 0.5f, right = width * 0.5f;
+    menu::window(list, assets, space, 0.0f, 0.0f, width, height, 1.0f);
+    menu::TextStyle title;
+    title.font_w = 22.95f;
+    title.font_h = 29.7f;
+    title.char_space = 1.0f;
+    title.color = menu::rgb255(80, 90, 130);
+    menu::text(list, assets, space, title, 0.0f, 180.0f, u"Settings", 1.0f);
+
+    // The pages: the dialogs' buttons, the current one raised.
+    static std::array<menu::ButtonAnim, kNativeSettingsTabCount> s_tab_anims;
+    static std::uint64_t s_last_ms = GetTickCount64();
+    const std::uint64_t now_ms = GetTickCount64();
+    const float frames = static_cast<float>(now_ms - s_last_ms) * 0.06f;
+    s_last_ms = now_ms;
+    constexpr const char16_t* kTabs[] = {u"Display", u"Graphics", u"Controls", u"Audio",
+                                         u"General", u"Mods",     u"System",   u"Online"};
+    static_assert(std::size(kTabs) == kNativeSettingsTabCount);
+    const float slot = (width - 60.0f) / static_cast<float>(kNativeSettingsTabCount);
+    menu::PillStyle tab_style = menu::dialog_pill_style();
+    tab_style.pane_scale = 1.0f;
+    tab_style.cap = 14.0f;
+    tab_style.width = slot - 16.0f;
+    tab_style.height = 34.0f;
+    tab_style.font_w = 13.0f;
+    tab_style.font_h = 17.0f;
+    tab_style.label_shadow_y = -2.0f;
+    for (unsigned i = 0; i < kNativeSettingsTabCount; ++i) {
+        s_tab_anims[i].hover(i == tab);
+        s_tab_anims[i].step(frames);
+        menu::pill(list, assets, space, tab_style, left + 30.0f + slot * (static_cast<float>(i) + 0.5f), 138.0f,
+                   kTabs[i], s_tab_anims[i].look(menu::kDialogHover), 1.0f);
+    }
+
+    const std::lock_guard<std::recursive_mutex> settings_lock(s_native_settings_mutex);
+    expire_display_confirmation();
+    expire_controls_capture();
+    if (tab == kControlsTab) {
+        refresh_controls_devices(false);
+    }
+    const RenderConfig row_render = s_settings_draft;
+    const RuntimeSettings row_runtime = get_runtime_settings();
+    const RenderFeatureCaps row_caps = get_render_feature_caps();
+    const unsigned row_count = native_settings_row_count(tab);
+    const unsigned selected_row =
+        std::min(s_native_settings_row.load(std::memory_order_relaxed), row_count == 0u ? 0u : row_count - 1u);
+    const unsigned visible_rows = std::min(row_count, kNativeSettingsVisibleRows);
+    s_settings_first_row = native_settings_first_row(s_settings_first_row, selected_row, row_count);
+    const bool page_tab = settings_page_tab(tab);
+    const std::vector<SettingsRow> page =
+        page_tab ? settings_page(tab, row_render, row_runtime, row_caps) : std::vector<SettingsRow>{};
+    constexpr float kTop = 96.0f, kPitch = 31.0f;
+    menu::TextStyle row_style = title;
+    row_style.font_w = 17.0f;
+    row_style.font_h = 22.0f;
+    row_style.align = menu::TextStyle::Align::Left;
+    std::string help;
+    for (unsigned row = s_settings_first_row; row < s_settings_first_row + visible_rows; ++row) {
+        const float y = kTop - static_cast<float>(row - s_settings_first_row) * kPitch;
+        std::string label;
+        std::string value;
+        bool heading = false;
+        if (page_tab && row < page.size()) {
+            label = page[row].label;
+            value = page[row].value;
+            heading = page[row].heading;
+            if (row == selected_row) help = page[row].help;
+        } else {
+            label = native_settings_row_text(tab, row, row_render, row_runtime, row_caps);
+            if (const std::size_t colon = label.find(": "); colon != std::string::npos) {
+                value = label.substr(colon + 2u);
+                label.resize(colon);
+            }
+        }
+        menu::TextStyle style = row_style;
+        if (heading) {
+            style.color = menu::rgb255(0, 120, 210);
+            menu::text(list, assets, space, style, left + 36.0f, y, galaxy::gx::menu::readable_words(label), 1.0f);
+            continue;
+        }
+        const bool chosen = row == selected_row;
+        if (chosen) {
+            menu::rect(list, space, left + 26.0f, y + 14.0f, right - 26.0f, y - 14.0f, menu::rgb255(196, 222, 255),
+                       menu::rgb255(166, 202, 250));
+            menu::rect(list, space, left + 26.0f, y + 14.0f, left + 31.0f, y - 14.0f, menu::rgb255(0, 190, 255),
+                       menu::rgb255(0, 150, 240));
+        }
+        style.color = chosen ? menu::rgb255(30, 40, 80) : menu::rgb255(80, 90, 130);
+        menu::text(list, assets, space, style, left + 44.0f, y, galaxy::gx::menu::readable_words(label), 1.0f);
+        if (!value.empty()) {
+            style.align = menu::TextStyle::Align::Right;
+            menu::text(list, assets, space, style, right - 44.0f, y, galaxy::gx::menu::readable_words(value), 1.0f);
+        }
+    }
+    if (row_count > visible_rows) {
+        const float track_top = kTop + 14.0f;
+        const float track_bottom = kTop - static_cast<float>(visible_rows - 1u) * kPitch - 14.0f;
+        const float track = track_top - track_bottom;
+        menu::rect(list, space, right - 18.0f, track_top, right - 14.0f, track_bottom, menu::rgb255(200, 215, 240),
+                   menu::rgb255(200, 215, 240));
+        const float thumb = std::max(16.0f, track * static_cast<float>(visible_rows) / static_cast<float>(row_count));
+        const float thumb_top = track_top - (track - thumb) * static_cast<float>(s_settings_first_row) /
+                                                static_cast<float>(row_count - visible_rows);
+        menu::rect(list, space, right - 19.0f, thumb_top, right - 13.0f, thumb_top - thumb, menu::rgb255(0, 160, 255),
+                   menu::rgb255(0, 130, 230));
+    }
+
+    int status_kind = 0;
+    const std::string status = native_settings_status(tab, row_render, row_runtime, row_caps, help, status_kind);
+    menu::TextStyle footer = title;
+    footer.font_w = 15.0f;
+    footer.font_h = 19.5f;
+    if (!status.empty()) {
+        footer.color = status_kind == 2 ? menu::rgb255(210, 60, 60)
+                       : status_kind == 1 ? menu::rgb255(0, 120, 210)
+                                          : menu::rgb255(120, 130, 160);
+        menu::text(list, assets, space, footer, 0.0f, -150.0f, galaxy::gx::menu::readable_words(status), 1.0f);
+    }
+    footer.color = menu::rgb255(120, 130, 160);
+    footer.font_w = 14.0f;
+    footer.font_h = 18.0f;
+    menu::text(list, assets, space, footer, 0.0f, -176.0f,
+               galaxy::gx::menu::readable_words("F1, VIEW+MENU OR MINUS+PLUS TOGGLE  TAB/LB/RB PAGE"), 1.0f);
+    menu::text(list, assets, space, footer, 0.0f, -197.0f, galaxy::gx::menu::readable_words(native_settings_hint(tab)),
+               1.0f);
+}
+
+// The save select's options (Multiplayer, Odyssey moves) while the file select shows them, in the plain look; the
+// host menus draw them in the game's style once the game's art has loaded (host_menus.cpp).
+void draw_file_select_options(UiCanvas& renderer, bool kit) {
+    if (kit) return;
+    if (!file_select_options_shown() || s_native_settings_visible.load(std::memory_order_relaxed) ||
+        host_window::backbuffer_width < 427u || host_window::backbuffer_height < 240u) {
+        return;
+    }
+    const RuntimeSettings settings = get_runtime_settings();
+    const galaxy::prompts::PromptSet prompts = galaxy::prompts::published();
+    const auto button = [&](galaxy::prompts::Slot slot, const char* wii) {
+        const auto label = prompts.labels[static_cast<std::size_t>(slot)];
+        if (prompts.family == galaxy::prompts::Family::None || label == galaxy::prompts::Label::None) {
+            return std::string(wii);
+        }
+        return upper_ascii(galaxy::prompts::label_name(prompts.family, label));
+    };
+    struct Row {
+        std::string button;
+        const char* name;
+        bool on;
+    };
+    const Row rows[] = {
+        {button(galaxy::prompts::Slot::One, "1"), "MULTIPLAYER", settings.coop},
+        {button(galaxy::prompts::Slot::Plus, "+"), "ODYSSEY MOVES", settings.moveset.enabled},
+    };
+    const unsigned bb_h = host_window::backbuffer_height;
+    const int scale = bb_h >= 1440u ? 3 : (bb_h >= 720u ? 2 : 1);
+    const auto width_of = [scale](const std::string& text) {
+        int w = 0;
+        for (const char ch : text) w += (ch == ' ' ? 4 : 6) * scale;
+        return w - scale;
+    };
+    int button_w = 0;
+    int name_w = 0;
+    for (const Row& row : rows) {
+        button_w = std::max(button_w, width_of(row.button));
+        name_w = std::max(name_w, width_of(row.name));
+    }
+    const int pad = 10 * scale;
+    const int gap = 8 * scale;
+    const int chip_pad = 3 * scale;
+    const int row_h = 7 * scale + chip_pad * 2;
+    const int row_step = row_h + 4 * scale;
+    const int state_w = width_of("OFF");
+    const int panel_w = pad * 2 + button_w + chip_pad * 2 + gap + name_w + gap * 2 + state_w;
+    const int panel_h = pad * 2 + row_step * 2 - 4 * scale;
+    const int panel_x = static_cast<int>(host_window::backbuffer_width) - panel_w - 16 * scale;
+    const int panel_y = static_cast<int>(bb_h) - panel_h - 16 * scale;
+    const std::array<float, 4> panel{0.02f, 0.025f, 0.035f, 0.86f};
+    const std::array<float, 4> text{0.88f, 0.94f, 0.96f, 1.0f};
+    const std::array<float, 4> muted{0.42f, 0.48f, 0.50f, 1.0f};
+    const std::array<float, 4> chip{0.15f, 0.72f, 0.85f, 1.0f};
+    const std::array<float, 4> chip_text{0.02f, 0.025f, 0.035f, 1.0f};
+    const std::array<float, 4> on{0.45f, 0.90f, 0.45f, 1.0f};
+    ui_rect(renderer, panel_x, panel_y, panel_w, panel_h, panel);
+    ui_rect(renderer, panel_x, panel_y, 2 * scale, panel_h, chip);
+    int y = panel_y + pad;
+    for (const Row& row : rows) {
+        const int chip_w = width_of(row.button) + chip_pad * 2;
+        const int chip_x = panel_x + pad + (button_w + chip_pad * 2 - chip_w) / 2;
+        ui_rect(renderer, chip_x, y, chip_w, row_h, chip);
+        ui_text(renderer, chip_x + chip_pad, y + chip_pad, scale, row.button, chip_text);
+        const int name_x = panel_x + pad + button_w + chip_pad * 2 + gap;
+        ui_text(renderer, name_x, y + chip_pad, scale, row.name, text);
+        ui_text(renderer, name_x + name_w + gap * 2, y + chip_pad, scale, row.on ? "ON" : "OFF", row.on ? on : muted);
+        y += row_step;
+    }
+}
+
+void draw_online_menu(UiCanvas& renderer, bool kit) {
+    if (kit) return;  // host_menus.cpp draws it in the game's style
+    const unsigned bb_w = host_window::backbuffer_width;
+    const unsigned bb_h = host_window::backbuffer_height;
+    if (!s_online_menu_open.load(std::memory_order_acquire) || bb_w < 427u || bb_h < 240u) return;
+    const int scale = bb_h >= 1440u ? 4 : (bb_h >= 720u ? 3 : 1);
+    const int row_step = scale * 7 + 10 * scale;
+    const int width = 60 * 6 * scale / 2;
+    const int height = row_step * 4 + 16 * scale;
+    const int x = (static_cast<int>(bb_w) - width) / 2;
+    const int y = (static_cast<int>(bb_h) - height) / 2;
+    const std::array<float, 4> panel{0.02f, 0.025f, 0.035f, 0.94f};
+    const std::array<float, 4> text{0.88f, 0.94f, 0.96f, 1.0f};
+    const std::array<float, 4> accent{0.15f, 0.72f, 0.85f, 1.0f};
+    const std::array<float, 4> selected{0.10f, 0.18f, 0.22f, 1.0f};
+    ui_rect(renderer, x, y, width, height, panel);
+    ui_rect(renderer, x, y, 6, height, {0.0f, 0.42f, 0.62f, 1.0f});
+    ui_text(renderer, x + 8 * scale, y + 6 * scale, scale, "ONLINE  (THE GAME KEEPS PLAYING)", accent);
+    const int chosen = s_online_menu_row.load(std::memory_order_acquire);
+    for (int row = 0; row < 3; ++row) {
+        const int row_y = y + 6 * scale + row_step * (row + 1);
+        if (row == chosen) {
+            ui_rect(renderer, x + 4 * scale, row_y - 3 * scale, width - 8 * scale, scale * 7 + 6 * scale, selected);
+            ui_text(renderer, x + 6 * scale, row_y, scale, ">", accent);
+        }
+        ui_text(renderer, x + 14 * scale, row_y, scale, kOnlineMenuRows[row], text);
+    }
+}
+
+// While another PC asks to join and the menu is closed: one line at the top saying so.
+void draw_net_lobby_banner(UiCanvas& renderer, bool kit) {
+    if (kit) return;  // host_menus.cpp shows the request as a card
+    const unsigned bb_w = host_window::backbuffer_width;
+    const unsigned bb_h = host_window::backbuffer_height;
+    if (s_net_lobby.view == nullptr || s_native_settings_visible.load(std::memory_order_relaxed) || bb_w < 427u ||
+        bb_h < 240u) {
+        return;
+    }
+    const galaxy::NetLobbyView lobby = s_net_lobby.view();
+    if (!lobby.asking) return;
+    const std::string line = std::string(lobby.asker) + " WANTS TO JOIN AS THE OTHER BROTHER  F1 > ONLINE";
+    const int scale = bb_h >= 1440u ? 3 : (bb_h >= 720u ? 2 : 1);
+    int text_w = -scale;
+    for (const char ch : line) text_w += (ch == ' ' ? 4 : 6) * scale;
+    const int pad = 4 * scale;
+    const int x = (static_cast<int>(bb_w) - text_w) / 2 - pad;
+    const int y = 8 * scale;
+    ui_rect(renderer, x, y, text_w + pad * 2, 7 * scale + pad * 2, {0.02f, 0.025f, 0.035f, 1.0f});
+    ui_text(renderer, x + pad, y + pad, scale, line, {0.15f, 0.72f, 0.85f, 1.0f});
 }
 
 // The HOME Menu panel, centred over the frame. The mouse picks a row by hovering and chooses with a click.
@@ -4767,8 +5282,86 @@ bool native_settings_overlay_visible() noexcept {
     return s_native_settings_visible.load(std::memory_order_relaxed);
 }
 
+bool online_menu_poll(bool toggle, bool up, bool down, bool choose, bool back) noexcept {
+    bool open = s_online_menu_open.load(std::memory_order_acquire);
+    if (toggle) {
+        open = !open;
+        s_online_menu_row.store(0, std::memory_order_release);
+        // A request waiting: the menu answers it (Accept, Not now) rather than offering the session's rows.
+        s_online_menu_answering.store(open && net_lobby_view().asking, std::memory_order_release);
+    } else if (open) {
+        const bool answering = s_online_menu_answering.load(std::memory_order_acquire);
+        const int rows = answering ? 2 : 3;
+        int row = s_online_menu_row.load(std::memory_order_acquire);
+        if (up) row = (row + rows - 1) % rows;
+        if (down) row = (row + 1) % rows;
+        s_online_menu_row.store(row, std::memory_order_release);
+        if (back) open = false;
+        if (choose) {
+            open = false;
+            NetLobbyMenuFn menu = nullptr;
+            NetLobbyAnswerFn answer = nullptr;
+            {
+                const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+                menu = s_net_lobby.menu;
+                answer = s_net_lobby.answer;
+            }
+            s_online_menu_open.store(false, std::memory_order_release);
+            if (answering) {
+                if (answer != nullptr) answer(row == 0);
+            } else if (menu != nullptr) {
+                menu(row);
+            }
+        }
+    }
+    s_online_menu_open.store(open, std::memory_order_release);
+    return open;
+}
+
+OnlineMenuState online_menu_state() noexcept {
+    return {s_online_menu_open.load(std::memory_order_acquire), s_online_menu_row.load(std::memory_order_acquire),
+            s_online_menu_answering.load(std::memory_order_acquire)};
+}
+
+NetLobbyView net_lobby_view() noexcept {
+    NetLobbyViewFn view = nullptr;
+    {
+        const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+        view = s_net_lobby.view;
+    }
+    return view != nullptr ? view() : NetLobbyView{};
+}
+
+bool net_lobby_available() noexcept {
+    const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+    return s_net_lobby.view != nullptr;
+}
+
+void net_lobby_join(const char* address) {
+    NetLobbyJoinFn join = nullptr;
+    {
+        const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+        join = s_net_lobby.join;
+    }
+    if (join != nullptr) join(address);
+}
+
+void net_lobby_cancel() {
+    NetLobbyCancelFn cancel = nullptr;
+    {
+        const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+        cancel = s_net_lobby.cancel;
+    }
+    if (cancel != nullptr) cancel();
+}
+
+void set_net_lobby_hooks(const NetLobbyHooks& hooks) noexcept {
+    const std::lock_guard<std::recursive_mutex> lock(s_native_settings_mutex);
+    s_net_lobby = hooks;
+}
+
 bool native_window_input_captured() noexcept {
-    return s_native_settings_visible.load(std::memory_order_relaxed) ||
+    return s_native_settings_visible.load(std::memory_order_relaxed) || host_menu_text_focus() ||
         s_home_menu_visible.load(std::memory_order_relaxed) ||
         s_system_menu_active.load(std::memory_order_acquire) ||
         host_window::move_size_active.load(std::memory_order_acquire);

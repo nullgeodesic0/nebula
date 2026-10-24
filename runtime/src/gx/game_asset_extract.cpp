@@ -315,6 +315,17 @@ std::optional<DecodedTexture> decode_tpl(std::span<const std::byte> data) noexce
         return std::nullopt;
     }
 
+    return decode_gx_texels(format, data, data_off, width, height);
+} catch (...) {
+    return std::nullopt;
+}
+
+std::optional<DecodedTexture> decode_gx_texels(
+    std::uint32_t format, std::span<const std::byte> data, std::size_t offset, unsigned width,
+    unsigned height) noexcept try {
+    if (width == 0 || height == 0 || width > 4096 || height > 4096) {
+        return std::nullopt;
+    }
     unsigned tile_width = 0;
     unsigned tile_height = 0;
     switch (format) {
@@ -326,7 +337,7 @@ std::optional<DecodedTexture> decode_tpl(std::span<const std::byte> data) noexce
     const std::size_t encoded_size =
         ((static_cast<std::size_t>(width) + tile_width - 1u) / tile_width) *
         ((static_cast<std::size_t>(height) + tile_height - 1u) / tile_height) * 32u;
-    if (!contains_bytes(data, data_off, encoded_size)) {
+    if (!contains_bytes(data, offset, encoded_size)) {
         return std::nullopt;
     }
 
@@ -337,13 +348,13 @@ std::optional<DecodedTexture> decode_tpl(std::span<const std::byte> data) noexce
 
     switch (format) {
         case 0:
-            decode_i4(data, data_off, width, height, result.rgba8);
+            decode_i4(data, offset, width, height, result.rgba8);
             break;
         case 2:
-            decode_ia4(data, data_off, width, height, result.rgba8);
+            decode_ia4(data, offset, width, height, result.rgba8);
             break;
         case 5:
-            decode_rgb5a3(data, data_off, width, height, result.rgba8);
+            decode_rgb5a3(data, offset, width, height, result.rgba8);
             break;
         default:
             // Not a format this reader has been verified against.

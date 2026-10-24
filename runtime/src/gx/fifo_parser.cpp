@@ -771,6 +771,50 @@ FifoParser::CachedDisplayList* FifoParser::find_cached_display_list(
         canonical_addr,
         byte_size,
     };
+    const auto inspect = [&](std::size_t index) -> CachedDisplayList* {
+        if (index >= display_list_cache_.size()) {
+            return nullptr;
+        }
+        CachedDisplayList& cached = display_list_cache_[index];
+        if (!cached.valid ||
+            cached.guest_addr != canonical_addr ||
+            cached.byte_size != byte_size) {
+            return nullptr;
+        }
+        if (cached.bytes.size() != bytes.size() ||
+            (!display_list_bytes_trusted_ &&
+             !std::equal(bytes.begin(), bytes.end(), cached.bytes.begin()))) {
+            invalidate_display_list_cache_index(index);
+            return nullptr;
+        }
+        if (!display_list_dependencies_match(cached, state)) {
+            return nullptr;
+        }
+        cached.last_used = ++display_list_cache_tick_;
+        return &cached;
+    };
+    DisplayListFrontSlot& front = display_list_front_[
+        ((canonical_addr >> 5u) ^ (byte_size >> 5u) ^ (canonical_addr >> 16u)) &
+        (kDisplayListFrontSlots - 1u)];
+    if (front.guest_addr == canonical_addr && front.byte_size == byte_size) {
+        for (const std::size_t index : front.index) {
+            if (CachedDisplayList* hit = inspect(index)) {
+                return hit;
+            }
+        }
+    }
+    const auto remember = [&](CachedDisplayList* hit) {
+        if (hit != nullptr) {
+            const auto index = static_cast<std::size_t>(hit - display_list_cache_.data());
+            if (front.guest_addr != canonical_addr || front.byte_size != byte_size) {
+                front = {canonical_addr, byte_size, {index, static_cast<std::size_t>(-1)}};
+            } else if (front.index[0] != index) {
+                front.index[1] = front.index[0];
+                front.index[0] = index;
+            }
+        }
+        return hit;
+    };
     const auto it = display_list_cache_map_.find(key);
     if (it == display_list_cache_map_.end()) {
         return nullptr;
@@ -797,33 +841,12 @@ FifoParser::CachedDisplayList* FifoParser::find_cached_display_list(
         return nullptr;
     }
 
-    const auto inspect = [&](std::size_t index) -> CachedDisplayList* {
-        if (index >= display_list_cache_.size()) {
-            return nullptr;
-        }
-        CachedDisplayList& cached = display_list_cache_[index];
-        if (!cached.valid ||
-            cached.guest_addr != canonical_addr ||
-            cached.byte_size != byte_size) {
-            return nullptr;
-        }
-        if (cached.bytes.size() != bytes.size() ||
-            !std::equal(bytes.begin(), bytes.end(), cached.bytes.begin())) {
-            invalidate_display_list_cache_index(index);
-            return nullptr;
-        }
-        if (!display_list_dependencies_match(cached, state)) {
-            return nullptr;
-        }
-        cached.last_used = ++display_list_cache_tick_;
-        return &cached;
-    };
     // The ordinary single-variant hit needs no heap allocation. inspect() can
     // erase the map entry on changed bytes, so consume its sole index first
     // and do not touch entries afterward. Multi-variant invalidation retains
     // the owned candidate list that protects iteration from map erasure.
     if (entries.size() == 1u) {
-        return inspect(entries.front());
+        return remember(inspect(entries.front()));
     }
     // Small variant sets still need owned indices: a changed list can erase
     // its map entry inside inspect(). Keep that protection without a heap
@@ -834,14 +857,14 @@ FifoParser::CachedDisplayList* FifoParser::find_cached_display_list(
     if (candidate_count <= fixed_candidates.size()) {
         std::copy(entries.begin(), entries.end(), fixed_candidates.begin());
         for (std::size_t i = 0; i < candidate_count; ++i) {
-            if (auto* cached = inspect(fixed_candidates[i])) return cached;
+            if (auto* cached = inspect(fixed_candidates[i])) return remember(cached);
         }
         return nullptr;
     }
     const std::vector<std::size_t> candidates = entries;
     for (const std::size_t index : candidates) {
         if (auto* cached = inspect(index)) {
-            return cached;
+            return remember(cached);
         }
     }
 

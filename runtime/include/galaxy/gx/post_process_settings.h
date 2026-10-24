@@ -20,6 +20,23 @@ struct PostProcessSettings {
     std::uint8_t smaa_quality = 2;  // 0 low, 1 medium, 2 high, 3 ultra
     Upscaler upscaler = Upscaler::kFsr1;
     std::uint8_t sharpness = 20;
+    // Look pass (the "enhance" stage, after scaling and sharpening; D3D12). Percent
+    // values: bloom 0-100 (0 skips the bloom pyramid), saturation and contrast
+    // 100 = unchanged, vignette 0-100. The stage is skipped entirely when every
+    // value is neutral.
+    std::uint8_t bloom = 30;
+    std::uint8_t saturation = 108;
+    std::uint8_t contrast = 104;
+    std::uint8_t vignette = 8;
+    // Lens flare ghosts and halo from the bloom pyramid's bright pass, 0-100
+    // (0 = off); drawn only while bloom is on.
+    std::uint8_t lens_flare = 40;
+    // Ambient occlusion strength 0-100 (0 = off), applied to the 3D scene EFB.
+    std::uint8_t ssao = 0;
+
+    [[nodiscard]] bool enhance_active() const noexcept {
+        return bloom != 0u || saturation != 100u || contrast != 100u || vignette != 0u;
+    }
 };
 
 // config.ini's aa, smaa_quality, upscaler (bilinear or FSR 1; the temporal upscalers are not this chain's) and

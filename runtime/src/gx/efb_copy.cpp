@@ -301,6 +301,18 @@ bool is_galaxy_bloom_workspace_copy(
         !p.half_scale && p.dest_stride == 1280u;
 }
 
+bool is_galaxy_shadow_capture_copy(
+    const EfbCopyParams& p, bool is_depth_copy,
+    unsigned dest_width, unsigned dest_height, bool alpha_rule) noexcept {
+    if (is_depth_copy || p.copy_to_xfb || p.yuv || dest_width == 0u || dest_height == 0u ||
+        dest_width > 320u || dest_height > 228u) {
+        return false;
+    }
+    if (dest_width == 160u && dest_height == 160u) return true;
+    // Copy format 7 is A8: the silhouette is stored in alpha.
+    return alpha_rule && p.target_format == 7u;
+}
+
 EfbCopySamplingGeometry compute_efb_copy_sampling_geometry(
     const EfbCopyParams& params,
     unsigned dest_width,
