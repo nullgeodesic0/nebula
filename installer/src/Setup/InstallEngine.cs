@@ -66,8 +66,12 @@ namespace Nebula.Setup
         /// without the C runtime (a 1.0.0 SSE2 module calls its soft-float fma for every fused guest
         /// instruction); no LodDistance hook. 3: the draw identity, motion signal, 2D layer and visible sun
         /// site hooks of interpolation, motion vectors and ray tracing (generator version 20).
+        /// 4-5 (the fork's own line, in parallel with 3): the motion style setting's site hook (AnimationInterpole)
+        /// before XanimePlayer::updateInterpoleRatio; the Odyssey moveset's (MarioActionMain) before Mario::actionMain;
+        /// Mario and Luigi co-op's (CoopBeforeCall, CoopAfterCall) around the game calls it watches.
+        /// 6: both lines (generator version 41).
         /// </summary>
-        public const int ModuleGeneration = 3;
+        public const int ModuleGeneration = 6;
 
         /// <summary>Installed modules an update must recompile rather than relink.</summary>
         private static bool ModulesNeedRebuild(InstalledInfo current)

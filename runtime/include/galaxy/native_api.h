@@ -528,7 +528,21 @@ enum class SiteHookKind : std::uint32_t {
     SunCenter = 29,
     // Generation 19: SCGetLanguage returned (r3); the runtime answers with the language setting.
     Language = 30,
+    // Before XanimePlayer::updateInterpoleRatio (r3 the player); the runtime reshapes the
+    // cross-fade for the motion style setting.
+    AnimationInterpole = 31,
+    // Before Mario::actionMain, Mario::update's one call to it (r3 the Mario); the runtime's Odyssey
+    // moveset reads his state and adjusts his movement for the frame.
+    MarioActionMain = 40,
+    // Mario and Luigi co-op (coop_guest.h): before and after a direct call of one of the game functions it
+    // watches; the argument names the function (translate.rs coop_call_id).
+    CoopBeforeCall = 41,
+    CoopAfterCall = 42,
 };
+
+// Set as the context's pc by a CoopBeforeCall hook to skip the call it watches (the generator wraps the calls
+// it may skip; translate.rs coop_call_skippable).
+inline constexpr std::uint32_t kCoopSkipCall = 1u;
 
 inline void site_hook(
     const NativeServicesV1* services,

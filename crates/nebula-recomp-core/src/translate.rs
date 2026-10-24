@@ -2469,6 +2469,9 @@ fn lower_resident_integer_direct_calls(
                         && !(target == 0x8045_14EC && pc == 0x8038_D30C)
                         && pc != 0x803A_BDF0
                         && !(target == 0x8039_8D3C && pc == 0x8039_8E7C)
+                        && !is_animation_interpole_call(target)
+                        && !is_mario_action_main_call(target, pc)
+                        && coop_call_id(target).is_none()
                 });
                 let lean_contract = lean_body_call_contract(
                     target,
@@ -5684,9 +5687,12 @@ fn lower_words_with_config(
             Opcode::Mtmsr => {
                 let source = gpr_rt(word);
                 let resume_pc = pc.wrapping_add(4);
+                // A compiler barrier keeps the MSR write before the checkpoint. No other thread reads the
+                // context's MSR (interrupts are published through pending_event_mask), so no interlocked
+                // fence: OSDisableInterrupts/OSRestoreInterrupts run thousands of times a frame.
                 writeln!(
                     output,
-                    "    context->msr = context->gpr[{source}];\n    std::atomic_thread_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x{pc:08X}u, 0x{resume_pc:08X}u, context, memory);"
+                    "    context->msr = context->gpr[{source}];\n    std::atomic_signal_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x{pc:08X}u, 0x{resume_pc:08X}u, context, memory);"
                 )
                 .map_err(|_| TranslationError::Formatting)?;
             }
@@ -7636,6 +7642,47 @@ fn emit_direct_guest_call_with_exact_fpu(
         )
         .map_err(|_| TranslationError::Formatting)?;
     }
+    // XanimePlayer::updateInterpoleRatio, called and tail-called with the player in r3: the runtime
+    // reshapes the cross-fade it is about to step for the motion style setting.
+    if is_animation_interpole_call(target) {
+        output.push_str(&site_hook_call(pc, "AnimationInterpole", 0));
+    }
+    // Mario::update's one call to Mario::actionMain (r3 the Mario): the runtime's Odyssey moveset
+    // reads Mario's state and adjusts his movement here, before the game moves him this frame.
+    if is_mario_action_main_call(target, pc) {
+        output.push_str(&site_hook_call(pc, "MarioActionMain", 0));
+    }
+    // Mario and Luigi co-op: the runtime sees the arguments of a few game calls before they run and
+    // their results after (coop_guest.cpp), on every direct call of the target.
+    let coop = coop_call_id(target);
+    let skippable = coop.is_some_and(coop_call_skippable);
+    if let Some(id) = coop {
+        if skippable {
+            // The runtime skips the call by setting pc to galaxy::kCoopSkipCall.
+            writeln!(output, "    context->pc = 0x{pc:08X}u;").map_err(|_| TranslationError::Formatting)?;
+        }
+        output.push_str(&site_hook_call(pc, "CoopBeforeCall", id));
+        if skippable {
+            output.push_str("    if (context->pc != galaxy::kCoopSkipCall) {\n");
+        }
+    }
+    emit_direct_guest_call_body(output, target, pc, callable_entries, exact_fpu_functions)?;
+    if skippable {
+        writeln!(output, "    }} else {{ context->pc = 0x{pc:08X}u; }}").map_err(|_| TranslationError::Formatting)?;
+    }
+    if let Some(id) = coop {
+        output.push_str(&site_hook_call(pc, "CoopAfterCall", id));
+    }
+    Ok(())
+}
+
+fn emit_direct_guest_call_body(
+    output: &mut String,
+    target: u32,
+    pc: u32,
+    callable_entries: Option<&BTreeMap<u32, u32>>,
+    exact_fpu_functions: Option<&BTreeSet<u32>>,
+) -> Result<(), TranslationError> {
     fn emit_post_call_hook(
         output: &mut String,
         target: u32,
@@ -7662,7 +7709,9 @@ fn emit_direct_guest_call_with_exact_fpu(
         }
         // No LodDistance hook after LodCtrl::update's distance call: which
         // model shows is game state, so nothing may change it (the runtime
-        // keeps a no-op for modules generated before 1.0.1).
+        // keeps a no-op for modules generated before 1.0.1). Co-op alone
+        // answers LodCtrl::calcDistanceToCamera for the nearer brother
+        // (coop_call_id 72), as the game would for a single player there.
         // TalkTextFormer::updateTalking reveals one step of a talk balloon's
         // (TalkBalloon, former at r31 + 0x24) or Rosalina's storybook text
         // (RosettaMonologue, former at r30 + 0x24) per frame; the runtime
@@ -7981,6 +8030,145 @@ fn draw_identity_site(address: u32, function_end: u32, pc: u32, word: u32) -> Op
     }
 }
 
+/// Co-op calls the runtime may skip from CoopBeforeCall (a player down while the other plays on, the second
+/// player's 2D updates, a Pull Star's bind of the brother not capturing, the second player mounting a vehicle).
+fn coop_call_skippable(id: u32) -> bool {
+    matches!(id, 19..=25 | 43..=45 | 47 | 63..=68 | 77 | 83 | 89)
+}
+
+/// Game calls the Mario and Luigi co-op watches (CoopBeforeCall/CoopAfterCall, argument the id). The ids
+/// match runtime/src/coop_guest.cpp; addresses are RMGE01's, from Petari's symbols.
+fn coop_call_id(target: u32) -> Option<u32> {
+    match target {
+        0x8045_06D8 => Some(1), // KPADRead(s32 chan, KPADStatus*, u32)
+        0x803B_17D4 => Some(2), // GameDataHolder::isDataMario() const
+        0x803A_F80C => Some(3), // GameDataFunction::isDataMario()
+        0x802A_ED64 => Some(4), // MarioActor::init2(const TVec3f&, const TVec3f&, s32)
+        0x8034_481C => Some(5), // CategoryList::execute(MR::MovementType)
+        0x803C_DDD4 => Some(6), // MR::mountArchive(const char*, JKRHeap*)
+        0x8039_C730 => Some(7), // GameSystemStationedArchiveLoader::createAndAddPlayerArchives(bool)
+        0x8039_C060 => Some(8), // PlayerHeapHolder::createHeap(u32, JKRHeap*)
+        // Split screen: the scene drawn once per half, full-screen viewports and scissors narrowed to the
+        // half, and what the second player sees kept from being clipped.
+        0x8033_EE8C => Some(9),  // GameScene::draw3D() const
+        0x804B_E434 => Some(10), // GXSetViewport(f32, f32, f32, f32, f32, f32)
+        0x804B_E4B0 => Some(11), // GXSetScissor(u32, u32, u32, u32)
+        0x8015_FDA0 => Some(12), // ClippingJudge::isJudgedToClipFrustum(const TVec3f&, f32, s32) const
+        0x8016_BF1C => Some(13), // ShadowController::updateFarClipping(f32): shadows near the second player
+        0x802C_42C0 => Some(14), // MarioActor::setPlayerMode(u16, bool): no power-up without its model
+        0x8026_B9F4 => Some(15), // NameObjHolder::NameObjHolder(int): room for the second player's objects
+        0x8026_BA50 => Some(16), // NameObjHolder::add(NameObj*): counted for the trace
+        // JKRSolidHeap::allocFromHead/allocFromTail(u32 size, int align): a full stage heap in MEM1 borrows from MEM2.
+        0x8040_B9A0 => Some(17),
+        0x8040_BA64 => Some(18),
+        // Co-op deaths (a player down while the other plays on): skippable, see coop_call_skippable.
+        0x803F_32C0 => Some(19), // MR::startPlayerEvent(const char*)
+        0x803C_8C18 => Some(20), // MR::startGlobalEventCameraNoTarget(const char*, s32)
+        0x803F_C4CC => Some(21), // MR::startStarPointerModeDemoMarioDeath(void*)
+        0x803F_9BB8 => Some(22), // MR::setCubeBgmChangeInvalid()
+        0x803F_9C04 => Some(23), // MR::clearBgmQueue()
+        // Co-op HUD: the second player's own life meter and lives counter.
+        0x802B_BCC8 => Some(24), // MarioActor::init2D() (skippable)
+        0x802B_CE80 => Some(25), // MarioActor::update2D() (skippable)
+        0x8036_C59C => Some(26), // MeterLayout::requestActive()
+        0x8036_C664 => Some(27), // MeterLayout::requestDeactivate()
+        0x8036_C6E8 => Some(28), // MeterLayout::requestForceAppear()
+        0x8036_C72C => Some(29), // MeterLayout::requestPlayerMoving()
+        0x8036_C79C => Some(30), // MeterLayout::requestPlayerStopped()
+        0x8037_87CC => Some(31), // PlayerLeft::appear()
+        0x8037_8828 => Some(32), // PlayerLeft::forceAppear()
+        0x8037_8888 => Some(33), // PlayerLeft::disappear()
+        0x803C_C3CC => Some(34), // MR::getPlayerLeft()
+        0x803F_2680 => Some(35), // MR::incPlayerLife(u32): a coin heals the brother who took it
+        // Launch stars ridden by the second player: their steps run with the second player as the game's player.
+        0x8024_7114 => Some(36), // SuperSpinDriver::exeCapture()
+        0x8024_722C => Some(37), // SuperSpinDriver::exeShootStart()
+        0x8024_73C8 => Some(38), // SuperSpinDriver::exeShoot()
+        0x8023_5294 => Some(39), // SpinDriver::exeCapture()
+        0x8023_53B4 => Some(40), // SpinDriver::exeShootStart()
+        0x8023_5608 => Some(41), // SpinDriver::exeShoot()
+        // The second player's power-up archives join the stage's when the first player's do.
+        0x8026_158C => Some(42), // NameObjArchiveListCollector::addArchive(const char*)
+        // The players do not stomp each other (skippable): MarioActor::attackSensor's attacks and pushes.
+        0x802C_4FFC => Some(43), // MarioActor::attackOrPushSensor(HitSensor*, f32)
+        0x802C_56DC => Some(44), // MarioActor::attackOrPushSensorInDamage(HitSensor*, f32)
+        0x802C_58EC => Some(45), // MarioActor::attackOrPushSensorInRush(HitSensor*, f32)
+        // NSMBW-style pipes: a brother's EarthenPipe steps (the second's run with him as the game's player); the
+        // first in waits inside (exePlayerIn skippable) for the other.
+        0x801D_1B74 => Some(46), // EarthenPipe::exeReady()
+        0x801D_1C04 => Some(47), // EarthenPipe::exePlayerIn()
+        0x801D_1CCC => Some(48), // EarthenPipe::exeTargetPipeShowUp()
+        0x801D_1D44 => Some(49), // EarthenPipe::exePlayerOut()
+        // Either brother counts as near; star bunnies run from the nearer one.
+        0x803B_D544 => Some(50), // MR::isNearPlayer(const LiveActor*, f32)
+        0x803B_D598 => Some(51), // MR::isNearPlayerAnyTime(const LiveActor*, f32)
+        0x803F_1F34 => Some(52), // MR::getPlayerPos()
+        // Star bunnies' code runs with the brother nearer the bunny as the game's player.
+        0x8029_38E0..=0x8029_9823 => Some(53), // TrickRabbit and its kin
+        0x8028_4A58..=0x8028_6A53 => Some(53), // RunawayRabbit, RunawayRabbitCollect
+        // Koopa shells too: the brother at one keeps it in place and takes it.
+        0x801E_A2F8..=0x801E_CA2B => Some(53), // JetTurtle, GoldenTurtle and their nerves
+        // Multiplayer talks: the brother nearest an NPC talks to it (its talk calls and the talk director run
+        // with him as the game's player), either brother's A pages and either chooses, and the other waits.
+        0x803F_E18C..=0x803F_E61F => Some(54), // MR::tryTalk*(TalkMessageCtrl*, ...)
+        0x803E_E020..=0x803E_E157 => Some(55), // MR::tryTalk*AndStartTalkAction(NPCActor*, ...)
+        0x8029_ED3C | 0x8036_60E4 => Some(56), // TalkDirector::updateMessage, LayoutActor::movement (from
+                                               // TalkDirector::movement only, by call site)
+        0x8030_4538 => Some(57), // MarioAccess::endRemoteDemo(const RushEndInfo*)
+        0x8030_3B5C => Some(58), // MarioAccess::readyRemoteDemo()
+        0x803D_2244 => Some(59), // MR::testCorePadButtonA(s32)
+        0x803D_25CC => Some(60), // MR::testCorePadTriggerA(s32)
+        0x803F_A9EC => Some(61), // MR::isStarPointerPointingPane(const LayoutActor*, const char*, s32, bool, const char*)
+        0x803D_2B6C => Some(62), // MR::testDPDMenuPadDecideTrigger()
+        // Co-op talks do not freeze the world (skippable, by call site in TalkDirector): no talk demo (scene
+        // stop, player hold), talk pose or talk camera; the window opens at once; demos the talk sets off wait
+        // for its end; A pages instead of jumping.
+        0x803C_9470 => Some(63), // MR::tryStartDemoMarioPuppetable(LiveActor*, const char*)
+        0x803F_32AC => Some(64), // MR::startPlayerTalk(const LiveActor*)
+        0x803F_32B0 => Some(65), // MR::endPlayerTalk()
+        0x803C_9B04 => Some(66), // MR::endDemo(NameObj*, const char*)
+        0x802A_0BE8 => Some(67), // TalkMessageCtrl::startCamera(s32)
+        0x803E_D48C | 0x803B_CB9C => Some(68), // MR::endNPCTalkCamera, MR::endMultiActorCamera
+        0x803C_8784 => Some(69), // MR::isCameraInterpolatingNearlyEnd()
+        0x803C_9F18 => Some(70), // MR::canStartDemo()
+        0x802B_B6A0 => Some(71), // MarioActor::checkButtonType(u16 button, bool)
+        // Level of detail by the nearer brother: LodCtrl::update's distance (to the player, or the camera).
+        0x8016_6C6C => Some(72), // LodCtrl::calcDistanceToCamera() const
+        // Co-op talk windows stand in the world at their NPC (from TalkBalloon::updateBalloon, by call site).
+        0x802A_0028 => Some(73), // TalkMessageCtrl::updateBalloonPos()
+        // Co-op Star Pointers. In split screen each pointer tests targets with its own half's camera.
+        // isStarPointerPointingCore(StarPointerTargetInfo*, const LiveActor*, s32 channel, ...):
+        0x803F_A488 => Some(74),
+        0x803C_6E04 => Some(75), // MR::calcScreenPosition(TVec2f*, const TVec3f&) (GCapture's, by call site)
+        // Pull Stars answer the brother whose pointer is on them: GCapture and GCaptureTarget run with him as
+        // the game's player and his pointer as channel 0's.
+        0x801E_0C14 => Some(76), // MR::isOnTractTrigger(): the capturing brother's A only
+        0x801D_EBA4..=0x801E_0CF7 | 0x801E_1630..=0x801E_2407 => Some(77), // GCapture, GCaptureTarget
+        0x8016_FAE8 => Some(82), // Spine::update(): their nerve steps (reached by tail branches) as well
+        0x803F_A9A8 => Some(78), // MR::isStarPointerPointing(const LiveActor*, s32, bool, const char*)
+        0x803F_B5BC => Some(79), // MR::getStarPointerScreenPosition(s32)
+        0x803F_BDE0 => Some(80), // MR::calcStarPointerStrokeRotateMoment(TVec3f*, const TVec3f&, f32, s32)
+        // Co-Star actions on the second pointer's A (jump assist, enemies held, launch stars fired) are off:
+        // MarioActor::isRequestJump2P, isKeepJump2P, isRequestSpinJump2P, MR::isPlayerPointedBy2POnTriggerButton,
+        // MR::isStarPointerPointing2POnPressButton, MR::isStarPointerPointing2POnTriggerButton.
+        0x802B_B578 | 0x802B_B644 | 0x802B_BB04 | 0x803F_269C | 0x803F_AF94 | 0x803F_B04C => Some(81),
+        // Vehicles (the Star Ball, the manta ray) are the first player's; the second rides along (skippable):
+        0x802C_824C => Some(83), // MarioActor::addRushSensor(HitSensor*, bool)
+        // A boss fight begins (its music): the brother away from the arena is brought in.
+        0x803F_A0EC => Some(84), // MR::startBossBGM(s32)
+        // Online each PC shows its own brother's cursor (a renderer-only clip around the other's).
+        0x8038_839C => Some(85), // StarPointerLayout::drawDecoration() const (from StarPointerLayout::draw)
+        // Star Bits answer the nearer brother (their distance gate, pointing and flight home use the player).
+        0x8023_CB3C..=0x8024_06FF => Some(86), // StarPiece and its nerves
+        // 3D sound: a source nearer the second player is heard as if he stood where the first is.
+        0x8002_8884 => Some(87), // AudDopplerAudienceState::convertAbsToRel(const TVec3f&, JAUDopplerAudibleRelPos*)
+        0x8015_FD74 => Some(88), // ClippingJudge::isJudgedToClipFrustum(const TVec3f&, f32) const (the far plane's)
+        // A life won (a 1-Up mushroom caught, a stomp chain) by the second player is his (skippable).
+        0x803C_C3D0 => Some(89), // MR::incPlayerLeft()
+        _ => None,
+    }
+}
+
 /// Game-side motion signals (generation 20): where the game's own state says a
 /// transform does not continue from the frame before, and which part of the
 /// scene draws next.
@@ -8057,6 +8245,15 @@ fn motion_signal_site(address: u32, function_end: u32, pc: u32, word: u32) -> Op
         (0x803D_8A88, 0x803D_8B14, 0x803D_8A88, 0x9421_FFC0) => Some(("LightLoad", 5)),
         _ => None,
     }
+}
+
+fn is_animation_interpole_call(target: u32) -> bool {
+    target == 0x8001_BB50
+}
+
+/// Mario::update (RMGE01 0x802ACDB4) calls Mario::actionMain (0x802AD338) once, at 0x802AD180.
+fn is_mario_action_main_call(target: u32, pc: u32) -> bool {
+    target == 0x802A_D338 && pc == 0x802A_D180
 }
 
 fn rmge01_native_screen_width_call(address: u32, function_end: u32, pc: u32, word: u32) -> bool {
@@ -12845,7 +13042,7 @@ mod tests {
 
     #[test]
     fn transfer_returns_follow_every_checkpoint_and_interrupt_boundary() {
-        let body = "call_return_80004008:\n    galaxy::call_return_checkpoint(services, 0x80004004u, 0x80004008u, context, memory);\n    if (--checkpoint_budget__ == 0u) [[unlikely]] { checkpoint_budget__ = galaxy::kBranchCheckpointBudget; galaxy::branch_checkpoint_taken_budgeted(services, 0x80004010u, 0x80004000u, context, memory); }\n    context->msr = context->gpr[3];\n    std::atomic_thread_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x80004014u, 0x80004018u, context, memory);\n    if (const std::uint64_t counted__ = galaxy::call_return_checkpoint_due(services); counted__ != 0u) [[unlikely]] { galaxy::call_return_checkpoint_counted(services, 0x80004020u, 0x80004024u, context, memory, counted__); GALAXY_RETURN_IF_TRANSFER_PENDING(services); }\n".to_owned();
+        let body = "call_return_80004008:\n    galaxy::call_return_checkpoint(services, 0x80004004u, 0x80004008u, context, memory);\n    if (--checkpoint_budget__ == 0u) [[unlikely]] { checkpoint_budget__ = galaxy::kBranchCheckpointBudget; galaxy::branch_checkpoint_taken_budgeted(services, 0x80004010u, 0x80004000u, context, memory); }\n    context->msr = context->gpr[3];\n    std::atomic_signal_fence(std::memory_order_seq_cst);\n    galaxy::architectural_interrupt_checkpoint(services, 0x80004014u, 0x80004018u, context, memory);\n    if (const std::uint64_t counted__ = galaxy::call_return_checkpoint_due(services); counted__ != 0u) [[unlikely]] { galaxy::call_return_checkpoint_counted(services, 0x80004020u, 0x80004024u, context, memory, counted__); GALAXY_RETURN_IF_TRANSFER_PENDING(services); }\n".to_owned();
         let out = apply_transfer_returns(body);
         assert!(out.contains("call_return_80004008:\n    GALAXY_CALL_RETURN_CHECKPOINT(services, 0x80004004u, 0x80004008u, context, memory);\n"));
         assert!(out.contains("GALAXY_BRANCH_CHECKPOINT_TAKEN_BUDGETED(services, 0x80004010u, 0x80004000u, context, memory); }"));
@@ -14382,6 +14579,102 @@ mod tests {
                 "galaxy::site_hook(services, context, memory, 0x{pc:08X}u, galaxy::SiteHookKind::{kind}, {argument}u);"
             );
             assert_eq!(out.matches(&hook).count(), 1, "{out}");
+        }
+    }
+
+    #[test]
+    fn rmge01_animation_interpole_hook_precedes_every_direct_call() {
+        const TARGET: u32 = 0x8001_BB50; // XanimePlayer::updateInterpoleRatio
+        let hook = "galaxy::site_hook(services, context, memory, 0x8001BAF0u, galaxy::SiteHookKind::AnimationInterpole, 0u);";
+        let link = [
+            0x4800_0001 | (TARGET.wrapping_sub(0x8001_BAF0) & 0x03FF_FFFC),
+            0x4E80_0020,
+        ];
+        let tail = [0x4800_0000 | (TARGET.wrapping_sub(0x8001_BAF0) & 0x03FF_FFFC)];
+        for words in [&link[..], &tail[..]] {
+            let output = lower_instruction_fixture(0x8001_BAF0, words);
+            assert_eq!(output.matches(hook).count(), 1);
+            let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_be_bytes()).collect();
+            let entries = BTreeMap::from([(TARGET, TARGET)]);
+            let output = lower_words_for_module(0x8001_BAF0, &bytes, &BTreeSet::new(), &entries)
+                .expect("resolved interpole call lowers");
+            let at = output.find(hook).expect("the resolved call keeps the hook");
+            assert!(
+                at < output
+                    .find(&format!("fn_{TARGET:08X}"))
+                    .expect("the call follows")
+            );
+        }
+        let other = [
+            0x4800_0001 | (0x8001_BB54u32.wrapping_sub(0x8001_BAF0) & 0x03FF_FFFC),
+            0x4E80_0020,
+        ];
+        assert!(!lower_instruction_fixture(0x8001_BAF0, &other).contains("AnimationInterpole"));
+    }
+
+    #[test]
+    fn rmge01_mario_action_main_hook_precedes_only_the_update_call() {
+        const TARGET: u32 = 0x802A_D338; // Mario::actionMain
+        let hook = "galaxy::site_hook(services, context, memory, 0x802AD180u, galaxy::SiteHookKind::MarioActionMain, 0u);";
+        let link = [
+            0x4800_0001 | (TARGET.wrapping_sub(0x802A_D180) & 0x03FF_FFFC),
+            0x4E80_0020,
+        ];
+        let output = lower_instruction_fixture(0x802A_D180, &link);
+        assert_eq!(output.matches(hook).count(), 1);
+        let bytes: Vec<u8> = link.iter().flat_map(|word| word.to_be_bytes()).collect();
+        let entries = BTreeMap::from([(TARGET, TARGET)]);
+        let output = lower_words_for_module(0x802A_D180, &bytes, &BTreeSet::new(), &entries)
+            .expect("resolved actionMain call lowers");
+        let at = output.find(hook).expect("the resolved call keeps the hook");
+        assert!(at < output.find(&format!("fn_{TARGET:08X}")).expect("the call follows"));
+        // The same call from anywhere else is left alone.
+        let elsewhere = [
+            0x4800_0001 | (TARGET.wrapping_sub(0x802A_D184) & 0x03FF_FFFC),
+            0x4E80_0020,
+        ];
+        assert!(!lower_instruction_fixture(0x802A_D184, &elsewhere).contains("MarioActionMain"));
+    }
+
+    #[test]
+    fn rmge01_coop_hooks_wrap_every_direct_call_of_their_targets() {
+        const TARGET: u32 = 0x8045_06D8; // KPADRead
+        const PC: u32 = 0x8030_0000;
+        let before = "galaxy::site_hook(services, context, memory, 0x80300000u, galaxy::SiteHookKind::CoopBeforeCall, 1u);";
+        let after = "galaxy::site_hook(services, context, memory, 0x80300000u, galaxy::SiteHookKind::CoopAfterCall, 1u);";
+        let link = [0x4800_0001 | (TARGET.wrapping_sub(PC) & 0x03FF_FFFC), 0x4E80_0020];
+        let output = lower_instruction_fixture(PC, &link);
+        assert_eq!(output.matches(before).count(), 1);
+        assert_eq!(output.matches(after).count(), 1);
+        let bytes: Vec<u8> = link.iter().flat_map(|word| word.to_be_bytes()).collect();
+        let entries = BTreeMap::from([(TARGET, TARGET)]);
+        let output = lower_words_for_module(PC, &bytes, &BTreeSet::new(), &entries)
+            .expect("resolved KPADRead call lowers");
+        let call = output.find(&format!("fn_{TARGET:08X}")).expect("the call is emitted");
+        assert!(output.find(before).expect("hook before") < call);
+        assert!(output.find(after).expect("hook after") > call);
+        // Other calls are left alone.
+        const OTHER: u32 = 0x8045_06DC;
+        let other = [0x4800_0001 | (OTHER.wrapping_sub(PC) & 0x03FF_FFFC), 0x4E80_0020];
+        assert!(!lower_instruction_fixture(PC, &other).contains("Coop"));
+        for (target, id) in [
+            (0x803B_17D4u32, 2u32),
+            (0x803A_F80C, 3),
+            (0x802A_ED64, 4),
+            (0x8034_481C, 5),
+            (0x803C_DDD4, 6),
+            (0x8039_C730, 7),
+            (0x8039_C060, 8),
+            (0x8033_EE8C, 9),
+            (0x804B_E434, 10),
+            (0x804B_E4B0, 11),
+            (0x8015_FDA0, 12),
+            (0x8016_BF1C, 13),
+            (0x802C_42C0, 14),
+            (0x8026_B9F4, 15),
+            (0x8026_BA50, 16),
+        ] {
+            assert_eq!(coop_call_id(target), Some(id));
         }
     }
 

@@ -43,7 +43,30 @@ use std::{fs, path::Path};
 // 20: draw identity, motion signals, the 2D layer and the visible sun's centre
 //     (SiteHookKind 17-27, 29) for interpolation, motion vectors and ray
 //     tracing; regenerate every module.
-pub const GENERATION_VERSION: u32 = 20;
+// 20-40 (the fork's own line, from generation 19, in parallel with the one above):
+// 20: the Odyssey moveset's site hook before Mario::actionMain (SiteHookKind 40);
+//     regenerate every module.
+// 21: Mario and Luigi co-op's hooks around eight game calls (SiteHookKind 41 and 42);
+//     regenerate every module.
+// 22: split screen's hooks around GameScene::draw3D, GXSetViewport, GXSetScissor and
+//     ClippingJudge::isJudgedToClipFrustum (SiteHookKind 41 and 42); regenerate every module.
+// 23: co-op hook around ShadowController::updateFarClipping; regenerate every module.
+// 24: co-op hook around MarioActor::setPlayerMode; regenerate every module.
+// 25: co-op hooks around NameObjHolder's constructor and add; regenerate every module.
+// 26: (diagnostic hooks, since removed)
+// 27: hooks around JKRSolidHeap::allocFromHead/allocFromTail (stage heap overflow); regenerate every module.
+// 28: co-op lives, HUD and launch star hooks, some of them skippable; regenerate every module.
+// 29: co-op hooks for the partner's power-up archives and player-on-player attacks.
+// 35: co-op Star Pointer hooks (split-screen pointing, Pull Stars for either brother, no Co-Star actions).
+// 35 (a parallel branch): mtmsr orders the MSR write with a compiler barrier, not an interlocked fence; psq_st's
+//     quantized and gather-pipe lanes out of line.
+// 36: both of the above together; regenerate every module.
+// 37: co-op hook around MarioActor::addRushSensor (vehicles ridden by the first player only).
+// 38: co-op hooks: boss music, the pointer layout's decoration, Star Bits, 3D sound, the 2-argument frustum test.
+// 39: co-op hook around MR::incPlayerLeft (the second player's 1-Ups are his).
+// 40: co-op: Koopa shells' code (JetTurtle, GoldenTurtle) runs as the brother at the shell.
+// 41: both lines together (upstream's 20 and the fork's 40); regenerate every module.
+pub const GENERATION_VERSION: u32 = 41;
 
 /// Shard size and per-shard source budget of the qualified module build.
 pub const MODULE_SHARD_SIZE: usize = 64;
