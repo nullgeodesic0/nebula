@@ -791,6 +791,9 @@ target_link_libraries(galaxy_menu_sounds PUBLIC galaxy_jaudio_mixer galaxy_runti
 set(galaxy_menu_sounds_disc_sources runtime/src/gx/game_disc.cpp runtime/src/gx/game_asset_extract.cpp)
 add_executable(galaxy_menu_sounds_tests runtime/src/menu_sounds_tests.cpp ${galaxy_menu_sounds_disc_sources})
 target_link_libraries(galaxy_menu_sounds_tests PRIVATE galaxy_menu_sounds)
+# Not a test: writes each rendered sound to a WAV for listening (outside the repository).
+add_executable(galaxy_menu_sounds_dump tools/dev/menu_sounds_dump.cpp ${galaxy_menu_sounds_disc_sources})
+target_link_libraries(galaxy_menu_sounds_dump PRIVATE galaxy_menu_sounds)
 
 add_executable(NebulaRuntime
     runtime/src/native_runtime.cpp
@@ -1214,6 +1217,7 @@ if(MSVC)
         galaxy_menu_kit_tests
         galaxy_menu_sounds
         galaxy_menu_sounds_tests
+        galaxy_menu_sounds_dump
         NebulaRuntime
         galaxy_native_api_tests
         galaxy_native_fast_float_tests
