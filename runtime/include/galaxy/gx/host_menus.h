@@ -20,6 +20,9 @@ struct PictureRect {
 [[nodiscard]] bool host_menu_text_focus() noexcept;
 void push_host_menu_key(char32_t key);
 
+// This frame's draw list: F1 (renderer_d3d12.cpp) adds to it before draw_host_menus draws it all in one call.
+[[nodiscard]] menu::DrawList& host_menu_list() noexcept;
+
 // Builds this frame's menus into one draw list and draws it. `seconds` is a steady clock for the animations;
 // `settings_open`: F1 is up (the save select's options give way to it).
 void draw_host_menus(RendererD3D12& renderer, const PictureRect& picture, double seconds, bool settings_open);

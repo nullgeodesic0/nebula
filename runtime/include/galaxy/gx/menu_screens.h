@@ -188,6 +188,10 @@ private:
     std::u16string last_outcome_;
 };
 
+// F1's upper-case words as the game writes its own ("VSYNC: ON" -> "VSync: On"): a sentence, keeping acronyms,
+// key and button names and numbers as they are.
+[[nodiscard]] std::u16string readable_words(std::string_view upper);
+
 // The seat's label: the brother it plays ("Luigi"/"Mario", the second being the partner of the save's), "Off", or
 // "Auto" with what it plays now.
 [[nodiscard]] std::u16string seat_label(SeatChoice seat, bool driving, bool second, bool second_is_luigi);

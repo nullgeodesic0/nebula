@@ -175,6 +175,12 @@ int main() {
         ok &= expect(screens.update(in, assets, space, list).leave, "A on Leave asks him to leave");
     }
 
+    ok &= expect(readable_words("RESOLUTION SCALE: 2X") == u"Resolution scale: 2X" &&
+                     readable_words("A: SPACE, ENTER, MOUSELEFT") == u"A: Space, Enter, Mouseleft" &&
+                     readable_words("ANTI-ALIASING: SMAA ULTRA") == u"Anti-aliasing: SMAA ultra" &&
+                     readable_words("TAB/LB/RB PAGE  ESC/B CLOSE") == u"TAB/LB/RB page  ESC/B close",
+                 "F1's words as the game writes its own");
+
     std::printf("%s\n", ok ? "menu kit: all passed" : "menu kit: FAILED");
     return ok ? 0 : 1;
 }

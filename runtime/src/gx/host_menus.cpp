@@ -243,14 +243,21 @@ void push_host_menu_key(char32_t key) {
     if (s_keys.size() < 64u) s_keys.push_back(key);
 }
 
+menu::DrawList& host_menu_list() noexcept {
+    static menu::DrawList list;
+    return list;
+}
+
 void draw_host_menus(RendererD3D12& renderer, const PictureRect& picture, double seconds, bool settings_open) {
     // From the first frame: the assets are prepared off the render thread and arrive a moment later.
     if (!renderer.ensure_menu_kit_loaded()) return;
     const menu::Assets* assets = renderer.menu_kit_assets();
-    if (assets == nullptr || picture.width <= 0.0f || picture.height <= 0.0f) return;
-    static menu::DrawList list;
+    if (assets == nullptr || picture.width <= 0.0f || picture.height <= 0.0f) {
+        host_menu_list().clear();
+        return;
+    }
+    menu::DrawList& list = host_menu_list();
     static menu::Screens screens;
-    list.clear();
     const menu::Space space = menu::Space::for_picture(picture.x, picture.y, picture.width, picture.height);
     demo(list, *assets, space, seconds);
     const menu::ScreensActions actions = screens.update(gather(seconds, picture.width * 0.5f / space.unit, settings_open), *assets,
@@ -302,6 +309,7 @@ void draw_host_menus(RendererD3D12& renderer, const PictureRect& picture, double
         }
     }
     renderer.draw_menu_kit(list);
+    list.clear();
 }
 
 }  // namespace galaxy::gx

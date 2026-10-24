@@ -68,6 +68,53 @@ SeatChoice next_seat(SeatChoice seat, int step) {
 
 }  // namespace
 
+std::u16string readable_words(std::string_view upper) {
+    // Words kept as written: acronyms, controller and key names.
+    static constexpr std::string_view kKeep[] = {
+        "FSR", "FSR3", "TAA", "MSAA", "SMAA", "FXAA", "FPS", "HDR", "VRR", "DLSS", "XESS", "HUD", "UI", "DOF", "AA",
+        "UDP", "IP", "PC", "LB", "RB", "LT", "RT", "LS", "RS", "ZL", "ZR", "SL", "SR", "ESC", "TAB", "VSYNC", "HD",
+        "4K", "CRT", "GPU", "CPU", "XINPUT", "MB", "MS", "HZ", "PS", "L1", "R1", "L2", "R2", "L3", "R3", "API",
+        "D-PAD", "OK", "BGM", "SFX", "II", "III", "16:9", "4:3", "21:9"};
+    std::u16string out;
+    bool sentence_start = true;
+    std::size_t i = 0;
+    while (i < upper.size()) {
+        std::size_t j = i;
+        while (j < upper.size() && upper[j] != ' ' && upper[j] != '/' && upper[j] != '(' && upper[j] != ')' &&
+               upper[j] != '+' && upper[j] != ',') {
+            ++j;
+        }
+        const std::string_view word = upper.substr(i, j - i);
+        std::string_view bare = word;
+        while (!bare.empty() && (bare.back() == ':' || bare.back() == ',' || bare.back() == '.')) bare.remove_suffix(1);
+        bool keep = bare.size() <= 1u;
+        for (const std::string_view k : kKeep) keep = keep || bare == k;
+        bool has_digit = false;
+        for (const char c : bare) has_digit = has_digit || (c >= '0' && c <= '9');
+        keep = keep || has_digit;
+        for (std::size_t k = 0; k < word.size(); ++k) {
+            const char c = word[k];
+            const bool letter = c >= 'A' && c <= 'Z';
+            const bool lower = letter && !keep && !(sentence_start && k == 0u);
+            out.push_back(static_cast<char16_t>(lower ? c - 'A' + 'a' : c));
+        }
+        if (!word.empty()) sentence_start = word.back() == ':' || word.back() == '.';
+        if (j < upper.size()) {
+            out.push_back(static_cast<char16_t>(upper[j]));
+            if (upper[j] == '(') sentence_start = false;
+            // A list's items, and the parts of a chord, are names: each starts with a capital.
+            if (upper[j] == ',' || upper[j] == '+' || upper[j] == '/') sentence_start = true;
+            // Two spaces part the phrases of a hint ("TAB PAGE  ESC CLOSE").
+            if (upper[j] == ' ' && j + 1u < upper.size() && upper[j + 1u] == ' ') sentence_start = true;
+            if (upper[j] == ',' && j + 1u < upper.size() && upper[j + 1u] == ' ') {
+                out.push_back(u' ');
+                ++j;
+            }
+        }
+        i = j + 1u;
+    }
+    return out;
+}
 std::u16string seat_label(SeatChoice seat, bool driving, bool second, bool second_is_luigi) {
     const std::u16string first_name = brother(!second_is_luigi);
     const std::u16string second_name = brother(second_is_luigi);

@@ -10,6 +10,7 @@
 #include "galaxy/gx/game_font.h"
 #include "galaxy/gx/font_sdf.h"
 #include "galaxy/gx/menu_glyphs.h"
+#include "galaxy/gx/menu_screens.h"
 #include "galaxy/menu_sounds.h"
 #include "galaxy/gx/host_menus.h"
 #include "galaxy/gx/menu_kit.h"
@@ -10584,6 +10585,178 @@ std::string native_settings_row_text(
     }
 }
 
+// F1's status line (its words, upper case) and its kind: 0 plain, 1 news, 2 a problem. Both looks show it.
+std::string native_settings_status(unsigned tab, const RuntimeSettings& row_runtime, int& kind) {
+    kind = 0;
+    std::string status;
+    const std::uint64_t now_ms = GetTickCount64();
+    const bool controls_page = tab == kControlsTab;
+    if (controls_capturing()) {
+        status = s_controls_scheme == galaxy::input::ControlScheme::Keyboard
+            ? "PRESS A KEY OR MOUSE BUTTON  ESC CANCEL"
+            : "PRESS A BUTTON, STICK OR TRIGGER  ESC CANCEL";
+        kind = 1;
+    } else if (s_controls_message_until_ms > now_ms) {
+        status = s_controls_message;
+        kind = 2;
+    } else if (settings_display_confirming()) {
+        const std::uint64_t left_ms = s_display_confirm_deadline_ms > now_ms
+            ? s_display_confirm_deadline_ms - now_ms : 0u;
+        char line[96]{};
+        std::snprintf(line, sizeof(line),
+                      "KEEP DISPLAY? ENTER/Y KEEP  ESC/B UNDO  %u",
+                      static_cast<unsigned>((left_ms + 999u) / 1000u));
+        status = line;
+        kind = 1;
+    } else if (s_native_settings_save_error.load(std::memory_order_acquire)) {
+        status = "SAVE FAILED - RETRY ON NEXT CLOSE";
+        kind = 2;
+    } else if (const unsigned pending = pending_settings_changes(); pending != 0u) {
+        char line[96]{};
+        std::snprintf(line, sizeof(line),
+                      controls_page ? "%u CHANGE%s  SPACE/Y APPLY  ESC/B DISCARD"
+                                    : "%u CHANGE%s  ENTER/Y APPLY  BACKSPACE/X UNDO",
+                      pending, pending == 1u ? "" : "S");
+        status = line;
+        kind = 1;
+    } else if (s_settings_applied_ms != 0u && now_ms - s_settings_applied_ms < 2500u) {
+        status = "APPLIED";
+        kind = 1;
+    } else if (GameLanguage running{}; tab == 4u && running_game_language(running) && running != row_runtime.language) {
+        status = "THE NEW LANGUAGE APPLIES WHEN NEBULA RESTARTS";
+        kind = 1;
+    } else if (bool running_animations = false; tab == 4u &&
+               running_custom_animations(running_animations) &&
+               running_animations != row_runtime.custom_animations) {
+        status = "CUSTOM ANIMATIONS CHANGE WHEN NEBULA RESTARTS";
+        kind = 1;
+    } else if (bool running_model = false; tab == 4u && running_custom_model(running_model) &&
+               running_model != row_runtime.custom_model) {
+        status = "CUSTOM MODEL CHANGES WHEN NEBULA RESTARTS";
+        kind = 1;
+    }
+    return status;
+}
+
+// F1's key hint (upper case).
+const char* native_settings_hint(unsigned tab) {
+    return tab == kControlsTab ? "ENTER/A ADD INPUT  BACKSPACE/X CLEAR  ESC/B CLOSE"
+           : tab == kOnlineTab ? "TYPE THE HOST'S ADDRESS  ENTER JOIN/ACCEPT  BACKSPACE DECLINE"
+                               : "ARROWS/D-PAD MOVE+CHANGE  ESC/B CLOSE";
+}
+
+// F1 in the game's style (menu_kit.h): the info window, the pages as its buttons, each row's words and value, the
+// selection as a pale band, the status and the key hint below. Added to the host menus' draw list (one draw a
+// frame); the old look stays for when the game's art cannot be read.
+void draw_native_settings_kit(const galaxy::gx::menu::Assets& assets, unsigned tab) {
+    namespace menu = galaxy::gx::menu;
+    const menu::Space space = menu::Space::for_picture(0.0f, 0.0f, static_cast<float>(s_bb_width),
+                                                       static_cast<float>(s_bb_height));
+    const float extent = static_cast<float>(s_bb_width) * 0.5f / space.unit;
+    menu::DrawList& list = galaxy::gx::host_menu_list();
+    const float width = std::min(2.0f * extent - 40.0f, 780.0f);
+    const float height = 424.0f;
+    const float left = -width * 0.5f, right = width * 0.5f;
+    menu::window(list, assets, space, 0.0f, 0.0f, width, height, 1.0f);
+    menu::TextStyle title;
+    title.font_w = 22.95f;
+    title.font_h = 29.7f;
+    title.char_space = 1.0f;
+    title.color = menu::rgb255(80, 90, 130);
+    menu::text(list, assets, space, title, 0.0f, 180.0f, u"Settings", 1.0f);
+
+    // The pages: the dialogs' buttons, the current one raised.
+    static std::array<menu::ButtonAnim, kNativeSettingsTabCount> s_tab_anims;
+    static std::uint64_t s_last_ms = GetTickCount64();
+    const std::uint64_t now_ms = GetTickCount64();
+    const float frames = static_cast<float>(now_ms - s_last_ms) * 0.06f;
+    s_last_ms = now_ms;
+    constexpr const char16_t* kTabs[] = {u"Display", u"Graphics", u"Controls", u"Audio", u"General", u"Online"};
+    static_assert(std::size(kTabs) == kNativeSettingsTabCount);
+    const float slot = (width - 60.0f) / static_cast<float>(kNativeSettingsTabCount);
+    menu::PillStyle tab_style = menu::dialog_pill_style();
+    tab_style.pane_scale = 1.0f;
+    tab_style.cap = 16.0f;
+    tab_style.width = slot - 44.0f;
+    tab_style.height = 36.0f;
+    tab_style.font_w = 15.0f;
+    tab_style.font_h = 19.5f;
+    tab_style.label_shadow_y = -2.0f;
+    for (unsigned i = 0; i < kNativeSettingsTabCount; ++i) {
+        s_tab_anims[i].hover(i == tab);
+        s_tab_anims[i].step(frames);
+        menu::pill(list, assets, space, tab_style, left + 30.0f + slot * (static_cast<float>(i) + 0.5f), 138.0f,
+                   kTabs[i], s_tab_anims[i].look(menu::kDialogHover), 1.0f);
+    }
+
+    const std::lock_guard<std::recursive_mutex> settings_lock(s_native_settings_mutex);
+    expire_display_confirmation();
+    expire_controls_capture();
+    const RenderConfig row_render = s_settings_draft;
+    const RuntimeSettings row_runtime = get_runtime_settings();
+    const unsigned row_count = native_settings_row_count(tab);
+    const unsigned selected_row =
+        std::min(s_native_settings_row.load(std::memory_order_relaxed), row_count == 0u ? 0u : row_count - 1u);
+    const unsigned visible_rows = std::min(row_count, kNativeSettingsVisibleRows);
+    s_settings_first_row = native_settings_first_row(s_settings_first_row, selected_row, row_count);
+    constexpr float kTop = 96.0f, kPitch = 31.0f;
+    menu::TextStyle row_style = title;
+    row_style.font_w = 17.0f;
+    row_style.font_h = 22.0f;
+    row_style.align = menu::TextStyle::Align::Left;
+    for (unsigned row = s_settings_first_row; row < s_settings_first_row + visible_rows; ++row) {
+        const float y = kTop - static_cast<float>(row - s_settings_first_row) * kPitch;
+        const bool chosen = row == selected_row;
+        if (chosen) {
+            menu::rect(list, space, left + 26.0f, y + 14.0f, right - 26.0f, y - 14.0f, menu::rgb255(196, 222, 255),
+                       menu::rgb255(166, 202, 250));
+            menu::rect(list, space, left + 26.0f, y + 14.0f, left + 31.0f, y - 14.0f, menu::rgb255(0, 190, 255),
+                       menu::rgb255(0, 150, 240));
+        }
+        const std::string words = native_settings_row_text(tab, row, row_render, row_runtime);
+        const std::size_t colon = words.find(": ");
+        menu::TextStyle style = row_style;
+        style.color = chosen ? menu::rgb255(30, 40, 80) : menu::rgb255(80, 90, 130);
+        menu::text(list, assets, space, style, left + 44.0f, y,
+                   galaxy::gx::menu::readable_words(colon == std::string::npos ? words : words.substr(0, colon)), 1.0f);
+        if (colon != std::string::npos) {
+            style.align = menu::TextStyle::Align::Right;
+            menu::text(list, assets, space, style, right - 44.0f, y,
+                       galaxy::gx::menu::readable_words(words.substr(colon + 2u)), 1.0f);
+        }
+    }
+    if (row_count > visible_rows) {
+        const float track_top = kTop + 14.0f;
+        const float track_bottom = kTop - static_cast<float>(visible_rows - 1u) * kPitch - 14.0f;
+        const float track = track_top - track_bottom;
+        menu::rect(list, space, right - 18.0f, track_top, right - 14.0f, track_bottom, menu::rgb255(200, 215, 240),
+                   menu::rgb255(200, 215, 240));
+        const float thumb = std::max(16.0f, track * static_cast<float>(visible_rows) / static_cast<float>(row_count));
+        const float thumb_top = track_top - (track - thumb) * static_cast<float>(s_settings_first_row) /
+                                                static_cast<float>(row_count - visible_rows);
+        menu::rect(list, space, right - 19.0f, thumb_top, right - 13.0f, thumb_top - thumb, menu::rgb255(0, 160, 255),
+                   menu::rgb255(0, 130, 230));
+    }
+
+    int status_kind = 0;
+    const std::string status = native_settings_status(tab, row_runtime, status_kind);
+    menu::TextStyle footer = title;
+    footer.font_w = 15.0f;
+    footer.font_h = 19.5f;
+    if (!status.empty()) {
+        footer.color = status_kind == 2 ? menu::rgb255(210, 60, 60)
+                       : status_kind == 1 ? menu::rgb255(0, 120, 210)
+                                          : menu::rgb255(120, 130, 160);
+        menu::text(list, assets, space, footer, 0.0f, -150.0f, galaxy::gx::menu::readable_words(status), 1.0f);
+    }
+    footer.color = menu::rgb255(120, 130, 160);
+    footer.font_w = 14.0f;
+    footer.font_h = 18.0f;
+    menu::text(list, assets, space, footer, 0.0f, -176.0f,
+               galaxy::gx::menu::readable_words("F1, VIEW+MENU OR MINUS+PLUS TOGGLE  TAB/LB/RB PAGE"), 1.0f);
+    menu::text(list, assets, space, footer, 0.0f, -197.0f, galaxy::gx::menu::readable_words(native_settings_hint(tab)),
+               1.0f);
+}
 void draw_native_settings_overlay(RendererD3D12& renderer) {
     if (!s_native_settings_visible.load(std::memory_order_relaxed)) {
         return;
@@ -10592,6 +10765,10 @@ void draw_native_settings_overlay(RendererD3D12& renderer) {
     const unsigned tab =
         s_native_settings_tab.load(std::memory_order_relaxed) %
         kNativeSettingsTabCount;
+    if (const galaxy::gx::menu::Assets* assets = renderer.menu_kit_assets(); assets != nullptr) {
+        draw_native_settings_kit(*assets, tab);
+        return;
+    }
     const NativeSettingsLayout layout =
         compute_native_settings_layout(s_bb_width, s_bb_height, tab);
     if (!layout.supported) {
@@ -10718,54 +10895,9 @@ void draw_native_settings_overlay(RendererD3D12& renderer) {
     const int footer_y = layout.footer_y;
     const int footer_scale = std::min(2, scale);
     const int footer_step = footer_scale == 1 ? 18 : 28;
-    std::string status;
-    std::array<float, 4> status_color = muted;
-    const std::uint64_t now_ms = GetTickCount64();
-    const bool controls_page = tab == kControlsTab;
-    if (controls_capturing()) {
-        status = s_controls_scheme == galaxy::input::ControlScheme::Keyboard
-            ? "PRESS A KEY OR MOUSE BUTTON  ESC CANCEL"
-            : "PRESS A BUTTON, STICK OR TRIGGER  ESC CANCEL";
-        status_color = accent;
-    } else if (s_controls_message_until_ms > now_ms) {
-        status = s_controls_message;
-        status_color = error;
-    } else if (settings_display_confirming()) {
-        const std::uint64_t left_ms = s_display_confirm_deadline_ms > now_ms
-            ? s_display_confirm_deadline_ms - now_ms : 0u;
-        char line[96]{};
-        std::snprintf(line, sizeof(line),
-                      "KEEP DISPLAY? ENTER/Y KEEP  ESC/B UNDO  %u",
-                      static_cast<unsigned>((left_ms + 999u) / 1000u));
-        status = line;
-        status_color = accent;
-    } else if (s_native_settings_save_error.load(std::memory_order_acquire)) {
-        status = "SAVE FAILED - RETRY ON NEXT CLOSE";
-        status_color = error;
-    } else if (const unsigned pending = pending_settings_changes(); pending != 0u) {
-        char line[96]{};
-        std::snprintf(line, sizeof(line),
-                      controls_page ? "%u CHANGE%s  SPACE/Y APPLY  ESC/B DISCARD"
-                                    : "%u CHANGE%s  ENTER/Y APPLY  BACKSPACE/X UNDO",
-                      pending, pending == 1u ? "" : "S");
-        status = line;
-        status_color = accent;
-    } else if (s_settings_applied_ms != 0u && now_ms - s_settings_applied_ms < 2500u) {
-        status = "APPLIED";
-        status_color = accent;
-    } else if (GameLanguage running{}; tab == 4u && running_game_language(running) && running != row_runtime.language) {
-        status = "THE NEW LANGUAGE APPLIES WHEN NEBULA RESTARTS";
-        status_color = accent;
-    } else if (bool running_animations = false; tab == 4u &&
-               running_custom_animations(running_animations) &&
-               running_animations != row_runtime.custom_animations) {
-        status = "CUSTOM ANIMATIONS CHANGE WHEN NEBULA RESTARTS";
-        status_color = accent;
-    } else if (bool running_model = false; tab == 4u && running_custom_model(running_model) &&
-               running_model != row_runtime.custom_model) {
-        status = "CUSTOM MODEL CHANGES WHEN NEBULA RESTARTS";
-        status_color = accent;
-    }
+    int status_kind = 0;
+    const std::string status = native_settings_status(tab, row_runtime, status_kind);
+    const std::array<float, 4> status_color = status_kind == 2 ? error : status_kind == 1 ? accent : muted;
     if (!status.empty()) {
         ui_text(renderer, panel_x + 28, footer_y, footer_scale, status, status_color);
     }
@@ -10781,9 +10913,7 @@ void draw_native_settings_overlay(RendererD3D12& renderer) {
         panel_x + 28,
         footer_y + footer_step * 2,
         footer_scale,
-        controls_page ? "ENTER/A ADD INPUT  BACKSPACE/X CLEAR  ESC/B CLOSE"
-        : tab == kOnlineTab ? "TYPE THE HOST'S ADDRESS  ENTER JOIN/ACCEPT  BACKSPACE DECLINE"
-                            : "ARROWS/D-PAD MOVE+CHANGE  ESC/B CLOSE",
+        native_settings_hint(tab),
         muted);
 }
 
