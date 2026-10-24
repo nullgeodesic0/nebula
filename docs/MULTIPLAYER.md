@@ -91,6 +91,16 @@ Each brother's pointer is his own, as the first player's is in one-player play:
   choice of the nearest Pull Star (MR::calcScreenPosition, hook 75) likewise for the capturing brother's pointer.
   The cursors are drawn where they are aimed, as before. Checked with the agent: each brother's pointer on a
   Star Bit in the other's half collects it.
+- Star Bit shots: each pointer has the game's StarPieceShooter, which aims from the game's player through the
+  game camera and throws from beside that camera, so the second player's shots left from the first player's
+  camera and aimed through it. Now the second pointer's shot aims from the second player (MR::getPlayerPos in
+  `calcShootGoalUsingPointingDepth`, hook 52) and leaves from his own camera in split screen (300 to its left,
+  as the game's second pointer does) or from above his head on one shared screen, under his gravity
+  (`shot_from_second_player`, before StarPiece::throwToTarget/throwToTargetCore, hook 86). In split screen
+  either pointer's world point (StarPointerController::mWorldPos, from the EFB depth under it) is made again
+  with the camera and off-centre lens of the half it is over, and a far aim (the sky) follows that half's ray
+  (`shot_goal_player_pos`, coop::unproject_pointer and star_bit_shot_goal, tested in coop_tests); a thrown point
+  stops at the first wall seen from that camera. The charge sparkle still shows at the first player.
 
 ## What happens in game
 
