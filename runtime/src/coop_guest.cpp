@@ -674,6 +674,12 @@ struct State {
         std::array<std::uint32_t, 4> pointing_args{};  // MR::isStarPointerPointing's, for after it
         bool pointing_target = false;  // ... called from GCaptureTarget
     } pointers;
+    // Bind objects for either brother (bind_spine_begin): Spine::update calls in flight, and the depth of the one
+    // whose nerve step runs with the second player as the game's player.
+    std::uint32_t spine_depth = 0u;
+    std::uint32_t bind_spine_depth = 0u;
+    bool bind_spine_swapped = false;
+    std::uint32_t bind_traced = 0u;
 };
 
 // The first player's half while the game camera is away on the second player's event: the game camera's last view
@@ -1095,19 +1101,24 @@ void remember_first_camera(const Guest& guest, State& s) {
 
 // After the game moves its players, the second player: one MarioActor::movement with the game's player,
 // character and controller switched to it. Then the shared camera, and the warp back to the first player.
-// Whether a player rides a launch star (the launcher they rush with is a SuperSpinDriver or SpinDriver).
-// The vehicle a player rides (its rush partner's host is a Star Ball or manta ray), or 0.
-std::uint32_t ridden_vehicle(const Guest& guest, std::uint32_t actor_address) {
+// The actor a player is bound to (rushes with: MarioActor::_924's host, cleared by MarioActor::endRush), or 0.
+std::uint32_t bound_host(const Guest& guest, std::uint32_t actor_address) {
+    if (!plausible(actor_address)) return 0u;
     const std::uint32_t sensor = guest.u32(actor_address + kMarioRushSensor);
     const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
-    return plausible(host) && is_vehicle(guest.u32(host)) ? host : 0u;
+    return plausible(host) ? host : 0u;
 }
 
+// The vehicle a player rides (its rush partner's host is a Star Ball or manta ray), or 0.
+std::uint32_t ridden_vehicle(const Guest& guest, std::uint32_t actor_address) {
+    const std::uint32_t host = bound_host(guest, actor_address);
+    return host != 0u && is_vehicle(guest.u32(host)) ? host : 0u;
+}
+
+// Whether a player rides a launch star (the launcher they rush with is a SuperSpinDriver or SpinDriver).
 bool rides_star(const Guest& guest, std::uint32_t actor_address) {
-    const std::uint32_t sensor = guest.u32(actor_address + kMarioRushSensor);
-    if (!plausible(sensor)) return false;
-    const std::uint32_t host = guest.u32(sensor + kSensorHost);
-    if (!plausible(host)) return false;
+    const std::uint32_t host = bound_host(guest, actor_address);
+    if (host == 0u) return false;
     const std::uint32_t vtable = guest.u32(host);
     return vtable == kSuperSpinDriverVtable || vtable == kSpinDriverVtable;
 }
@@ -1909,6 +1920,81 @@ void capture_code_begin(const Guest& guest, State& s, std::uint32_t guest_pc) {
 
 bool second_nearer_piece(const Guest& guest, const State& s, std::uint32_t piece);
 
+// ---- Bind objects for either brother (poles and the like) ----
+// A pole, swing, rope, plant or cannon the player jumps into binds him (MarioActor::_924: its sensor, which he
+// rushes with), and from then on the object's own nerve steps drive "the player" (MarioAccess: his animation, his
+// jump off, his end of the bind, channel 0's stick and A). The second brother's bind came from his own turn, but the
+// object's steps ran with the first as the game's player: the pole's climb and its jump-off moved and animated the
+// first, and the first's A let go of a rider who was never let go (the second, stuck on the pole in his run
+// animation), whose next base-matrix update went to the pole's empty rider and crashed the game. A bound object's
+// nerve step runs with the brother it binds as the game's player. A pole free of either also runs as the brother
+// nearer it, since its grab sensor slides along it to the game's player's height.
+constexpr std::uint32_t kPoleVtable = 0x805BB430u;        // __vt__4Pole
+constexpr std::uint32_t kPoleRider = 0xB8u;               // Pole::mRider
+constexpr std::uint32_t kEarthenPipeVtable = 0x8057EFCCu;  // __vt__11EarthenPipe
+constexpr std::uint32_t kEndBindAndPlayerWait = 0x803F2914u;  // MR::endBindAndPlayerWait(LiveActor*)
+
+// Binds with handling of their own: launch stars (their steps), pipes (pipe_holds), Pull Stars (GCapture), the
+// star get, and vehicles (the first brother's alone, the second rides along).
+bool bind_has_own_handling(std::uint32_t vtable) {
+    return vtable == kSuperSpinDriverVtable || vtable == kSpinDriverVtable || vtable == kEarthenPipeVtable ||
+           vtable == kGCaptureVtable || vtable == kGCaptureTargetVtable || vtable == kPowerStarVtable ||
+           is_vehicle(vtable);
+}
+
+// Whether a nerve step of `actor` (Spine::update) is the second brother's: the object binds him, or it is a pole
+// free of both and he is nearer it.
+bool bind_step_is_second(const Guest& guest, const State& s, std::uint32_t actor, std::uint32_t vtable) {
+    if (!plausible(actor) || !plausible(s.first) || !plausible(s.second) || s.down[1].down ||
+        bind_has_own_handling(vtable)) {
+        return false;
+    }
+    if (bound_host(guest, s.second) == actor) return true;
+    return vtable == kPoleVtable && s.present && !s.level_start && !s.riding_along &&
+           bound_host(guest, s.first) != actor && guest.u32(actor + kPoleRider) == 0u && second_nearer(guest, s, actor);
+}
+
+bool bind_spine_begin(const Guest& guest, State& s, std::uint32_t actor, std::uint32_t vtable) {
+    if (s.bind_spine_swapped || s.moving_second || !bind_step_is_second(guest, s, actor, vtable)) return false;
+    if (s.bind_traced != actor && bound_host(guest, s.second) == actor) {
+        s.bind_traced = actor;
+        trace("bind object %08X (vtable %08X): the second player's, its steps as his", actor, vtable);
+    }
+    SavedContext saved(guest.context());
+    set_game_player(guest, s, true);
+    s.bind_spine_swapped = true;
+    s.bind_spine_depth = s.spine_depth;
+    return true;
+}
+
+bool bind_spine_end(const Guest& guest, State& s) {
+    if (!s.bind_spine_swapped || s.spine_depth != s.bind_spine_depth) return false;
+    s.bind_spine_swapped = false;
+    SavedContext saved(guest.context());
+    set_game_player(guest, s, false);
+    return true;
+}
+
+// In the second brother's turn, before he moves: a pole that let him go while it ran as the first (an enemy's hit on
+// it ends the bind on the game's player) has no rider, and his next base-matrix update would go to it: the bind
+// ends on him here.
+void release_dropped_bind(const Guest& guest, State& s) {
+    const std::uint32_t host = bound_host(guest, s.second);
+    if (host == 0u || guest.u32(host) != kPoleVtable || guest.u32(host + kPoleRider) == s.second) return;
+    SavedContext saved(guest.context());
+    guest.call(kEndBindAndPlayerWait, host);
+    trace("pole %08X let the second player go unseen: his bind ended", host);
+}
+
+// MarioActor::addRushSensor(sensor) for a brother: an object the other brother is bound to holds one rider (a pole
+// would take the second and leave the first bound to it), so it is not his to bind.
+bool rush_target_taken(const Guest& guest, const State& s, std::uint32_t player, std::uint32_t sensor) {
+    if (!plausible(s.first) || !plausible(s.second) || (player != s.first && player != s.second)) return false;
+    const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
+    if (!plausible(host) || bind_has_own_handling(guest.u32(host))) return false;
+    return bound_host(guest, player == s.first ? s.second : s.first) == host;
+}
+
 // Spine::update of GCapture or a GCaptureTarget: its nerve step (exeCapture and the rest, which their nerves reach
 // by a tail branch, unseen by capture_code_begin) runs as the capturing brother too.
 void capture_spine_begin(const Guest& guest, State& s) {
@@ -1916,6 +2002,8 @@ void capture_spine_begin(const Guest& guest, State& s) {
     const std::uint32_t spine = guest.context()->gpr[3];
     const std::uint32_t actor = plausible(spine) ? guest.u32(spine) : 0u;  // Spine::mExecutor
     const std::uint32_t vtable = plausible(actor) ? guest.u32(actor) : 0u;
+    ++s.spine_depth;
+    if (bind_spine_begin(guest, s, actor, vtable)) return;
     if (vtable == kStarPieceVtable || is_shell(vtable)) {
         // A Star Bit's nerve step, as the brother nearer it (star_piece_code_begin), or a Koopa shell's
         // (nearer_player_code).
@@ -1940,6 +2028,9 @@ void capture_spine_begin(const Guest& guest, State& s) {
 
 void capture_spine_end(const Guest& guest, State& s) {
     auto& p = s.pointers;
+    const bool bind_ended = bind_spine_end(guest, s);
+    if (s.spine_depth != 0u) --s.spine_depth;
+    if (bind_ended) return;
     if (s.piece_spine_swapped) {
         s.piece_spine_swapped = false;
         SavedContext saved(guest.context());
@@ -2769,6 +2860,7 @@ void move_second_player(const Guest& guest, State& s) {
         s.split.amount() > 0.0f && s.follow.started() && !s.event_second ? camera_context(guest) : 0u;
     const coop::CameraMatrices first_camera = camera_ctx != 0u ? read_camera(guest, camera_ctx) : coop::CameraMatrices{};
     if (camera_ctx != 0u) write_camera(guest, camera_ctx, s.camera2);
+    release_dropped_bind(guest, s);
     guest.call(fn::kMarioActorMovement, s.second);
     if (camera_ctx != 0u) write_camera(guest, camera_ctx, first_camera);
     if (s.agent_mode >= 0) {
@@ -3450,7 +3542,10 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
         const std::uint32_t host = plausible(sensor) ? guest.u32(sensor + kSensorHost) : 0u;
         if (plausible(s.second) && context->gpr[3] == s.second && plausible(host) && is_vehicle(guest.u32(host))) {
             context->pc = kCoopSkipCall;
+            return;
         }
+        // Nor is an object the other brother is bound to (a pole holds one rider).
+        if (rush_target_taken(guest, s, context->gpr[3], sensor)) context->pc = kCoopSkipCall;
         return;
     }
     if (id == call::kGetPlayerPos) return;
