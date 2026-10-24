@@ -151,6 +151,15 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
         for (const GameLanguage language : {GameLanguage::English, GameLanguage::French, GameLanguage::Spanish}) {
             if (_stricmp(value, game_language_key(language)) == 0) settings.language = language;
         }
+    } else if (std::strcmp(key, "button_prompts") == 0) {
+        for (const ButtonPrompts prompts :
+             {ButtonPrompts::Auto, ButtonPrompts::Wii, ButtonPrompts::Xbox, ButtonPrompts::DualSense}) {
+            if (_stricmp(value, button_prompts_key(prompts)) == 0) settings.button_prompts = prompts;
+        }
+        // The PlayStation family's name in Nebula's settings.
+        if (_stricmp(value, "playstation") == 0) settings.button_prompts = ButtonPrompts::DualSense;
+    } else if (std::strcmp(key, "custom_voice") == 0) {
+        settings.custom_voice = value[0] != '0' && _stricmp(value, "off") != 0;
     }
 }
 
@@ -344,6 +353,16 @@ const char* game_language_key(GameLanguage language) noexcept {
     return "english";
 }
 
+const char* button_prompts_key(ButtonPrompts prompts) noexcept {
+    switch (prompts) {
+    case ButtonPrompts::Wii: return "wii";
+    case ButtonPrompts::Xbox: return "xbox";
+    case ButtonPrompts::DualSense: return "dualsense";
+    case ButtonPrompts::Auto: break;
+    }
+    return "auto";
+}
+
 RuntimeInputModeState get_runtime_input_mode_state() {
     s_settings_lock.lock_shared();
     const RuntimeInputModeState copy{
@@ -427,6 +446,8 @@ bool save_runtime_settings_to_file() {
                  << "text_speed=" << settings.text_speed << '\n'
                  << "language=" << game_language_key(settings.language) << '\n'
                  << "discord_status=" << (settings.discord_status ? 1 : 0) << '\n'
+                 << "button_prompts=" << button_prompts_key(settings.button_prompts) << '\n'
+                 << "custom_voice=" << (settings.custom_voice ? "on" : "off") << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;

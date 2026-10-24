@@ -31,6 +31,7 @@
 #include "galaxy/native_thp_video.h"
 #include "galaxy/perf_hint.h"
 #include "galaxy/achievements.h"
+#include "galaxy/button_prompts.h"
 #include "galaxy/stats.h"
 #include "galaxy/runtime_settings.h"
 #include "galaxy/gx/render_config.h"
@@ -1810,12 +1811,50 @@ const uint8_t* svc_disc_dol(void*, size_t* size) {
 std::atomic<uint32_t> gRetraces{0};
 std::atomic<uint32_t> gXfb{0};
 
+#if defined(NEBULA_HOST_RENDERER) && defined(_WIN32)
+// Button prompts (button_prompts.h): the picture font, the HUD's A icon and the tutorial pictures in game memory get
+// the controller in use's buttons. On the simulation thread, before the frame's commands are parsed.
+void prompts_tick() {
+    static galaxy::prompts::GuestView view = [] {
+        galaxy::prompts::GuestView v;
+        // The scan reads whole slices: the game's thread stacks at MEM2's top have no-access guard pages between them.
+        v.resolve = [](void*, uint32_t physical, uint32_t size) -> std::byte* {
+            std::byte* const bytes = const_cast<std::byte*>(guest_bytes(physical, size));
+            if (bytes == nullptr) return nullptr;
+            for (std::byte* p = bytes; p < bytes + size;) {
+                MEMORY_BASIC_INFORMATION info{};
+                if (VirtualQuery(p, &info, sizeof(info)) == 0 || info.State != MEM_COMMIT ||
+                    (info.Protect & (PAGE_READWRITE | PAGE_READONLY)) == 0 || (info.Protect & PAGE_GUARD) != 0) {
+                    return nullptr;
+                }
+                p = static_cast<std::byte*>(info.BaseAddress) + info.RegionSize;
+            }
+            return bytes;
+        };
+        v.written = [](void*, uint32_t physical, uint32_t size) {
+            galaxy::gx::notify_guest_memory_write(physical, size);
+        };
+        NebulaGameMemoryRegion regions[8];
+        const int count = gModule.memory_regions(regions, 8);
+        for (int i = 0; i < count && v.region_count < v.regions.size(); i++) {
+            // MEM1 and MEM2 (the module's image holds no fonts or textures the game loads).
+            if (regions[i].physical == 0u || regions[i].physical == 0x10000000u) {
+                v.regions[v.region_count++] = {regions[i].physical, regions[i].size};
+            }
+        }
+        return v;
+    }();
+    galaxy::prompts::tick(view);
+}
+#endif
+
 void svc_vi_frame(void*, uint32_t xfb, int black, uint32_t retrace) {
     gXfb.store(xfb, std::memory_order_relaxed);
     gRetraces.store(retrace, std::memory_order_relaxed);
 #if defined(NEBULA_HOST_RENDERER)
 #if defined(_WIN32)
     galaxy::timeline::record(galaxy::timeline::Event::GuestFrame, retrace, xfb);
+    if (!gRegions.empty()) prompts_tick();
 #endif
     if (!gRegions.empty()) {
         submit_frame(true, xfb == 0 || black ? galaxy::gx::kNoDisplayedXfbAddr : xfb);

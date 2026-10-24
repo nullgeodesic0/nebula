@@ -2,6 +2,7 @@
 // Remote input reports (with the scripted and replayed test input), vibration and the virtual Wii devices.
 #include "galaxy/native_host.h"
 #include "galaxy/wii_device_data.h"
+#include "galaxy/button_prompts.h"
 
 #include "galaxy/native_audio_queue.h"
 #include "galaxy/jaudio_host_mixer.h"
@@ -3898,6 +3899,24 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
         if (keyboard_logic.pressed != 0u || keyboard_logic.stick_x != 0.0f || keyboard_logic.stick_y != 0.0f) {
             s_driving_pad = kDrivingKeyboard;
         }
+    }
+    {
+        // Button prompts (button_prompts.h): the controller in use, or always one family.
+        using galaxy::ButtonPrompts;
+        std::optional<galaxy::input::ControlScheme> shown;
+        switch (galaxy::get_runtime_settings().button_prompts) {
+        case ButtonPrompts::Auto:
+            if (use_pads && s_driving_pad != kDrivingNone && s_driving_pad != kDrivingKeyboard) {
+                shown = static_cast<galaxy::input::ControlScheme>((s_driving_pad >> 8u) & 0xFFu);
+            }
+            break;
+        case ButtonPrompts::Wii: break;
+        case ButtonPrompts::Xbox: shown = galaxy::input::ControlScheme::Xbox; break;
+        case ButtonPrompts::DualSense: shown = galaxy::input::ControlScheme::PlayStation; break;
+        }
+        const auto family = shown ? galaxy::prompts::family_for_scheme(*shown) : std::nullopt;
+        galaxy::prompts::publish(family ? galaxy::prompts::make_prompt_set(*family, controls.config.table(*shown))
+                                        : galaxy::prompts::PromptSet{});
     }
     // Vibration: target and strength, published with the game's motor bit.
     g_rumble_host = {};

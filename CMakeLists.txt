@@ -107,6 +107,7 @@ galaxy_host_options(galaxy_host_pointer_events)
 add_library(galaxy_native_input STATIC
     runtime/src/controller_roster.cpp
     runtime/src/generic_hid.cpp
+    $<$<PLATFORM_ID:Windows>:runtime/src/button_prompts.cpp>
     runtime/src/native_input.cpp
     runtime/src/playstation_controller.cpp
     runtime/src/pointer_control.cpp
@@ -115,7 +116,7 @@ add_library(galaxy_native_input STATIC
     runtime/src/switch_controller.cpp
     runtime/src/tilt.cpp
     runtime/src/wiimote_speaker.cpp)
-target_link_libraries(galaxy_native_input PUBLIC galaxy_runtime_abi)
+target_link_libraries(galaxy_native_input PUBLIC galaxy_runtime_abi $<$<PLATFORM_ID:Windows>:gdi32>)
 galaxy_host_options(galaxy_native_input)
 
 # The game's audio commands mixed on the host (jaudio_host_mixer.h).
@@ -562,6 +563,9 @@ galaxy_test(galaxy_runtime_settings_tests SOURCES ${rt}/runtime_settings_tests.c
 galaxy_test(galaxy_achievements_tests SOURCES ${rt}/achievements_tests.cpp LIBS galaxy_runtime_settings)
 galaxy_test(galaxy_stats_tests SOURCES ${rt}/stats_tests.cpp LIBS galaxy_runtime_settings)
 galaxy_test(galaxy_controls_tests SOURCES ${rt}/controls_tests.cpp LIBS galaxy_runtime_settings galaxy_native_input)
+if(WIN32)
+    galaxy_test(galaxy_button_prompts_tests SOURCES ${rt}/button_prompts_tests.cpp LIBS galaxy_runtime_settings galaxy_native_input)
+endif()
 galaxy_test(galaxy_pad_controller_tests SOURCES ${rt}/pad_controller_tests.cpp
     LIBS galaxy_runtime_settings galaxy_native_input)
 galaxy_test(galaxy_native_input_tests SOURCES ${rt}/native_input_tests.cpp LIBS galaxy_native_input)

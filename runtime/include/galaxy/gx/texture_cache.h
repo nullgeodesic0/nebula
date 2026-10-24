@@ -33,6 +33,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -371,6 +372,19 @@ private:
         std::uint32_t width, std::uint32_t height, unsigned levels,
         gpu::TextureRef& texture, std::uint64_t& allocation_bytes);
     std::vector<UploadArenaFrame> upload_arenas_;
+    // Images drawn by the host in place of a game texture (button_prompts.h hd_replacement: the picture font, the
+    // HUD A icon and the tutorial pictures with the controller in use). Returns false when the texture has none.
+    [[nodiscard]] bool try_generated_replacement(
+        const Key& key, const TexImage& image, const std::uint8_t* src,
+        std::uint32_t total_guest_size, TextureHandle& out);
+    // Uploaded generated images by their key; they survive GXInvalidateTexAll (the game calls it often), so an
+    // image is drawn and uploaded once per prompt set.
+    struct GeneratedCached {
+        TextureReplacement replacement;
+        std::list<std::string>::iterator lru;
+    };
+    std::unordered_map<std::string, GeneratedCached> generated_cache_;
+    std::list<std::string> generated_lru_;
     // Render-thread decode scratch, kept between misses to avoid reallocating.
     std::vector<std::vector<RGBA8>> level_pixels_scratch_;
     std::unique_ptr<TextureDecodePool> decode_pool_;

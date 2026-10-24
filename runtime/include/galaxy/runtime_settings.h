@@ -30,6 +30,10 @@ struct RuntimeAudioSettings {
 // The three languages of the USA disc, as the Wii's SC language codes SCGetLanguage returns.
 enum class GameLanguage : std::uint8_t { English = 1, French = 3, Spanish = 4 };
 
+// Which controller the game's button prompts (A, B, Z, +, ...) show: the one in use (Auto: Xbox or
+// PlayStation while one is, the Wii Remote's otherwise) or always one family.
+enum class ButtonPrompts : std::uint8_t { Auto = 0, Wii = 1, Xbox = 2, DualSense = 3 };
+
 struct RuntimeSettings {
     RuntimeInputMode input_mode = RuntimeInputMode::Auto;
     RuntimeAudioSettings audio{};
@@ -39,6 +43,10 @@ struct RuntimeSettings {
     GameLanguage language = GameLanguage::English;
     // Discord shows what the player is doing (galaxy, star, Power Stars) while Discord runs.
     bool discord_status = true;
+    ButtonPrompts button_prompts = ButtonPrompts::Auto;
+    // Mario's voice lines from the user's clips (the mods folder's voice mod, built by
+    // tools/animations/build_voice_mod.py). Changes live.
+    bool custom_voice = true;
 };
 
 // The language the game runs in this session: the setting when the game first asks (at boot), then
@@ -48,6 +56,8 @@ struct RuntimeSettings {
 [[nodiscard]] bool running_game_language(GameLanguage& language) noexcept;
 // "english", "french" or "spanish" (runtime_settings.ini).
 [[nodiscard]] const char* game_language_key(GameLanguage language) noexcept;
+// "auto", "wii", "xbox" or "dualsense" (runtime_settings.ini `button_prompts`).
+[[nodiscard]] const char* button_prompts_key(ButtonPrompts prompts) noexcept;
 
 // The generation changes only when the input mode changes, so device FIFOs can reject reports acquired
 // under an older source.
