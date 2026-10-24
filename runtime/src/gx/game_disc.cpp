@@ -125,6 +125,29 @@ std::optional<std::vector<std::byte>> GameDisc::read(std::string_view path) cons
     return std::nullopt;
 }
 
+std::optional<std::vector<std::byte>> GameDisc::read_main_dol() const try {
+    // Boot block 0x420: the DOL's offset (>> 2). The DOL header holds 7 text and 11 data section offsets
+    // (0x00, 0x1C) and sizes (0x90, 0xAC); the file ends with its last section.
+    std::byte boot[0x424]{};
+    if (!read_bytes(0u, sizeof(boot), boot)) return std::nullopt;
+    const std::uint64_t dol = static_cast<std::uint64_t>(be32(boot, 0x420u)) << 2u;
+    if (dol == 0u) return std::nullopt;
+    std::byte header[0x100]{};
+    if (!read_bytes(dol, sizeof(header), header)) return std::nullopt;
+    std::uint64_t end = sizeof(header);
+    for (std::size_t i = 0; i < 18u; ++i) {
+        const std::uint32_t offset = be32(header, i * 4u);
+        const std::uint32_t size = be32(header, 0x90u + i * 4u);
+        if (offset != 0u && size != 0u) end = std::max<std::uint64_t>(end, static_cast<std::uint64_t>(offset) + size);
+    }
+    if (end > kMaxFileSize) return std::nullopt;
+    std::vector<std::byte> bytes(static_cast<std::size_t>(end));
+    if (!read_bytes(dol, bytes.size(), bytes.data())) return std::nullopt;
+    return bytes;
+} catch (...) {
+    return std::nullopt;
+}
+
 std::optional<std::vector<std::byte>> GameDisc::read_arc_entry(std::string_view arc_path, std::string_view entry) const try {
     auto raw = read(arc_path);
     if (!raw) return std::nullopt;

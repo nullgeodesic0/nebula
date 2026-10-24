@@ -787,6 +787,18 @@ add_executable(galaxy_menu_kit_preview tools/dev/menu_kit_preview.cpp ${galaxy_m
 target_include_directories(galaxy_menu_kit_preview PRIVATE runtime/include)
 target_compile_features(galaxy_menu_kit_preview PRIVATE cxx_std_20)
 
+# The game's menu sounds, synthesised on the host from the disc (runtime/include/galaxy/menu_sounds.h).
+add_library(galaxy_menu_sounds STATIC runtime/src/menu_sounds.cpp)
+target_include_directories(galaxy_menu_sounds PUBLIC runtime/include)
+target_compile_features(galaxy_menu_sounds PUBLIC cxx_std_20)
+target_link_libraries(galaxy_menu_sounds PUBLIC galaxy_jaudio_mixer galaxy_runtime_settings xaudio2 ole32)
+set(galaxy_menu_sounds_disc_sources runtime/src/gx/game_disc.cpp runtime/src/gx/game_asset_extract.cpp)
+add_executable(galaxy_menu_sounds_tests runtime/src/menu_sounds_tests.cpp ${galaxy_menu_sounds_disc_sources})
+target_link_libraries(galaxy_menu_sounds_tests PRIVATE galaxy_menu_sounds)
+# Not a test: writes each rendered sound to a WAV for listening (outside the repository).
+add_executable(galaxy_menu_sounds_dump tools/dev/menu_sounds_dump.cpp ${galaxy_menu_sounds_disc_sources})
+target_link_libraries(galaxy_menu_sounds_dump PRIVATE galaxy_menu_sounds)
+
 add_executable(NebulaRuntime
     runtime/src/native_runtime.cpp
     runtime/src/native_thp_video.cpp
@@ -867,6 +879,7 @@ target_link_libraries(
         galaxy_runtime_timeline
         galaxy_jaudio_mixer)
 target_link_libraries(NebulaRuntime PRIVATE galaxy_runtime_instance)
+target_link_libraries(NebulaRuntime PRIVATE galaxy_menu_sounds)
 target_link_libraries(NebulaRuntime PRIVATE xinput9_1_0)
 target_link_libraries(NebulaRuntime PRIVATE dbghelp)
 if(MSVC)
@@ -1206,6 +1219,9 @@ if(MSVC)
         galaxy_game_asset_extract_tests
         galaxy_game_menu_assets_tests
         galaxy_menu_kit_tests
+        galaxy_menu_sounds
+        galaxy_menu_sounds_tests
+        galaxy_menu_sounds_dump
         NebulaRuntime
         galaxy_native_api_tests
         galaxy_native_fast_float_tests
@@ -1348,6 +1364,7 @@ galaxy_add_native_test(line_point_raster galaxy_line_point_raster_tests)
 galaxy_add_native_test(cosmetic_game_asset_extract galaxy_game_asset_extract_tests)
 galaxy_add_native_test(game_menu_assets galaxy_game_menu_assets_tests)
 galaxy_add_native_test(menu_kit galaxy_menu_kit_tests)
+galaxy_add_native_test(menu_sounds galaxy_menu_sounds_tests)
 galaxy_add_native_test(sorted_dirty_ranges galaxy_sorted_dirty_ranges_tests)
 galaxy_add_native_test(same_context_rfi galaxy_same_context_rfi_tests)
 galaxy_add_native_test(pipeline_cache_persistence galaxy_pipeline_cache_persistence_tests)

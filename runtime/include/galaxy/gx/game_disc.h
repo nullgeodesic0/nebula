@@ -32,6 +32,10 @@ public:
     [[nodiscard]] std::optional<std::vector<std::byte>> read_arc_entry(
         std::string_view arc_path, std::string_view entry) const;
 
+    // The game's executable (the boot block's DOL), whole: header and sections as stored on the disc.
+    // std::nullopt when the boot block names no readable DOL.
+    [[nodiscard]] std::optional<std::vector<std::byte>> read_main_dol() const;
+
     [[nodiscard]] std::size_t file_count() const noexcept { return files_.size(); }
 
 private:
