@@ -25,6 +25,13 @@ namespace NebulaCoop {
     // NameObjListExecutor::executeMovement after a category: the player's is followed by the second player's turn.
     void afterMovement(int category);
 
+    // Split screen (GameScene::draw3D): when the screen is split, sets up the first player's half and returns true;
+    // the scene is then drawn, nextSplitPass sets up the second player's half, the scene is drawn again, and
+    // endSplitDraw puts the game camera back for the 2D layer.
+    bool beginSplitDraw();
+    void nextSplitPass();
+    void endSplitDraw();
+
     // The second player's MarioActor (null: none in this scene).
     MarioActor* getSecond();
 };  // namespace NebulaCoop

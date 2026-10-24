@@ -3,7 +3,10 @@
 #ifdef TARGET_PC
 #include "Game/Player/Mario.hpp"
 #include "Game/Player/MarioActor.hpp"
+#include "Game/Camera/CameraContext.hpp"
+#include "Game/Map/HitInfo.hpp"
 #include "Game/Player/MarioHolder.hpp"
+#include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/Scene/GameSceneFunction.hpp"
 #include "Game/Scene/SceneFunction.hpp"
 #include "Game/System/GameSystem.hpp"
@@ -13,13 +16,18 @@
 #include "Game/Util/ActorSensorUtil.hpp"
 #include "Game/Util/CameraUtil.hpp"
 #include "Game/Util/DemoUtil.hpp"
+#include "Game/Util/DrawUtil.hpp"
+#include "Game/Util/GamePadUtil.hpp"
 #include "Game/Util/LiveActorUtil.hpp"
+#include "Game/Util/MapUtil.hpp"
 #include "Game/Util/PlayerUtil.hpp"
+#include "Game/Util/ScreenUtil.hpp"
 #include "Game/Util/SceneUtil.hpp"
 #include "Game/Util/SingletonHolder.hpp"
 #include <nebula_coop.h>
 #include <nebula_game_api.h>
 #include <revolution/os.h>
+#include <cstring>
 
 namespace coop = galaxy::coop;
 
@@ -42,7 +50,16 @@ namespace {
         TVec3f mHeldAt;
         TVec3f mParked;
         bool mHidden;          // hidden and untouchable (a level start, sitting out)
-        coop::LeashTimer mLeash;
+        // Split screen: how far split, the line between the halves, the second player's own camera.
+        coop::SplitState mSplit;
+        coop::SplitLayout mLayout;
+        coop::FollowCamera mFollow;
+        coop::CameraMatrices mFollowView;
+        // While the scene draws split: the pass (0 none, 1 the first player's half, 2 the second's) and the game
+        // camera it restores after.
+        u32 mPass;
+        coop::CameraMatrices mGameCamera;
+        coop::Array< float, 16 > mGameProjection;
     };
     State sState;
 
@@ -83,6 +100,88 @@ namespace {
         Mario* pFirstMario = sState.mFirst->mMario;
         return fromVec(coop::travel_position(toVec(sState.mFirst->mPosition), toVec(pFirstMario->mSideVec),
                                              toVec(sState.mParked)));
+    }
+
+    CameraContext* cameraContext() {
+        return MR::getSceneObj< CameraContext >(SceneObj_CameraContext);
+    }
+
+    coop::CameraMatrices readCamera(const CameraContext* pContext) {
+        coop::CameraMatrices camera;
+        memcpy(&camera.view[0], &pContext->mView, sizeof(float) * 12);
+        memcpy(&camera.inverse[0], &pContext->mViewInv, sizeof(float) * 12);
+        return camera;
+    }
+
+    void writeCamera(CameraContext* pContext, const coop::CameraMatrices& rCamera) {
+        memcpy(&pContext->mView, &rCamera.view[0], sizeof(float) * 12);
+        memcpy(&pContext->mViewInv, &rCamera.inverse[0], sizeof(float) * 12);
+    }
+
+    bool splitShown() {
+        return sState.mSplit.amount() > 0.0f && sState.mFollow.started() && sState.mLayout.started();
+    }
+
+    // After both players moved: whether the screen splits (a player about to leave the shared picture, or far
+    // apart), the line between the halves (square to where the second player is on screen) and his own camera.
+    void updateSplit(CameraContext* pContext, const TVec3f& rFirst, const TVec3f& rSecond) {
+        const coop::CameraMatrices camera = readCamera(pContext);
+        const coop::Vec3 first = toVec(rFirst);
+        const coop::Vec3 second = toVec(rSecond);
+        const coop::Vec3 middle = (first + second) * 0.5f;
+        const float depth = coop::length(coop::pose_of(camera.inverse).eye - middle);
+        const float extent = coop::shared_view_extent(camera, first, second, depth, pContext->mFovy,
+                                                      pContext->mAspectRatio);
+        if (sState.mSplit.update(extent, coop::length(second - first)) == 0.0f) {
+            sState.mFollow.reset();
+            sState.mLayout.reset();
+            return;
+        }
+        const coop::Vec3 up = toVec(sState.mSecond->mMario->getUpVec());
+        if (!sState.mFollow.started()) {
+            sState.mFollow.start(coop::pose_of(camera.inverse).eye, first, second, up);
+            OSReport("coop: split begins\n");
+        }
+        // His camera controls (channel 1): the D-pad turns it around him and raises or lowers it, C puts it behind him.
+        const coop::SplitTuning tuning;
+        if (MR::testSubPadButtonC(1)) {
+            sState.mFollow.recentre(second, toVec(sState.mSecond->mMario->getFrontVec()), tuning);
+        }
+        const float turn = (MR::testCorePadButtonRight(1) ? 0.04f : 0.0f) - (MR::testCorePadButtonLeft(1) ? 0.04f : 0.0f);
+        const float raise = (MR::testCorePadButtonUp(1) ? 12.0f : 0.0f) - (MR::testCorePadButtonDown(1) ? 12.0f : 0.0f);
+        sState.mFollow.steer(turn, raise, tuning);
+        sState.mFollowView = sState.mFollow.update(second, up, tuning);
+        // Kept in front of the first wall between the point it looks at and its eye.
+        const coop::Vec3 look = sState.mFollow.look();
+        const coop::Vec3 eye = sState.mFollow.eye();
+        TVec3f hit;
+        Triangle triangle;
+        if (MR::getFirstPolyOnLineToMap(&hit, &triangle, fromVec(look), fromVec(eye - look))) {
+            const coop::Vec3 wall = toVec(hit);
+            if (coop::finitef(coop::length(wall))) {
+                sState.mFollowView = coop::look_at(coop::camera_before_wall(look, wall, tuning.wall_margin),
+                                                   sState.mFollow.up(), look);
+            }
+        }
+        // On the first player's screen (y down): the second player from the first.
+        const coop::Vec3 d = second - first;
+        sState.mLayout.update(camera.view[0] * d.x + camera.view[1] * d.y + camera.view[2] * d.z,
+                              -(camera.view[4] * d.x + camera.view[5] * d.y + camera.view[6] * d.z));
+    }
+
+    // A half's projection: the game's, its picture moved to the middle of the half as the split eases in.
+    void setHalfProjection(CameraContext* pContext, bool second) {
+        coop::Array< float, 16 > projection = sState.mGameProjection;
+        const coop::Array< float, 2 > centre = sState.mLayout.centre(second, MR::getFrameBufferWidth(),
+                                                                    MR::getFrameBufferHeight());
+        coop::split_projection(projection, centre[0], centre[1], sState.mSplit.eased());
+        memcpy(&pContext->mProjection, &projection[0], sizeof(float) * 16);
+    }
+
+    void sendSplitClip(bool second) {
+        const coop::Array< float, 3 > plane = sState.mLayout.plane(second, MR::getFrameBufferWidth(),
+                                                                   MR::getFrameBufferHeight());
+        __NebulaGXSplitClip(&plane[0], second ? 2 : 1, nullptr);
     }
 
     void setHidden(bool hidden) {
@@ -161,7 +260,17 @@ namespace {
         pHolder->setMarioActor(pSecond);
         swapPads();
         if (sState.mPresent) {
+            // Split, his stick is relative to his own camera: the player code reads the scene's camera.
+            CameraContext* pContext = splitShown() ? cameraContext() : nullptr;
+            coop::CameraMatrices gameCamera;
+            if (pContext != nullptr) {
+                gameCamera = readCamera(pContext);
+                writeCamera(pContext, coop::blend_cameras(gameCamera, sState.mFollowView, sState.mSplit.eased()));
+            }
             pSecond->movement();
+            if (pContext != nullptr) {
+                writeCamera(pContext, gameCamera);
+            }
         }
         // MR::setPlayerPos moves the scene's player: him, in his turn.
         if (!sState.mPresent || sState.mTravelling || landBeside) {
@@ -170,25 +279,32 @@ namespace {
             MR::setPlayerPos(sState.mHeldAt);
         } else {
             sState.mParked = pSecond->mPosition;
-            // Too far for one screen for two seconds: brought back (until split screen).
-            const coop::CameraShare share = coop::shared_camera(toVec(pFirst->mPosition), toVec(pSecond->mPosition));
-            if (sState.mLeash.update(share.out_of_range, coop::CameraTuning().warp_frames)) {
-                MR::setPlayerPos(besideFirst());
-                OSReport("coop: second player brought back to the first\n");
-            }
         }
         swapPads();
         pHolder->setMarioActor(pFirst);
         gIsLuigi = ownIsLuigi;
 
         if (!sState.mPresent || sState.mLevelStart) {
-            sState.mLeash.reset();
+            sState.mSplit.reset();
+            sState.mFollow.reset();
+            sState.mLayout.reset();
             return;
         }
         bumpPlayers();
-        // The game camera looks at the first player's camera point: moved towards the second so both stay in view.
-        const coop::CameraShare share = coop::shared_camera(toVec(pFirst->mPosition), toVec(pSecond->mPosition));
-        pFirst->mCameraTrans += fromVec(share.offset);
+        CameraContext* pContext = cameraContext();
+        if (pContext == nullptr || holdHere || sState.mTravelling) {
+            // One screen while the game holds the players (a cutscene, a level's opening): the split eases out.
+            if (sState.mSplit.update(0.0f, 0.0f) == 0.0f) {
+                sState.mFollow.reset();
+                sState.mLayout.reset();
+            }
+        } else {
+            updateSplit(pContext, pFirst->mPosition, pSecond->mPosition);
+        }
+        // The game camera looks at the first player's camera point: moved towards the second so both stay in view,
+        // easing back to the first player as the screen splits.
+        const TVec3f apart = pSecond->mPosition - pFirst->mPosition;
+        pFirst->mCameraTrans += apart * (0.5f * (1.0f - sState.mSplit.eased()));
     }
 }  // namespace
 
@@ -222,7 +338,6 @@ namespace NebulaCoop {
         sState.mTravelling = true;
         sState.mHeldHere = false;
         sState.mHidden = false;
-        sState.mLeash.reset();
         sState.mPresentKnown = false;
         const TVec3f side = pActor->mMario->mSideVec;
         sState.mParked = pActor->mPosition + side * 120.0f;
@@ -239,6 +354,48 @@ namespace NebulaCoop {
         sState.mSecond = pSecond;
         OSReport("coop: players: first %s, second %s\n", sState.mOwnIsLuigi ? "Luigi" : "Mario",
                  sState.mOwnIsLuigi ? "Mario" : "Luigi");
+    }
+
+    bool beginSplitDraw() {
+        if (sState.mPass != 0 || sState.mSecond == nullptr || !sState.mPresent || !splitShown()) {
+            return false;
+        }
+        CameraContext* pContext = cameraContext();
+        if (pContext == nullptr) {
+            return false;
+        }
+        sState.mGameCamera = readCamera(pContext);
+        memcpy(&sState.mGameProjection[0], &pContext->mProjection, sizeof(float) * 16);
+        sState.mPass = 1;
+        setHalfProjection(pContext, false);
+        sendSplitClip(false);
+        return true;
+    }
+
+    void nextSplitPass() {
+        CameraContext* pContext = cameraContext();
+        sState.mPass = 2;
+        // His half: the first player's view panning to his own camera as the split eases in.
+        writeCamera(pContext, coop::blend_cameras(sState.mGameCamera, sState.mFollowView, sState.mSplit.eased()));
+        setHalfProjection(pContext, true);
+        MR::loadViewMtx();
+        SceneFunction::executeCalcViewAndEntryList();
+        sendSplitClip(true);
+    }
+
+    void endSplitDraw() {
+        CameraContext* pContext = cameraContext();
+        // The whole screen again for the 2D layer, and the line between the halves fading in with the split.
+        const coop::Array< float, 3 > line = sState.mLayout.plane(true, MR::getFrameBufferWidth(),
+                                                                  MR::getFrameBufferHeight());
+        const float none[3] = {0.0f, 0.0f, 0.0f};
+        const float separator[4] = {line[0], line[1], line[2], sState.mSplit.eased()};
+        __NebulaGXSplitClip(none, 0, separator);
+        writeCamera(pContext, sState.mGameCamera);
+        memcpy(&pContext->mProjection, &sState.mGameProjection[0], sizeof(float) * 16);
+        MR::loadViewMtx();
+        sState.mPass = 0;
+        MR::setDefaultViewportAndScissor();
     }
 
     void afterMovement(int category) {

@@ -1677,6 +1677,17 @@ void svc_gx_scene_marker(void*, uint32_t marker, const float* view) {
 #endif
 }
 
+void svc_gx_split_clip(void*, const float* plane, uint32_t pass, const float* separator) {
+#if defined(NEBULA_HOST_RENDERER)
+    static constexpr float kNone[4] = {};
+    galaxy::gx::attach_split_clip(plane, pass, separator != nullptr ? separator : kNone, gPendingSize);
+#else
+    (void)plane;
+    (void)pass;
+    (void)separator;
+#endif
+}
+
 void svc_gx_stripe_particle(void*, size_t span_offset, uint32_t particle, uint32_t age_lifetime, uint8_t strip) {
 #if defined(NEBULA_HOST_RENDERER)
     galaxy::gx::attach_stripe_particle(gPendingSize + span_offset, particle, age_lifetime, strip);
@@ -2975,6 +2986,7 @@ int main(int argc, char** argv) {
     services.gx_pe_marker = svc_gx_pe_marker;
     services.gx_peek_efb = svc_gx_peek_efb;
     services.gx_scene_marker = svc_gx_scene_marker;
+    services.gx_split_clip = svc_gx_split_clip;
     services.movie_frame = svc_movie_frame;
     services.code_patch = svc_code_patch;
     services.presence = svc_presence;

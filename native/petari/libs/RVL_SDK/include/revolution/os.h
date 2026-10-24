@@ -110,6 +110,8 @@ void* __NebulaFromPhysical(u32 paddr);
 void __NebulaGXSceneMarker(u32 marker, const f32 (*view)[4]);
 // A JPA stripe particle whose two vertices are written next (gx_stripe_particle in nebula_game_api.h).
 void __NebulaGXStripeParticle(u32 particle, u32 ageLifetime, u8 strip);
+// Co-op split screen's line at this point of the GX stream (gx_split_clip in nebula_game_api.h).
+void __NebulaGXSplitClip(const f32* plane, u32 pass, const f32* separator);
 // A stable 32-bit name for a game object: its physical address (OSCachedToPhysical) when in the game's memory.
 u32 __NebulaObjectId(const void* pObject);
 // The draw-sync token whose callback runs (0 after it): GXPeek reads the EFB as the stream reached it.

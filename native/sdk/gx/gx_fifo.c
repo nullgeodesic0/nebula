@@ -286,6 +286,13 @@ void __NebulaGXSceneMarker(u32 marker, const f32 (*view)[4]) {
     }
 }
 
+void __NebulaGXSplitClip(const f32* plane, u32 pass, const f32* separator) {
+    if (sLinked) {
+        submit();
+        nebula_host()->gx_split_clip(nebula_host()->user, plane, pass, separator);
+    }
+}
+
 void __NebulaGXStripeParticle(u32 particle, u32 ageLifetime, u8 strip) {
     if (__NebulaGXMarkers != 0) {
         nebula_host()->gx_stripe_particle(nebula_host()->user, (size_t)(__NebulaGXWriter.ptr - sSpanStart), particle,

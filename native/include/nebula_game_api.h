@@ -23,7 +23,7 @@ extern "C" {
 #define NEBULA_GAME_API __attribute__((visibility("default")))
 #endif
 
-#define NEBULA_GAME_API_VERSION 21u
+#define NEBULA_GAME_API_VERSION 22u
 
 /* A physical range of the game's memory and where it is in the host process: what the GPU's addresses resolve to. */
 typedef struct NebulaGameMemoryRegion {
@@ -430,6 +430,10 @@ typedef struct NebulaHostServices {
     /* 1 while a Nebula screen with small text shows (the settings menu, the achievement board): the 2D layer at the
        window's resolution whatever the HUD's; 0 after. */
     void (*sharp_2d)(void* user, uint32_t on);
+    /* Co-op split screen, at this point of the GX stream: the 3D pass that follows keeps the pixels where
+       plane[0] * x + plane[1] * y + plane[2] >= 0 (EFB pixels), pass 1 or 2 (each half's own EFB copies); pass 0 and a
+       zero plane end the split, and `separator` (a, b, c, strength) draws the line between the halves. */
+    void (*gx_split_clip)(void* user, const float* plane, uint32_t pass, const float* separator);
 } NebulaHostServices;
 
 enum {

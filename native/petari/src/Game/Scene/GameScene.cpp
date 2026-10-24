@@ -1,4 +1,5 @@
 #include "Game/Scene/GameScene.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #ifdef TARGET_PC
 #include "Game/Util/GameLightSignal.hpp"
 #include "Game/Util/MotionSignal.hpp"
@@ -552,6 +553,17 @@ void GameScene::draw3D() const {
     if (isPlayMovie()) {
         return;
     }
+
+#ifdef TARGET_PC
+    // Nebula's co-op split screen: the scene twice, each player's half with his camera (NebulaCoop.hpp).
+    if (NebulaCoop::beginSplitDraw()) {
+        draw3D();
+        NebulaCoop::nextSplitPass();
+        draw3D();
+        NebulaCoop::endSplitDraw();
+        return;
+    }
+#endif
 
     f32 sceneCamera[4][4];
     MotionSignal::sceneCamera(sceneCamera);
