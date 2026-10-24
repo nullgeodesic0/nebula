@@ -110,6 +110,64 @@ def _rarc_nodes(d):
     return base + struct.unpack_from('>I', d, 0x0C)[0], files
 
 
+def _rarc_hash(name):
+    h = 0
+    for c in name.encode('shift-jis'):
+        h = (h * 3 + c) & 0xFFFF
+    return h
+
+
+def rarc_add(d, add):
+    """The RARC with new files (name -> bytes) added to its root folder, ahead of its other entries. The
+    archives here number their files by entry (sync flag), so every file's id is renumbered."""
+    d = bytes(d)
+    nd, nodeoff, nf, fileoff, strsize, stroff = struct.unpack_from('>6I', d, 0x20)
+    clash = set(add) & set(rarc_files(d))
+    if clash:
+        raise KeyError('already in the archive: %s' % ', '.join(sorted(clash)))
+    data_start = 0x20 + struct.unpack_from('>I', d, 0x0C)[0]
+    data = bytearray(d[data_start:data_start + struct.unpack_from('>I', d, 0x10)[0]])
+    nodes = [bytearray(d[0x20 + nodeoff + i * 16:0x20 + nodeoff + i * 16 + 16]) for i in range(nd)]
+    entries = [bytearray(d[0x20 + fileoff + i * 20:0x20 + fileoff + i * 20 + 20]) for i in range(nf)]
+    strings = bytearray(d[0x20 + stroff:0x20 + stroff + strsize]).rstrip(b'\0') + b'\0'
+    # Flags of an ordinary file entry of the archive.
+    flags = next(struct.unpack_from('>H', e, 4)[0] for e in entries
+                 if struct.unpack_from('>H', e, 0)[0] != 0xFFFF and not (e[4] & 0x02))
+    new = []
+    for name, blob in add.items():
+        data += b'\0' * ((-len(data)) % 32)
+        e = bytearray(20)
+        struct.pack_into('>HHHHII', e, 0, 0, _rarc_hash(name), flags, len(strings), len(data), len(blob))
+        strings += name.encode('shift-jis') + b'\0'
+        data += blob
+        new.append(e)
+    data += b'\0' * ((-len(data)) % 32)
+    if len(strings) > 0x10000:
+        raise ValueError('RARC string table too large')
+    root_first = struct.unpack_from('>I', nodes[0], 12)[0]
+    entries[root_first:root_first] = new
+    struct.pack_into('>H', nodes[0], 10, struct.unpack_from('>H', nodes[0], 10)[0] + len(new))
+    for n in nodes[1:]:
+        struct.pack_into('>I', n, 12, struct.unpack_from('>I', n, 12)[0] + len(new))
+    for i, e in enumerate(entries):
+        if struct.unpack_from('>H', e, 0)[0] != 0xFFFF:
+            struct.pack_into('>H', e, 0, i)
+
+    def pad(b):
+        return bytes(b) + b'\0' * ((-len(b)) % 32)
+    node_block = pad(b''.join(nodes))
+    entry_block = pad(b''.join(entries))
+    string_block = pad(strings)
+    info = bytearray(d[0x20:0x40])
+    struct.pack_into('>6I', info, 0, nd, 0x20, len(entries), 0x20 + len(node_block),
+                     len(string_block), 0x20 + len(node_block) + len(entry_block))
+    struct.pack_into('>H', info, 0x18, len(entries))
+    body = bytes(info) + node_block + entry_block + string_block
+    head = bytearray(d[:0x20])
+    struct.pack_into('>IIIIII', head, 4, 0x20 + len(body) + len(data), 0x20, len(body), len(data), len(data), 0)
+    return bytes(head) + body + bytes(data)
+
+
 def rarc_files(d):
     """name -> bytes for every file of a (decompressed) RARC; names are unique in the archives used here."""
     start, files = _rarc_nodes(d)

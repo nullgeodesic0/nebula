@@ -150,6 +150,23 @@ py -3 tools/animations/build_animation_mod.py --blend <animation .blend> --conte
   first frame of Odyssey's idle face. Blinks and closed eyes come from the rig's eyelid bones in the
   animation .blend (the idle blinks once per loop); the face file's bone-visibility tracks are not used.
 
+### Odyssey Luigi (for co-op)
+
+```
+py -3 tools/animations/build_odyssey_luigi_mod.py --gltf Luigi.gltf --content <content>
+```
+
+Run after the Mario model build on the same content; it appends `Luigi.arc` and Luigi's power-up models
+(Bee, Ice, Invincible, Hopper, Bone) to `mods/model/manifest.txt`. Galaxy's Luigi has Mario's 30 joints and
+plays Mario's animations, so the Luigi model takes the Mario model's whole 100-joint skeleton (its added
+joints read from the built `Mario.arc`). The glTF (`gltf.py`) is Odyssey's Luigi on the Odyssey rig, with
+no face rig or finger bones: the face, cap and fingers ride on Head and the hands, and his face does not
+animate. The animations set every joint's offset, so each limb and spine segment of the mesh is stretched
+along its bone onto Galaxy's joint spacing (legs 0.70 to 0.84, arms up to 1.42, neck 1.33); across the bone
+one overall scale holds. The export wrote its normals Z-up while the positions are Y-up; the builder picks
+the frame in which the normals agree with the triangles' winding. glTF's texture v runs downward, Blender's
+up. The closed eyelids are left out; the cap-off hair stays (it is also the hair below the cap).
+
 ## Voices (F1 > General > Custom voice)
 
 `build_voice_mod.py` converts the SMO voice clips to 16-bit mono 32 kHz WAVs in `<content>\mods\voice`,
