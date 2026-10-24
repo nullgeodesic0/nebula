@@ -1,4 +1,5 @@
 #include "Game/MapObj/SuperSpinDriver.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/LiveActor/HitSensor.hpp"
 #include "Game/LiveActor/LiveActor.hpp"
 #include "Game/LiveActor/Nerve.hpp"
@@ -55,6 +56,9 @@ SuperSpinDriver::SuperSpinDriver(const char* pName, s32 color)
 }
 
 void SuperSpinDriver::init(const JMapInfoIter& rIter) {
+#ifdef TARGET_PC
+    NebulaCoop::noteLaunchStar(this);
+#endif
     MR::initDefaultPos(this, rIter);
     initModelManagerWithAnm("SuperSpinDriver", nullptr, false);
     MR::connectToSceneNoSilhouettedMapObjStrongLight(this);

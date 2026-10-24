@@ -19,6 +19,10 @@ public:
     void callMethodAllObj(NameObjMethod pMethod);
     void clearArray();
     NameObj* find(const char* pName);
+#ifdef TARGET_PC
+    // Nebula: each object of the holder in turn (tests).
+    void forEach(void (*pFunc)(NameObj*, void*), void* pData);
+#endif
 
 private:
     /* 0x00 */ MR::Vector< MR::AssignableArray< NameObj* > > mObjArray1;

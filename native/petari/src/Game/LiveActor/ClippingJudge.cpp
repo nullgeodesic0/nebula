@@ -4,6 +4,7 @@
 #ifdef TARGET_PC
 #include "Game/Map/LightDataHolder.hpp"
 #include "Game/Map/LightDirector.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/Scene/SceneObjHolder.hpp"
 #include <nebula_game_api.h>
 #include <revolution/os.h>
@@ -15,6 +16,11 @@ namespace {
     bool sShadowCasters;
     // Ray-traced light wants clipped light sources whose light reaches the view (ClippingActorInfo::judgeShadowDraw).
     bool sLightSources;
+    // Co-op split screen: the other half's camera, whose view keeps objects too (an object is clipped only when
+    // neither half sees it).
+    bool sSecondView;
+    THex3f sSecondFrustum;
+    THex3f sSecondClipFrustums[8];
 };  // namespace
 #endif
 
@@ -48,6 +54,14 @@ void ClippingJudge::movement() {
     }
 #ifdef TARGET_PC
     updateShadowCasters();
+    TPos3f secondView;
+    sSecondView = NebulaCoop::getOtherHalfView(&secondView);
+    if (sSecondView) {
+        calcViewingVolumeFrom(&sSecondFrustum, MR::getFarZ(), secondView);
+        for (u32 i = 1; i < 8; i++) {
+            calcViewingVolumeFrom(&sSecondClipFrustums[i], mClipDistances[i], secondView);
+        }
+    }
 #endif
 }
 
@@ -118,14 +132,30 @@ bool ClippingJudge::isShadowCasterInView(const TVec3f& rCenter, f32 radius, s32 
 #endif
 
 bool ClippingJudge::isJudgedToClipFrustum(const TVec3f& rVec, f32 a2) const {
+#ifdef TARGET_PC
+    if (sSecondView && sSecondFrustum.mayIntersectBall3(rVec, a2)) {
+        return false;
+    }
+#endif
     return !mFrustum.mayIntersectBall3(rVec, a2);
 }
 
 bool ClippingJudge::isJudgedToClipFrustum(const TVec3f& rVec, f32 a2, s32 index) const {
+#ifdef TARGET_PC
+    if (sSecondView && ((!index) ? sSecondFrustum : sSecondClipFrustums[index]).mayIntersectBall3(rVec, a2)) {
+        return false;
+    }
+#endif
     return (!index) ? !mFrustum.mayIntersectBall3(rVec, a2) : !mClipFrustums[index].mayIntersectBall3(rVec, a2);
 }
 
 void ClippingJudge::calcViewingVolume(THex3f* pVolume, f32 farClip) {
+#ifdef TARGET_PC
+    calcViewingVolumeFrom(pVolume, farClip, MR::getCameraViewMtx());
+}
+
+void ClippingJudge::calcViewingVolumeFrom(THex3f* pVolume, f32 farClip, const TPos3f& rViewMtx) {
+#endif
     f32 nearClip = 500.0f;
     if (MR::isSubjectiveCameraOnForObjClipping()) {
         nearClip = 100.0f;
@@ -134,7 +164,11 @@ void ClippingJudge::calcViewingVolume(THex3f* pVolume, f32 farClip) {
     f32 aspect = MR::getAspect();
     f32 fovy = MR::getRenderFovy();
     TPos3f cameraMtx;
+#ifdef TARGET_PC
+    cameraMtx.setPositionFromLookAt(rViewMtx);
+#else
     cameraMtx.setPositionFromLookAt(MR::getCameraViewMtx());
+#endif
     f32 height = nearClip * static_cast< f32 >(tan(fovy * (JGeometry::TUtil< f32 >::PI() / 360.0f)));
     f32 width = aspect * height;
 

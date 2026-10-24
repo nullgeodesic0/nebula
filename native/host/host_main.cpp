@@ -1688,6 +1688,26 @@ void svc_gx_split_clip(void*, const float* plane, uint32_t pass, const float* se
 #endif
 }
 
+uint32_t svc_luigi_swap(void*, char* out, uint32_t size) {
+    if (size == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+#if defined(NEBULA_HOST_RENDERER)
+    for (const galaxy::mods::ModInfo& mod : galaxy::mods::session_mods().started_with) {
+        if (!mod.enabled) continue;
+        std::ifstream file(mod.path / "luigi_swap.txt", std::ios::binary);
+        if (!file) continue;
+        file.read(out, size - 1);
+        const auto length = static_cast<uint32_t>(file.gcount());
+        out[length] = '\0';
+        std::fprintf(stderr, "[anim] Luigi's swap table from mod %s (%u bytes)\n", mod.id.c_str(), length);
+        return length;
+    }
+#endif
+    return 0;
+}
+
 void svc_gx_stripe_particle(void*, size_t span_offset, uint32_t particle, uint32_t age_lifetime, uint8_t strip) {
 #if defined(NEBULA_HOST_RENDERER)
     galaxy::gx::attach_stripe_particle(gPendingSize + span_offset, particle, age_lifetime, strip);
@@ -2014,6 +2034,13 @@ uint32_t svc_option(void*, uint32_t what) {
 #else
         return 0;
 #endif
+    case NEBULA_OPTION_TEST_LAUNCH_STAR: {
+        static const uint32_t turn = [] {
+            const char* value = std::getenv("GALAXY_TEST_LAUNCH_STAR");
+            return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+        }();
+        return turn;
+    }
     case NEBULA_OPTION_TEST_DOWN_SECOND: {
         static const uint32_t turn = [] {
             const char* value = std::getenv("GALAXY_TEST_DOWN_SECOND");
@@ -2994,6 +3021,7 @@ int main(int argc, char** argv) {
     services.gx_peek_efb = svc_gx_peek_efb;
     services.gx_scene_marker = svc_gx_scene_marker;
     services.gx_split_clip = svc_gx_split_clip;
+    services.luigi_swap = svc_luigi_swap;
     services.movie_frame = svc_movie_frame;
     services.code_patch = svc_code_patch;
     services.presence = svc_presence;

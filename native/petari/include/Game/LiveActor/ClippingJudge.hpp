@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Game/NameObj/NameObj.hpp"
+#include <JSystem/JGeometry.hpp>
 #include <JSystem/JGeometry/THex.hpp>
 
 class ClippingJudge : public NameObj {
@@ -26,6 +27,8 @@ public:
     // The traced sun's direction of travel this frame, else the key light's (none: the option is off or the stage has
     // neither).
     void updateShadowCasters();
+    // calcViewingVolume from a given camera (co-op split screen's other half).
+    void calcViewingVolumeFrom(THex3f*, f32, const TPos3f&);
 #endif
 
     /* 0x0C */ THex3f mFrustum;

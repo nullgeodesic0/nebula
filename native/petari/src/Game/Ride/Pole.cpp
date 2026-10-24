@@ -1,4 +1,5 @@
 #include "Game/Ride/Pole.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/LiveActor/HitSensor.hpp"
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Util/ActorCameraUtil.hpp"
@@ -224,7 +225,12 @@ void Pole::exeDemoAppear() {
 }
 
 void Pole::exeFree() {
+#ifdef TARGET_PC
+    // Nebula's co-op: the grab point slides to the nearer brother.
+    MR::calcPerpendicFootToLineInside(&mPosition, *NebulaCoop::nearerPlayerCenter(mPosition), mTopPos, mBasePos);
+#else
     MR::calcPerpendicFootToLineInside(&mPosition, *MR::getPlayerCenterPos(), mTopPos, mBasePos);
+#endif
 }
 
 void Pole::exeFreeInvalid() {

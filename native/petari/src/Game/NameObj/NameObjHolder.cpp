@@ -52,6 +52,14 @@ void NameObjHolder::clearArray() {
     mObjArray2.clear();
 }
 
+#ifdef TARGET_PC
+void NameObjHolder::forEach(void (*pFunc)(NameObj*, void*), void* pData) {
+    for (NameObj** ppObj = mObjArray1.begin(); ppObj != mObjArray1.end(); ppObj++) {
+        pFunc(*ppObj, pData);
+    }
+}
+#endif
+
 NameObj* NameObjHolder::find(const char* pName) {
     NameObj** pCached = std::find_if(mObjArray2.begin(), mObjArray2.end(), equal_fullname(pName));
     if (pCached != mObjArray2.end()) {

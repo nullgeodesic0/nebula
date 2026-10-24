@@ -52,10 +52,57 @@ void MarioAnimator_FORCE_MATCH_SDATA2() {
     (void)-0.5f;
 }
 
+#ifdef TARGET_PC
+namespace {
+    // Luigi's swap table from the enabled mods' luigi_swap.txt (custom animations: Galaxy's Luigi clips where the
+    // mod changed Mario's, the mod's own where Luigi shares them), read once; null when no mod has one.
+    XanimeSwapTable* modLuigiSwapTable() {
+        static bool sRead;
+        static char sText[8192];
+        static XanimeSwapTable sTable[256];
+        static XanimeSwapTable* spTable;
+        if (sRead) {
+            return spTable;
+        }
+        sRead = true;
+        if (__NebulaLuigiSwap(sText, sizeof(sText)) == 0) {
+            return nullptr;
+        }
+        u32 count = 0;
+        char* pLine = sText;
+        while (*pLine != '\0' && count < ARRAY_SIZE(sTable) - 1) {
+            char* pEnd = strchr(pLine, '\n');
+            if (pEnd != nullptr) {
+                *pEnd = '\0';
+            }
+            char* pNext = pEnd != nullptr ? pEnd + 1 : pLine + strlen(pLine);
+            char* pFirst = strtok(pLine, " \t\r");
+            char* pSecond = pFirst != nullptr && pFirst[0] != '#' ? strtok(nullptr, " \t\r") : nullptr;
+            if (pSecond != nullptr) {
+                sTable[count].mOriginal = pFirst;
+                sTable[count].mSwapped = pSecond;
+                count++;
+            }
+            pLine = pNext;
+        }
+        sTable[count].mOriginal = "";
+        sTable[count].mSwapped = "";
+        OSReport("Luigi's animations: %u swaps from the mods' luigi_swap.txt\n", count);
+        spTable = sTable;
+        return spTable;
+    }
+}  // namespace
+#endif
+
 void MarioAnimator::init() {
     XanimeSwapTable* luigiAnimations = nullptr;
     if (gIsLuigi) {
         luigiAnimations = luigiAnimeSwapTable;
+#ifdef TARGET_PC
+        if (XanimeSwapTable* pModTable = modLuigiSwapTable()) {
+            luigiAnimations = pModTable;
+        }
+#endif
     }
 
     XanimeGroupInfo* pGroups = marioAnimeTable;

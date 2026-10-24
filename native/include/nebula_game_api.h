@@ -23,7 +23,7 @@ extern "C" {
 #define NEBULA_GAME_API __attribute__((visibility("default")))
 #endif
 
-#define NEBULA_GAME_API_VERSION 22u
+#define NEBULA_GAME_API_VERSION 23u
 
 /* A physical range of the game's memory and where it is in the host process: what the GPU's addresses resolve to. */
 typedef struct NebulaGameMemoryRegion {
@@ -146,6 +146,8 @@ enum {
                                    Wii Remote channel 1 is connected and sits out otherwise), 0: one player */
     NEBULA_OPTION_TEST_DOWN_SECOND, /* tests (GALAXY_TEST_DOWN_SECOND): the co-op second player's turn at which he
                                        falls (MarioActor::forceKill), 0 never */
+    NEBULA_OPTION_TEST_LAUNCH_STAR, /* tests (GALAXY_TEST_LAUNCH_STAR): the co-op second player's turn at which the
+                                       first player is put on the scene's launch star (SuperSpinDriver), 0 never */
 };
 
 /* NEBULA_OPTION_MOVESET: the moves on, then each of them, and whether a co-op second player has them too. */
@@ -436,6 +438,9 @@ typedef struct NebulaHostServices {
        plane[0] * x + plane[1] * y + plane[2] >= 0 (EFB pixels), pass 1 or 2 (each half's own EFB copies); pass 0 and a
        zero plane end the split, and `separator` (a, b, c, strength) draws the line between the halves. */
     void (*gx_split_clip)(void* user, const float* plane, uint32_t pass, const float* separator);
+    /* Luigi's animation swap table from the enabled mods (the first with a luigi_swap.txt: "<bck> <bck>" lines,
+       # comments), as text into `out` (at most `size` bytes, NUL-terminated); its length, 0 when no mod has one. */
+    uint32_t (*luigi_swap)(void* user, char* out, uint32_t size);
 } NebulaHostServices;
 
 enum {

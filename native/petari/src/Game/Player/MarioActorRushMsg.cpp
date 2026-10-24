@@ -2,6 +2,7 @@
 #include "Game/Player/MarioActor.hpp"
 #include "Game/Player/MarioAnimator.hpp"
 #include "Game/Player/MarioState.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #include "Game/Player/RushEndInfo.hpp"
 #include "Game/Screen/GameSceneLayoutHolder.hpp"
 #include "Game/Util/ActorSensorUtil.hpp"
@@ -11,6 +12,11 @@ void MarioActor::addRushSensor(HitSensor* pSensor, bool myBool) {
     if (!MR::isSensorAutoRush(pSensor) && !MR::isSensorRush(pSensor)) {
         return;
     }
+#ifdef TARGET_PC
+    if (!NebulaCoop::mayRush(this, pSensor)) {
+        return;
+    }
+#endif
 
     _7E4[_930] = pSensor;
     _8E4[_930] = myBool;

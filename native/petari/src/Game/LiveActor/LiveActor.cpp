@@ -1,4 +1,5 @@
 #include "Game/LiveActor/LiveActor.hpp"
+#include "Game/Player/NebulaCoop.hpp"
 #ifdef TARGET_PC
 #include "Game/Util/MotionSignal.hpp"
 #endif
@@ -108,6 +109,9 @@ void LiveActor::makeActorDead() {
 }
 
 void LiveActor::movement() {
+#ifdef TARGET_PC
+    NebulaCoop::BoundObjectScope coopScope(this);
+#endif
     if (mModelManager != nullptr && !mFlag.mIsStoppedAnim) {
         mModelManager->update();
 

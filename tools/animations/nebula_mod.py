@@ -8,7 +8,8 @@ mod (Settings > Mods), so the disc needs no patched file table.
 Each input is a folder one of the build scripts wrote: a disc mod (manifest.txt, from build_animation_mod.py,
 build_model_mod.py, build_odyssey_model_mod.py or build_odyssey_luigi_mod.py) or the voice clips (voices.txt,
 from build_voice_mod.py). A disc mod's manifest names each archive's disc path on its file-table line and the
-built file at the offset that line points it to. Later inputs win where two give the same file. Everything is the
+built file at the offset that line points it to. Later inputs win where two give the same file. An animation mod's
+luigi_swap.txt (Luigi's animation swap table) goes to the mod's top folder, where the game reads it. Everything is the
 player's own build and stays on their PC: never commit or share the result.
 """
 import argparse
@@ -53,9 +54,12 @@ def main():
 
     files = {}
     voice = None
+    luigi_swap = None
     for folder in args.inputs:
         if os.path.isfile(os.path.join(folder, 'manifest.txt')):
             files.update(disc_files(folder))
+            if os.path.isfile(os.path.join(folder, 'luigi_swap.txt')):
+                luigi_swap = os.path.join(folder, 'luigi_swap.txt')
         elif os.path.isfile(os.path.join(folder, 'voices.txt')):
             voice = folder
         else:
@@ -73,6 +77,9 @@ def main():
             shutil.rmtree(target)
         shutil.copytree(voice, target)
         print('voice/  (%d clips)' % sum(1 for name in os.listdir(target) if name.lower().endswith('.wav')))
+    if luigi_swap is not None:
+        shutil.copyfile(luigi_swap, os.path.join(args.out, 'luigi_swap.txt'))
+        print('luigi_swap.txt')
     with open(os.path.join(args.out, 'readme.txt'), 'w', newline='\n') as note:
         note.write('Built on this PC by tools/animations from the player\'s own files. Not for sharing.\n')
 

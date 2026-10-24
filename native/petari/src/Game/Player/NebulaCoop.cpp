@@ -5,6 +5,9 @@
 #include "Game/Player/MarioActor.hpp"
 #include "Game/Camera/CameraContext.hpp"
 #include "Game/Map/HitInfo.hpp"
+#include "Game/NameObj/NameObjHolder.hpp"
+#include "Game/System/GameSystemSceneController.hpp"
+#include "Game/LiveActor/HitSensor.hpp"
 #include "Game/Player/MarioHolder.hpp"
 #include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/Scene/GameSceneFunction.hpp"
@@ -16,7 +19,9 @@
 #include "Game/Util/ActorSensorUtil.hpp"
 #include "Game/Util/CameraUtil.hpp"
 #include "Game/Util/DemoUtil.hpp"
+#include "Game/Util/ActorShadowUtil.hpp"
 #include "Game/Util/DrawUtil.hpp"
+#include "Game/Util/EffectUtil.hpp"
 #include "Game/Util/GamePadUtil.hpp"
 #include "Game/Util/LiveActorUtil.hpp"
 #include "Game/Util/MapUtil.hpp"
@@ -25,6 +30,7 @@
 #include "Game/System/GameDataFunction.hpp"
 #include "Game/Util/SceneUtil.hpp"
 #include "Game/Util/SingletonHolder.hpp"
+#include "Game/Util/StringUtil.hpp"
 #include <nebula_coop.h>
 #include <nebula_game_api.h>
 #include <revolution/os.h>
@@ -59,6 +65,13 @@ namespace {
         coop::SplitLayout mLayout;
         coop::FollowCamera mFollow;
         coop::CameraMatrices mFollowView;
+        // The second player's own event (his launch star, pipe, warp): the game camera is his, and the first
+        // player's half follows him with this camera meanwhile.
+        bool mSecondEvent;
+        coop::FollowCamera mFirstFollow;
+        coop::CameraMatrices mFirstFollowView;
+        // Where the second player stood when the first player's trip began (the catch-up after it).
+        TVec3f mTripStart;
         // While the scene draws split: the pass (0 none, 1 the first player's half, 2 the second's) and the game
         // camera it restores after.
         u32 mPass;
@@ -71,6 +84,46 @@ namespace {
     // second to him.
     const u32 kCatchUpHeldFrames = 30;
     const f32 kCatchUpDistance = 3000.0f;
+    const f32 kCatchUpStillDistance = 300.0f;
+
+    // A launch star's virtual table (GALAXY_TEST_LAUNCH_STAR tells launch stars by it).
+    const void* sLaunchStarClass;
+
+    struct NearestStar {
+        TVec3f mFrom;
+        LiveActor* mStar;
+        f32 mDistance;
+    };
+
+    void considerStar(NameObj* pObj, void* pData) {
+        NearestStar* pNearest = static_cast< NearestStar* >(pData);
+        if (pObj == nullptr || *reinterpret_cast< const void* const* >(pObj) != sLaunchStarClass) {
+            return;
+        }
+        LiveActor* pStar = static_cast< LiveActor* >(pObj);
+        const f32 distance = PSVECDistance(&pStar->mPosition, &pNearest->mFrom);
+        if (!MR::isDead(pStar) && !MR::isHiddenModel(pStar) && distance < pNearest->mDistance) {
+            pNearest->mStar = pStar;
+            pNearest->mDistance = distance;
+        }
+    }
+
+    // GALAXY_TEST_LAUNCH_STAR: the first player put on the scene's nearest launch star in play (a shake fires it).
+    void testLaunchStar() {
+        NameObjHolder* pHolder = SingletonHolder< GameSystem >::get()->mSceneController->mObjHolder;
+        NearestStar nearest = {sState.mFirst->mPosition, nullptr, 1.0e9f};
+        if (pHolder != nullptr && sLaunchStarClass != nullptr) {
+            pHolder->forEach(considerStar, &nearest);
+        }
+        LiveActor* pStar = nearest.mStar;
+        if (pStar == nullptr) {
+            OSReport("coop test: no launch star in this scene\n");
+            return;
+        }
+        OSReport("coop test: the first player to the launch star at %.0f %.0f %.0f (%s)\n", pStar->mPosition.x,
+                 pStar->mPosition.y, pStar->mPosition.z, MR::isDead(pStar) ? "dead" : "alive");
+        MR::setPlayerPos(pStar->mPosition);
+    }
 
     WPadHolder* padHolder() {
         GameSystem* pSystem = SingletonHolder< GameSystem >::get();
@@ -133,7 +186,7 @@ namespace {
 
     // After both players moved: whether the screen splits (a player about to leave the shared picture, or far
     // apart), the line between the halves (square to where the second player is on screen) and his own camera.
-    void updateSplit(CameraContext* pContext, const TVec3f& rFirst, const TVec3f& rSecond) {
+    void updateSplit(CameraContext* pContext, const TVec3f& rFirst, const TVec3f& rSecond, bool soloEvent) {
         const coop::CameraMatrices camera = readCamera(pContext);
         const coop::Vec3 first = toVec(rFirst);
         const coop::Vec3 second = toVec(rSecond);
@@ -141,7 +194,9 @@ namespace {
         const float depth = coop::length(coop::pose_of(camera.inverse).eye - middle);
         const float extent = coop::shared_view_extent(camera, first, second, depth, pContext->mFovy,
                                                       pContext->mAspectRatio);
-        if (sState.mSplit.update(extent, coop::length(second - first)) == 0.0f) {
+        // One brother's own event (a launch star, a pipe, a warp) splits the screen even with the two together, so
+        // the other keeps his own view.
+        if (sState.mSplit.update(soloEvent ? HUGE_VALF : extent, coop::length(second - first)) == 0.0f) {
             sState.mFollow.reset();
             sState.mLayout.reset();
             return;
@@ -219,18 +274,54 @@ namespace {
         OSReport("coop: second player down (%s)\n", sState.mDown.out ? "no lives left" : "back soon");
     }
 
+    // The game's player is the second for a while (his turn, an object he is bound to): his character, his
+    // MarioActor as the MarioHolder's and his controller as channel 0's.
+    void enterSecond() {
+        gIsLuigi = !sState.mOwnIsLuigi;
+        MR::getMarioHolder()->setMarioActor(sState.mSecond);
+        swapPads();
+    }
+
+    void leaveSecond() {
+        swapPads();
+        MR::getMarioHolder()->setMarioActor(sState.mFirst);
+        gIsLuigi = sState.mOwnIsLuigi;
+    }
+
+    // The object a player rides or is bound to (his rush partner), or null.
+    const LiveActor* riddenBy(const MarioActor* pActor) {
+        return pActor != nullptr && pActor->_934 && pActor->_924 != nullptr ? pActor->_924->mHost : nullptr;
+    }
+
+    // The first player rides a vehicle (the Star Ball, the manta ray): the second goes along unseen at his side.
+    bool firstOnVehicle() {
+        const LiveActor* pRide = riddenBy(sState.mFirst);
+        return pRide != nullptr && (const_cast< LiveActor* >(pRide)->getSensor("Bind") != nullptr &&
+                                        const_cast< LiveActor* >(pRide)->getSensor("Bind")->isType(ATYPE_SPHERE_PLAYER_BIND) ||
+                                    MR::isEqualString(pRide->mName, "SurfRay") ||
+                                    MR::isEqualString(pRide->mName, "SurfRayTutorial"));
+    }
+
     void setHidden(bool hidden) {
         if (hidden == sState.mHidden) {
             return;
         }
         sState.mHidden = hidden;
         MarioActor* pSecond = sState.mSecond;
+        // Hidden, he is inert: no model, shadow, effects or sensors (nothing hits him, he collects nothing).
         if (hidden) {
             MR::hideModel(pSecond);
             MR::invalidateHitSensors(pSecond);
+            if (pSecond->mShadowControllerList != nullptr) {
+                MR::invalidateShadowAll(pSecond);
+            }
+            MR::forceDeleteEffectAll(pSecond);
         } else {
             MR::showModel(pSecond);
             MR::validateHitSensors(pSecond);
+            if (pSecond->mShadowControllerList != nullptr) {
+                MR::validateShadowAll(pSecond);
+            }
         }
         pSecond->_482 = hidden;
     }
@@ -281,18 +372,24 @@ namespace {
         }
         // The first player taken somewhere far while the game had his controls (a launch star, a pipe, a warp):
         // the second joins him there once he has landed and has control again.
+        // The second plays on meanwhile; the catch-up is for a second player who stood still through it.
         if (sState.mControllableFrames == 0) {
+            if (sState.mHeldFrames == 0) {
+                sState.mTripStart = pSecond->mPosition;
+            }
             sState.mHeldFrames++;
         } else if (sState.mControllableFrames == coop::kLevelStartSettleFrames) {
             if (sState.mHeldFrames >= kCatchUpHeldFrames && sState.mPresent && !sState.mDown.down &&
-                PSVECDistance(&pFirst->mPosition, &pSecond->mPosition) > kCatchUpDistance) {
+                PSVECDistance(&pFirst->mPosition, &pSecond->mPosition) > kCatchUpDistance &&
+                PSVECDistance(&sState.mTripStart, &pSecond->mPosition) < kCatchUpStillDistance) {
                 landBeside = true;
                 OSReport("coop: second player joins the first after his trip\n");
             }
             sState.mHeldFrames = 0;
         }
         sState.mTravelling = coop::keep_travelling(sState.mTravelling, sState.mLevelStart, sState.mControllableFrames);
-        const bool holdHere = !sState.mTravelling && coop::second_player_waits(firstHeld, demo);
+        // A cutscene holds him where he stands; the first player's own trips (his controls held) do not.
+        const bool holdHere = !sState.mTravelling && demo;
         if (holdHere && !sState.mHeldHere) {
             sState.mHeldAt = pSecond->mPosition;
         }
@@ -309,15 +406,17 @@ namespace {
             }
         }
         const bool down = sState.mDown.down;
-        setHidden(!sState.mPresent || sState.mLevelStart || down);
+        // The first player's vehicle: the second rides along unseen at his side, and gets off beside him.
+        const bool riding = sState.mPresent && firstOnVehicle();
+        setHidden(!sState.mPresent || sState.mLevelStart || down || riding);
+
+        if (!sState.mLevelStart && sState.mTurns + 1 == __NebulaOption(NEBULA_OPTION_TEST_LAUNCH_STAR)) {
+            testLaunchStar();
+        }
 
         // His turn.
-        MarioHolder* pHolder = MR::getMarioHolder();
-        const bool ownIsLuigi = sState.mOwnIsLuigi;
-        gIsLuigi = !ownIsLuigi;
-        pHolder->setMarioActor(pSecond);
-        swapPads();
-        if (sState.mPresent && !down) {
+        enterSecond();
+        if (sState.mPresent && !down && !riding) {
             // Split, his stick is relative to his own camera: the player code reads the scene's camera.
             CameraContext* pContext = splitShown() ? cameraContext() : nullptr;
             coop::CameraMatrices gameCamera;
@@ -344,18 +443,16 @@ namespace {
         if (comeBack) {
             // Back from a fall: beside the first, his state as at a fresh start.
             MR::setPlayerPosAndWait(besideFirst());
-        } else if (!sState.mPresent || sState.mTravelling || landBeside || down) {
+        } else if (!sState.mPresent || sState.mTravelling || landBeside || down || riding) {
             MR::setPlayerPos(sState.mLevelStart ? sState.mParked : besideFirst());
         } else if (holdHere) {
             MR::setPlayerPos(sState.mHeldAt);
         } else {
             sState.mParked = pSecond->mPosition;
         }
-        swapPads();
-        pHolder->setMarioActor(pFirst);
-        gIsLuigi = ownIsLuigi;
+        leaveSecond();
 
-        if (!sState.mPresent || sState.mLevelStart || down) {
+        if (!sState.mPresent || sState.mLevelStart || down || riding) {
             sState.mSplit.reset();
             sState.mFollow.reset();
             sState.mLayout.reset();
@@ -363,6 +460,7 @@ namespace {
         }
         bumpPlayers();
         CameraContext* pContext = cameraContext();
+        const bool secondEvent = pSecond->mMario->isInputDisable() && !demo;
         if (pContext == nullptr || holdHere || sState.mTravelling) {
             // One screen while the game holds the players (a cutscene, a level's opening): the split eases out.
             if (sState.mSplit.update(0.0f, 0.0f) == 0.0f) {
@@ -370,7 +468,22 @@ namespace {
                 sState.mLayout.reset();
             }
         } else {
-            updateSplit(pContext, pFirst->mPosition, pSecond->mPosition);
+            updateSplit(pContext, pFirst->mPosition, pSecond->mPosition, (firstHeld && !demo) || secondEvent);
+        }
+        // His own event: if the game camera went with him, the first player's half follows the first meanwhile.
+        const coop::CameraMatrices gameCamera = pContext != nullptr ? readCamera(pContext) : coop::CameraMatrices{};
+        sState.mSecondEvent = secondEvent && pContext != nullptr &&
+                              coop::camera_is_second_players(coop::pose_of(gameCamera.inverse).eye,
+                                                             toVec(pFirst->mPosition), toVec(pSecond->mPosition));
+        if (sState.mSecondEvent) {
+            const coop::Vec3 up = toVec(pFirst->mMario->getUpVec());
+            if (!sState.mFirstFollow.started()) {
+                sState.mFirstFollow.start(coop::pose_of(sState.mGameCamera.inverse).eye, toVec(pFirst->mPosition),
+                                          toVec(pFirst->mPosition), up);
+            }
+            sState.mFirstFollowView = sState.mFirstFollow.update(toVec(pFirst->mPosition), up);
+        } else {
+            sState.mFirstFollow.reset();
         }
         // The game camera looks at the first player's camera point: moved towards the second so both stay in view,
         // easing back to the first player as the screen splits.
@@ -430,6 +543,68 @@ namespace NebulaCoop {
                  sState.mOwnIsLuigi ? "Mario" : "Luigi");
     }
 
+    void noteLaunchStar(const LiveActor* pStar) {
+        sLaunchStarClass = *reinterpret_cast< const void* const* >(pStar);
+    }
+
+    BoundObjectScope::BoundObjectScope(const LiveActor* pActor) : mSwapped(false) {
+        if (sState.mSecond == nullptr || !sState.mPresent || pActor == sState.mSecond || pActor == sState.mFirst ||
+            riddenBy(sState.mSecond) != pActor || MR::getMarioHolder()->getMarioActor() != sState.mFirst) {
+            return;
+        }
+        enterSecond();
+        mSwapped = true;
+    }
+
+    BoundObjectScope::~BoundObjectScope() {
+        if (mSwapped) {
+            leaveSecond();
+        }
+    }
+
+    bool mayRush(const MarioActor* pActor, const HitSensor* pSensor) {
+        if (sState.mSecond == nullptr || pSensor == nullptr) {
+            return true;
+        }
+        const MarioActor* pOther = pActor == sState.mSecond ? sState.mFirst : sState.mSecond;
+        if (riddenBy(pOther) == pSensor->mHost) {
+            return false;
+        }
+        if (pActor == sState.mSecond) {
+            const LiveActor* pHost = pSensor->mHost;
+            if (pSensor->isType(ATYPE_SPHERE_PLAYER_BIND) || MR::isEqualString(pHost->mName, "SurfRay") ||
+                MR::isEqualString(pHost->mName, "SurfRayTutorial")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    const TVec3f* nearerPlayerCenter(const TVec3f& rPosition) {
+        MarioActor* pSecond = sState.mSecond;
+        if (pSecond != nullptr && sState.mPresent && !sState.mHidden && riddenBy(sState.mFirst) == nullptr &&
+            rPosition.squared(pSecond->mPosition) <
+                rPosition.squared(sState.mFirst->mPosition)) {
+            return &pSecond->_2A0;
+        }
+        return MR::getPlayerCenterPos();
+    }
+
+    bool getOtherHalfView(TPos3f* pView) {
+        if (sState.mSecond == nullptr || !sState.mPresent || !splitShown()) {
+            return false;
+        }
+        CameraContext* pContext = cameraContext();
+        if (pContext == nullptr) {
+            return false;
+        }
+        const coop::CameraMatrices other =
+            sState.mSecondEvent ? sState.mFirstFollowView
+                                : coop::blend_cameras(readCamera(pContext), sState.mFollowView, sState.mSplit.eased());
+        memcpy(pView, &other.view[0], sizeof(float) * 12);
+        return true;
+    }
+
     bool beginSplitDraw() {
         if (sState.mPass != 0 || sState.mSecond == nullptr || !sState.mPresent || !splitShown()) {
             return false;
@@ -441,6 +616,12 @@ namespace NebulaCoop {
         sState.mGameCamera = readCamera(pContext);
         memcpy(&sState.mGameProjection[0], &pContext->mProjection, sizeof(float) * 16);
         sState.mPass = 1;
+        if (sState.mSecondEvent) {
+            // The game camera is the second player's event's: the first player's half draws with his own.
+            writeCamera(pContext, sState.mFirstFollowView);
+            MR::loadViewMtx();
+            SceneFunction::executeCalcViewAndEntryList();
+        }
         setHalfProjection(pContext, false);
         sendSplitClip(false);
         return true;
@@ -449,8 +630,11 @@ namespace NebulaCoop {
     void nextSplitPass() {
         CameraContext* pContext = cameraContext();
         sState.mPass = 2;
-        // His half: the first player's view panning to his own camera as the split eases in.
-        writeCamera(pContext, coop::blend_cameras(sState.mGameCamera, sState.mFollowView, sState.mSplit.eased()));
+        // His half: the first player's view panning to his own camera as the split eases in; the game camera while
+        // it is his event's.
+        writeCamera(pContext, sState.mSecondEvent ? sState.mGameCamera
+                                                  : coop::blend_cameras(sState.mGameCamera, sState.mFollowView,
+                                                                        sState.mSplit.eased()));
         setHalfProjection(pContext, true);
         MR::loadViewMtx();
         SceneFunction::executeCalcViewAndEntryList();

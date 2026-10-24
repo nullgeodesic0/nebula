@@ -286,6 +286,10 @@ void __NebulaGXSceneMarker(u32 marker, const f32 (*view)[4]) {
     }
 }
 
+u32 __NebulaLuigiSwap(char* out, u32 size) {
+    return sLinked ? nebula_host()->luigi_swap(nebula_host()->user, out, size) : 0;
+}
+
 void __NebulaGXSplitClip(const f32* plane, u32 pass, const f32* separator) {
     if (sLinked) {
         submit();
