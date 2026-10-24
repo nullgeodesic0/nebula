@@ -170,11 +170,15 @@ up. The closed eyelids are left out; the cap-off hair stays (it is also the hair
 ## Voices (F1 > General > Custom voice)
 
 `build_voice_mod.py` converts the SMO voice clips to 16-bit mono 32 kHz WAVs in `<content>\mods\voice`,
-with `voices.txt` mapping Galaxy player-voice sound IDs to clips. At runtime (`voice_replacement.cpp`,
-`jaudio_host_mixer.cpp`) a replaced line's channel plays the clip instead of the game's samples, so the
-game's 3D placement, filters and effect sends apply. The clip's level follows the energy of the game's
-own line, leaving out that line's quiet tail. When the game's line ends or its channel fades well below
-its loudest, the clip finishes through the channel's loudest state. The spin and the flips
+with `voices.txt` mapping Galaxy player-voice sound IDs to clips. Each clip is resampled with a
+Kaiser-windowed sinc (`audio.py`), brought to -12 LUFS (ITU-R BS.1770; the quiet lines keep their offsets in
+`SOFT`) and held under -1 dBTP by a look-ahead limiter; `report.txt` lists every clip's loudness and true
+peak. Ten sources (the jumps, double jumps and electrocutions) peak 2-4 dB over full scale: their
+distortion is in the files. At runtime (`voice_replacement.cpp`, `jaudio_host_mixer.cpp`) a replaced line's
+channel plays the clip instead of the game's samples, at the clip's own level, so the game's volume, 3D
+placement, filters and effect sends apply. (Matching each clip to the energy of the game's own line made the
+same clip swing by 8 dB between plays and clipped it.) When the game's line ends or its channel fades well
+below its loudest, the clip finishes through the channel's loudest state. The spin and the flips
 (SE_PV_JUMP_TURN) keep Galaxy's voices. `GALAXY_TRACE_VOICE=1` logs every line and how each clip played.
 
 ## Mapping (tools/animations/build_animation_mod.py `MAP`)
