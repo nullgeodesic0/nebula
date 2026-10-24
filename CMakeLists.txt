@@ -721,7 +721,9 @@ add_library(galaxy_gx STATIC
 set(GALAXY_FIDELITYFX_SDK "" CACHE PATH "FidelityFX SDK 1.1.4 sdk directory with built bin/ffx_sdk")
 if(GALAXY_FIDELITYFX_SDK)
     target_include_directories(galaxy_gx PRIVATE "${GALAXY_FIDELITYFX_SDK}/include")
-    target_link_libraries(galaxy_gx PRIVATE
+    # The host menus' sounds (menu_sounds.h).
+target_link_libraries(galaxy_gx PUBLIC galaxy_menu_sounds)
+target_link_libraries(galaxy_gx PRIVATE
         "${GALAXY_FIDELITYFX_SDK}/bin/ffx_sdk/ffx_fsr3upscaler_x64.lib"
         "${GALAXY_FIDELITYFX_SDK}/bin/ffx_sdk/ffx_backend_dx12_x64.lib")
     target_compile_definitions(galaxy_gx PRIVATE GALAXY_WITH_FSR3=1)

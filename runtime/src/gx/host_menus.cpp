@@ -6,6 +6,7 @@
 #include "galaxy/gx/menu_screens.h"
 #include "galaxy/gx/renderer_d3d12.h"
 #include "galaxy/input_bindings.h"
+#include "galaxy/menu_sounds.h"
 #include "galaxy/net_lobby.h"
 #include "galaxy/netplay_session.h"
 #include "galaxy/player_devices.h"
@@ -265,7 +266,7 @@ void draw_host_menus(RendererD3D12& renderer, const PictureRect& picture, double
         (void)save_runtime_settings_to_file();
     }
     s_text_focus.store(actions.text_focus, std::memory_order_relaxed);
-    players::set_menu_capture(screens.online_window_open());
+    players::set_menu_capture(screens.modal_open());
     if (actions.toggle_joinable || actions.set_join_address) {
         // As F1 > Online does: the settings, saved (Joinable takes effect in the lobby at once, and in step
         // with the game from the next start).
@@ -285,7 +286,21 @@ void draw_host_menus(RendererD3D12& renderer, const PictureRect& picture, double
     if (actions.stop_asking) net_lobby_cancel();
     if (actions.join) net_lobby_join(get_runtime_settings().net_join_address.data());
     if (actions.cover_pointer) menu::pointer_hand(list, *assets, space, actions.pointer_lx, actions.pointer_ly, 1.0f);
-    // actions.sounds: the game's menu sounds, once the host-side player lands (menu_sounds.h).
+    // The game's own menu sounds, synthesised on the host (menu_sounds.h; loaded with the menus' art).
+    for (const menu::MenuSound sound : actions.sounds) {
+        using S = menu_sounds::Sound;
+        switch (sound) {
+        case menu::MenuSound::Cursor: menu_sounds::play(S::Cursor); break;
+        case menu::MenuSound::Decide: menu_sounds::play(S::Decide); break;
+        case menu::MenuSound::Cancel: menu_sounds::play(S::Cancel); break;
+        case menu::MenuSound::WindowOpen: menu_sounds::play(S::WindowOpen); break;
+        case menu::MenuSound::WindowClose: menu_sounds::play(S::WindowClose); break;
+        case menu::MenuSound::MenuOpen: menu_sounds::play(S::PauseOn); break;
+        case menu::MenuSound::MenuClose: menu_sounds::play(S::PauseOff); break;
+        case menu::MenuSound::Yes: menu_sounds::play(S::Yes); break;
+        case menu::MenuSound::No: menu_sounds::play(S::No); break;
+        }
+    }
     renderer.draw_menu_kit(list);
 }
 

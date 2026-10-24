@@ -106,6 +106,24 @@ ScreensActions Screens::update(const ScreensInput& raw, const Assets& assets, co
     file_select(under, assets, space, list, frames, actions);
     online_window(in, assets, space, list, frames, actions);
     online_menu(in, assets, space, list, frames);
+    // The sounds of the windows and the online menu (the game's: the galaxy map's window, the pause's on and off,
+    // the cursor, and Yes / No for an answer).
+    if (online_open_ != online_was_open_) {
+        actions.sounds.push_back(online_open_ ? MenuSound::WindowOpen : MenuSound::WindowClose);
+    }
+    online_was_open_ = online_open_;
+    const OnlineView& o = in.online;
+    if (o.menu_open && !menu_was_open_) {
+        actions.sounds.push_back(MenuSound::MenuOpen);
+    } else if (!o.menu_open && menu_was_open_) {
+        actions.sounds.push_back(menu_was_answering_ ? (menu_last_row_ == 0 ? MenuSound::Yes : MenuSound::No)
+                                                     : MenuSound::MenuClose);
+    } else if (o.menu_open && o.menu_row != menu_last_row_) {
+        actions.sounds.push_back(MenuSound::Cursor);
+    }
+    menu_was_open_ = o.menu_open;
+    menu_last_row_ = o.menu_row;
+    menu_was_answering_ = o.menu_answering;
     return actions;
 }
 
@@ -318,81 +336,136 @@ void Screens::panel(const ScreensInput& in, const Assets& assets, const Space& s
 
 void Screens::file_select(const ScreensInput& in, const Assets& assets, const Space& space, DrawList& list,
                           float frames, ScreensActions& actions) {
-    if (in.file_select) {
+    // The save select's own screens fill it (the files, Back, Play This File, Copy / Icon / Erase): one small
+    // Options button sits between Back and Play, and opens the options as a window over them that takes the
+    // buttons while it is up.
+    if (!in.file_select) options_open_ = false;
+    const bool online = in.online.phase != OnlinePhase::Unavailable;
+    const float px = in.pointer_x * in.extent_x, py = -in.pointer_y * 228.0f;
+
+    if (in.file_select && !options_open_ && !online_open_) {
         options_anim_.open();
     } else {
         options_anim_.close();
     }
     options_anim_.step(frames);
-    if (!options_anim_.visible()) {
-        option_hovered_ = -1;
-        return;
+    if (options_anim_.visible()) {
+        PillStyle small = panel_pill();
+        small.width = 100.0f;
+        small.hit_w = 140.0f;
+        constexpr float kX = -90.0f, kY = -208.0f;
+        const bool hovered = in.pointer_valid && options_anim_.settled() && pill_hit(small, kX, kY, px, py);
+        if (in.pointer_shown && std::fabs(px - kX) <= 100.0f && std::fabs(py - kY) <= 50.0f) {
+            actions.cover_pointer = true;
+            actions.pointer_lx = px;
+            actions.pointer_ly = py;
+        }
+        if (hovered && option_hovered_ != 9) actions.sounds.push_back(MenuSound::Cursor);
+        option_hovered_ = hovered ? 9 : (option_hovered_ == 9 ? -1 : option_hovered_);
+        options_button_anim_.hover(hovered);
+        options_button_anim_.step(frames);
+        pill(list, assets, space, small, kX, kY, u"Options", options_button_anim_.look(kDialogHover),
+             options_anim_.alpha());
+        if (hovered && (in.pressed & kA) != 0u) {
+            options_open_ = true;
+            options_focus_ = -1;
+            actions.sounds.push_back(MenuSound::WindowOpen);
+        }
     }
-    const float alpha = options_anim_.alpha();
-    // Bottom right, in the game's info window: a row per option, its button, its name and a switch.
-    constexpr float kWidth = 300.0f, kRow = 50.0f;
-    const bool online = in.online.phase != OnlinePhase::Unavailable;
-    const float height = 24.0f + (online ? 3.0f : 2.0f) * kRow;
-    const float x = in.extent_x - 12.0f - kWidth * 0.5f + options_anim_.slide_x() * 0.4f;
-    const float y = -228.0f + 14.0f + height * 0.5f;
-    const float left = x - kWidth * 0.5f;
-    window(list, assets, space, x, y, kWidth, height, alpha);
-    PillStyle style = panel_pill();
-    style.width = 56.0f;
-    style.cap = 18.0f;
-    style.hit_w = 92.0f;
-    const struct {
-        const char16_t* name;
-        bool on;
-        GlyphRef glyph;
-    } rows[2] = {{u"Two players", in.two_players, in.two_players_glyph},
-                 {u"Odyssey moves", in.odyssey_moves, in.odyssey_moves_glyph}};
-    const float px = in.pointer_x * in.extent_x, py = -in.pointer_y * 228.0f;
-    if (in.pointer_shown && std::fabs(px - x) <= kWidth * 0.5f + 30.0f && std::fabs(py - y) <= height * 0.5f + 40.0f) {
+
+    if (options_open_) {
+        options_window_anim_.open();
+    } else {
+        options_window_anim_.close();
+    }
+    options_window_anim_.step(frames);
+    if (!options_window_anim_.visible()) return;
+    const float alpha = options_window_anim_.alpha();
+    const float x = options_window_anim_.slide_x();
+    constexpr float kWidth = 420.0f, kRow = 60.0f;
+    const int rows = online ? 4 : 3;  // the two switches, Online, Back
+    const float height = 96.0f + static_cast<float>(rows) * kRow;
+    window(list, assets, space, x, 0.0f, kWidth, height, alpha);
+    text(list, assets, space, body_text(), x, height * 0.5f - 40.0f, u"Options", alpha);
+    if (in.pointer_shown && std::fabs(px - x) <= kWidth * 0.5f + 30.0f && std::fabs(py) <= height * 0.5f + 40.0f) {
         actions.cover_pointer = true;
         actions.pointer_lx = px;
         actions.pointer_ly = py;
     }
-    int hovered = -1;
-    float row_y = y + height * 0.5f - 12.0f - kRow * 0.5f;
-    for (int i = 0; i < 2; ++i) {
-        const float pill_x = left + kWidth - 14.0f - 46.0f;
-        glyph(list, assets, space, rows[i].glyph, left + 30.0f, row_y, 30.0f, alpha);
-        TextStyle name = body_text(0.75f);
-        name.align = TextStyle::Align::Left;
-        text(list, assets, space, name, left + 54.0f, row_y, rows[i].name, alpha);
-        if (in.pointer_valid && options_anim_.settled() && pill_hit(style, pill_x, row_y, px, py)) hovered = i;
-        ButtonAnim& anim = option_anims_[static_cast<std::size_t>(i)];
-        if (anim.decided()) anim.phase = ButtonAnim::Phase::Hovered;
-        anim.hover(hovered == i);
-        anim.step(frames);
-        pill(list, assets, space, style, pill_x, row_y, rows[i].on ? u"On" : u"Off", anim.look(kDialogHover), alpha);
+    PillStyle style = panel_pill();
+    style.width = 56.0f;
+    style.cap = 18.0f;
+    style.hit_w = 92.0f;
+    PillStyle wide = panel_pill();
+    wide.width = 150.0f;
+    wide.hit_w = 196.0f;
+    const struct {
+        const char16_t* name;
+        bool on;
+        GlyphRef glyph;
+    } switches[2] = {{u"Two players", in.two_players, in.two_players_glyph},
+                     {u"Odyssey moves", in.odyssey_moves, in.odyssey_moves_glyph}};
+    struct Item {
+        float x, y;
+        const PillStyle* style;
+    };
+    std::array<Item, 4> items{};
+    float row_y = height * 0.5f - 96.0f - kRow * 0.5f + 12.0f;
+    for (int i = 0; i < rows; ++i) {
+        items[static_cast<std::size_t>(i)] = i < 2 ? Item{x + kWidth * 0.5f - 70.0f, row_y, &style}
+                                                   : Item{x, row_y, &wide};
         row_y -= kRow;
     }
-    if (online) {
-        PillStyle wide = style;
-        wide.width = 150.0f;
-        wide.hit_w = 186.0f;
-        if (in.pointer_valid && options_anim_.settled() && pill_hit(wide, x, row_y, px, py)) hovered = 2;
-        ButtonAnim& anim = option_anims_[2];
-        if (anim.decided()) anim.phase = ButtonAnim::Phase::Hovered;
-        anim.hover(hovered == 2);
-        anim.step(frames);
-        pill(list, assets, space, wide, x, row_y, u"Online", anim.look(kDialogHover), alpha);
+    int hovered = -1;
+    for (int i = 0; i < rows && in.pointer_valid && options_window_anim_.settled(); ++i) {
+        const Item& item = items[static_cast<std::size_t>(i)];
+        if (pill_hit(*item.style, item.x, item.y, px, py)) hovered = i;
     }
-    if (hovered != option_hovered_ && hovered >= 0) actions.sounds.push_back(MenuSound::Cursor);
-    option_hovered_ = hovered;
-    if (hovered >= 0 && (in.pressed & kA) != 0u) {
-        option_anims_[static_cast<std::size_t>(hovered)].decide();
-        if (hovered == 2) {
-            online_open_ = true;
+    if (hovered >= 0) options_focus_ = -1;
+    if (options_window_anim_.settled() && (in.pressed & (kUp | kDown)) != 0u) {
+        const int from = options_focus_ >= 0 ? options_focus_ : hovered;
+        options_focus_ = from < 0 ? 0 : std::clamp(from + ((in.pressed & kDown) != 0u ? 1 : -1), 0, rows - 1);
+    }
+    const int active = options_focus_ >= 0 ? options_focus_ : hovered;
+    if (active != option_hovered_ && active >= 0) actions.sounds.push_back(MenuSound::Cursor);
+    option_hovered_ = active;
+    const int back = rows - 1;
+    if (options_window_anim_.settled() && active >= 0 && (in.pressed & kA) != 0u) {
+        option_anims_[static_cast<std::size_t>(active)].decide();
+        if (active < 2) {
+            (active == 0 ? actions.toggle_two_players : actions.toggle_odyssey_moves) = true;
+            actions.sounds.push_back(MenuSound::Decide);
+        } else if (active == back) {
+            options_open_ = false;
         } else {
-            (hovered == 0 ? actions.toggle_two_players : actions.toggle_odyssey_moves) = true;
+            options_open_ = false;
+            online_open_ = true;
         }
-        actions.sounds.push_back(MenuSound::Decide);
+    }
+    if (options_window_anim_.settled() && (in.pressed & kB) != 0u) {
+        options_open_ = false;
+        actions.sounds.push_back(MenuSound::Cancel);
+    }
+    for (int i = 0; i < rows; ++i) {
+        const Item& item = items[static_cast<std::size_t>(i)];
+        ButtonAnim& anim = option_anims_[static_cast<std::size_t>(i)];
+        if (anim.decided()) anim.phase = ButtonAnim::Phase::Hovered;
+        anim.hover(i == active);
+        anim.step(frames);
+        std::u16string label;
+        if (i < 2) {
+            const auto& s = switches[i];
+            glyph(list, assets, space, s.glyph, x - kWidth * 0.5f + 34.0f, item.y, 30.0f, alpha);
+            TextStyle name = body_text(0.8f);
+            name.align = TextStyle::Align::Left;
+            text(list, assets, space, name, x - kWidth * 0.5f + 60.0f, item.y, s.name, alpha);
+            label = s.on ? u"On" : u"Off";
+        } else {
+            label = i == back ? u"Back" : u"Online";
+        }
+        pill(list, assets, space, *item.style, item.x, item.y, label, anim.look(kDialogHover), alpha);
     }
 }
-
 namespace {
 
 // The lobby's upper-case words as a sentence: "THE HOST SAID NO" -> "The host said no."

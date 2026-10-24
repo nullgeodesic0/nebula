@@ -40,7 +40,7 @@ struct CardEvent {
     std::uint32_t device;
 };
 
-enum class MenuSound : std::uint8_t { Cursor, Decide, Cancel };
+enum class MenuSound : std::uint8_t { Cursor, Decide, Cancel, WindowOpen, WindowClose, MenuOpen, MenuClose, Yes, No };
 
 // Online co-op as the lobby has it (net_lobby.h NetLobbyPhase, plus Unavailable: no lobby).
 enum class OnlinePhase : std::uint8_t { Unavailable, Off, Joinable, PortInUse, Asking, Waiting, AskedToJoin, InSession,
@@ -118,8 +118,9 @@ public:
         bool leave;
     };
     [[nodiscard]] const std::vector<Button>& panel_buttons() const noexcept { return buttons_; }
-    // The Online window is up (it covers the game's pause menu, so the game must not read the buttons).
-    [[nodiscard]] bool online_window_open() const noexcept { return online_open_; }
+    // A window over the game's own menu is up (Online, the save select's Options): the game must not read the
+    // buttons meanwhile.
+    [[nodiscard]] bool modal_open() const noexcept { return online_open_ || options_open_; }
 
 private:
     void hints(const ScreensInput& in, const Assets& assets, const Space& space, DrawList& list, float frames);
@@ -157,7 +158,11 @@ private:
     int hovered_ = -1;
     // The save select's options.
     WindowAnim options_anim_;
-    std::array<ButtonAnim, 3> option_anims_;
+    std::array<ButtonAnim, 4> option_anims_;
+    bool options_open_ = false;
+    int options_focus_ = -1;
+    ButtonAnim options_button_anim_;
+    WindowAnim options_window_anim_;
     int option_hovered_ = -1;
     // The Online window, opened from the Players panel or the save select's options.
     bool online_open_ = false;
@@ -169,6 +174,10 @@ private:
     std::u16string typed_;
     // The online menu and the lobby's cards.
     WindowAnim menu_anim_;
+    bool menu_was_open_ = false;
+    int menu_last_row_ = 0;
+    bool menu_was_answering_ = false;
+    bool online_was_open_ = false;
     std::array<ButtonAnim, 3> menu_anims_;
     WindowAnim lobby_card_anim_;
     OnlinePhase lobby_card_phase_ = OnlinePhase::Unavailable;

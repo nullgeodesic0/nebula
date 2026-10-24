@@ -10,6 +10,7 @@
 #include "galaxy/gx/game_font.h"
 #include "galaxy/gx/font_sdf.h"
 #include "galaxy/gx/menu_glyphs.h"
+#include "galaxy/menu_sounds.h"
 #include "galaxy/gx/host_menus.h"
 #include "galaxy/gx/menu_kit.h"
 #include "galaxy/gx/menu_kit_raster.h"
@@ -6116,6 +6117,8 @@ std::optional<MenuKitPrepared> prepare_menu_kit(std::string content_root) {
         const auto picture_bytes = out.disc->read_arc_entry("LayoutData/Font.arc", "picturefont.brfnt");
         const auto picture = picture_bytes ? galaxy::gx::parse_brfnt(*picture_bytes) : std::nullopt;
         out.glyphs = galaxy::gx::menu::build_glyph_atlas(picture ? &*picture : nullptr);
+        // The game's menu sounds, synthesised from the disc (well under a second, here off the render thread).
+        if (!galaxy::menu_sounds::load(*out.disc)) std::cerr << "[Renderer] menus: the game's menu sounds are unavailable\n";
         // The Star Pointer's hand, to draw again over the menus.
         const char* hand_files[4] = {"handpointerpoint.tpl", "handpointerpointshadow.tpl", "dpdoutstar.tpl", "dpdpointer.tpl"};
         out.hand_loaded = true;
