@@ -35,8 +35,9 @@ enum class NetCommand : std::uint32_t { None = 0, ExitGalaxy = 1, Join = 2, Test
 
 // The next local input carries `command` (net_local_input).
 void net_request_command(NetCommand command) noexcept;
-// Ends the session on both PCs: tells the peer, then this game restarts on its own (net_lobby.cpp).
-[[noreturn]] void net_leave();
+// Ends the session on both PCs: tells the peer, then this game restarts on its own (net_lobby.cpp); a live host
+// plays on alone instead (back to waiting for a joiner) and returns.
+void net_leave();
 // The peer said it left (or has not been heard from for a while): this game should restart on its own.
 [[nodiscard]] bool net_peer_left() noexcept;
 
@@ -63,6 +64,10 @@ void net_local_input(std::uint32_t frame, std::uint32_t count, const std::uint8_
 // unpaced and unrendered and says when it has caught up; the host then names the join frame J, whose input carries
 // NetCommand::Join (Luigi drops in on both PCs) and from which the session is lockstep with input delay.
 [[nodiscard]] bool net_live() noexcept;
+// A live session's host (Joinable since the start): a joiner comes and goes while it plays on.
+[[nodiscard]] bool net_live_host() noexcept;
+// A live session's host (Joinable since the start): a joiner comes and goes while it plays on.
+[[nodiscard]] bool net_live_host() noexcept;
 // Host: in the solo phase with nobody joining, so a joiner can be taken live.
 [[nodiscard]] bool net_live_can_accept() noexcept;
 // Host (the lobby's thread, its listening socket closed): the session opens on `port` and the snapshot is taken

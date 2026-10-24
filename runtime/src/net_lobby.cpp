@@ -394,7 +394,8 @@ void run() {
             std::fprintf(stderr, "[lobby] test: online menu row %d at frame %u\n", row, netplay_frame());
             menu_action(row);
         }
-        if (l.in_session && net_peer_left()) {
+        // The joiner gone: a live host plays on (netplay_session.cpp live_host_frame); anything else restarts alone.
+        if (l.in_session && net_peer_left() && !net_live_host()) {
             Sleep(1500);  // the line in the log, and the Bye repeats, before this game goes
             net_restart_alone();
         }

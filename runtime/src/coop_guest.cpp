@@ -2368,6 +2368,13 @@ void update_presence(const Guest& guest, State& s, coop::Vec3 first_position, co
             s.drop_in_requested = false;
             drop_in(guest, s, first_position, first_side);
         }
+        // A live host whose joiner left (netplay_session.cpp live_host_frame): he sits out, the host plays on.
+        if (s.present && s_drop_out_requested.exchange(false, std::memory_order_relaxed)) {
+            s.present = false;
+            coop_set_second_present(false);
+            sit_out(guest, s);
+            trace("second player drops out (the other PC left)");
+        }
         return;
     }
     s_second_is_luigi.store(coop::partner_of(s.own) == coop::Character::Luigi, std::memory_order_relaxed);

@@ -1118,6 +1118,12 @@ void net_leave() {
         send_raw(s, &bye, sizeof(bye));
         Sleep(10);
     }
+    if (s.live && s.host) {
+        // The host plays on alone (live_host_frame takes it back to Solo at the next frame).
+        std::fprintf(stderr, "[net] ending the session: playing on alone\n");
+        s.peer_left = true;
+        return;
+    }
     std::fprintf(stderr, "[net] leaving the session\n");
     net_restart_alone();
 }
@@ -1148,7 +1154,34 @@ void begin_lockstep(Session& s, std::uint32_t previous) {
 
 // Live host, at a frame's start: an accept from the lobby opens the session; the previous frame's input (final
 // now: its EFB peek answers are in) goes on the stream until begin_lockstep takes over.
+// A live host on its own again: no peer, no stream, the next joiner welcome (live_host_frame).
+void back_to_solo(Session& s) {
+    if (s.socket != INVALID_SOCKET) closesocket(s.socket);
+    s.socket = INVALID_SOCKET;
+    s.connected = false;
+    s.peer_known = false;
+    s.peer_left = false;
+    s.phase = Session::Live::Solo;
+    s.snapshot_frame = kNone;
+    s.join_frame = kNone;
+    s.any_remote = false;
+    s.unconfirmed_from = kNone;
+    if (s.compressor.joinable()) s.compressor.join();
+    std::lock_guard lock(s.stream_mutex);
+    s.stream_head.clear();
+    s.records.clear();
+    s.stream_ready = false;
+    s.bundle.clear();
+    s.bundle_built = false;
+}
 void live_host_frame(Session& s, std::uint32_t frame) {
+    // The joiner left (its Leave, its game closed, its network gone): play on alone, the second player sitting out,
+    // and the lobby listens for the next one (no restart).
+    if (s.peer_left && s.phase == Session::Live::Joined) {
+        std::fprintf(stderr, "[net] frame %u: the other player left: playing on alone\n", frame);
+        back_to_solo(s);
+        coop_request_drop_out();
+    }
     if (s.accept_pending.exchange(false)) {
         s.socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         u_long nonblocking = 1u;
@@ -1197,20 +1230,7 @@ void live_host_frame(Session& s, std::uint32_t frame) {
     // A joiner that stopped asking before it joined is gone: back to playing alone (the lobby listens again).
     if (s.phase == Session::Live::Streaming && now_qpc() - s.last_request > s.frequency.QuadPart * 15) {
         std::fprintf(stderr, "[net] the joiner went away before joining: playing on alone\n");
-        closesocket(s.socket);
-        s.socket = INVALID_SOCKET;
-        s.connected = false;
-        s.peer_known = false;
-        s.phase = Session::Live::Solo;
-        s.snapshot_frame = kNone;
-        s.join_frame = kNone;
-        if (s.compressor.joinable()) s.compressor.join();
-        std::lock_guard lock(s.stream_mutex);
-        s.stream_head.clear();
-        s.records.clear();
-        s.stream_ready = false;
-        s.bundle.clear();
-        s.bundle_built = false;
+        back_to_solo(s);
     }
 }
 
@@ -1430,6 +1450,8 @@ const NetInput& net_input(std::uint32_t frame, unsigned player) {
     while (from.frame != frame) {
         receive(s);
         if (from.frame == frame) break;
+        // A live host whose joiner left plays on alone: the second player's input is neutral until he sits out.
+        if (s.live && s.host && s.peer_left) return kNeutral;
         const std::int64_t now = now_qpc();
         if (now - last_send > s.frequency.QuadPart / 200) {
             if (!s.connected && !s.host) send_hello(s, Packet::Hello);
@@ -1485,6 +1507,11 @@ std::uint32_t net_peek(std::uint32_t frame, std::uint32_t sequence, std::uint32_
 
 bool net_live() noexcept {
     return net_session_requested() && session().live;
+}
+
+bool net_live_host() noexcept {
+    const Session& s = session();
+    return net_session_requested() && s.live && s.host;
 }
 
 bool net_live_can_accept() noexcept {

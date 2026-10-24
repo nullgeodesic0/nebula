@@ -183,6 +183,7 @@ private:
     OnlinePhase lobby_card_phase_ = OnlinePhase::Unavailable;
     std::u16string lobby_card_words_[2];
     double lobby_card_until_ = 0.0;
+    double session_ended_until_ = 0.0;
     OnlinePhase last_phase_ = OnlinePhase::Unavailable;
     std::u16string last_outcome_;
 };

@@ -690,9 +690,17 @@ void Screens::online_cards(const ScreensInput& in, const Assets& assets, const S
     } else if (o.phase == OnlinePhase::Outcome && (last_phase_ != OnlinePhase::Outcome || o.outcome != last_outcome_)) {
         lobby_card_until_ = in.seconds + 4.0;
     }
+    if (last_phase_ == OnlinePhase::InSession && o.phase != OnlinePhase::InSession &&
+        o.phase != OnlinePhase::Unavailable) {
+        // A live host's joiner left: it plays on alone, Joinable again.
+        session_ended_until_ = in.seconds + 4.0;
+    }
     if (o.phase == OnlinePhase::Outcome && in.seconds < lobby_card_until_ && !online_open_) {
         show = OnlinePhase::Outcome;
         words[0] = sentence(o.outcome);
+    } else if (in.seconds < session_ended_until_ && show == OnlinePhase::Unavailable) {
+        show = OnlinePhase::Outcome;
+        words[0] = u"Your friend left. Playing on alone.";
     }
     last_phase_ = o.phase;
     last_outcome_ = o.outcome;
