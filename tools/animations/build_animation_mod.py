@@ -129,10 +129,9 @@ MAP = {
     'diefall': ('DeadFall', 1.0),
     'diefire': ('DeadFire', 1.0),
     # The hard landing (ハード着地, landstiffen: after a Launch Star and long falls) keeps Galaxy's own.
-    # Pipes. Getting a Power Star or Grand Star keeps Galaxy's own animations (powerstarget, grandstarget):
-    # Odyssey's GetShine is a short pose that does not fit the game's long star-get sequence.
-    'earthenpipein': ('Dokan entrar', 1.0),
-    'earthenpipeout': ('Dokan Salir', 1.0),
+    # Getting a Power Star or Grand Star keeps Galaxy's own animations (powerstarget, grandstarget):
+    # Odyssey's GetShine is a short pose that does not fit the game's long star-get sequence. So do the
+    # pipes (earthenpipein, earthenpipeout): Odyssey's Dokan clips played wrong in them.
 }
 # One-shots whose source is far shorter than the game's animation: 'hold' plays the source at its own speed
 # and holds its last frame (a grab, a pose), 'repeat' plays its cycle over and over (sleeping), instead of
