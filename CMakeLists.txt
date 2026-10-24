@@ -582,6 +582,8 @@ galaxy_test(galaxy_odyssey_moveset_tests SOURCES ${rt}/odyssey_moveset_tests.cpp
 target_include_directories(galaxy_odyssey_moveset_tests PRIVATE native/include)
 galaxy_test(galaxy_motion_style_tests SOURCES ${rt}/motion_style_tests.cpp)
 target_include_directories(galaxy_motion_style_tests PRIVATE native/include)
+galaxy_test(galaxy_libm_tests SOURCES ${rt}/libm_tests.cpp native/libm/nebula_libm.c)
+target_compile_definitions(galaxy_libm_tests PRIVATE NEBULA_LIBM_PREFIX)
 galaxy_test(galaxy_coop_tests SOURCES ${rt}/coop_tests.cpp)
 target_include_directories(galaxy_coop_tests PRIVATE native/include)
 galaxy_test(galaxy_player_devices_tests SOURCES ${rt}/player_devices_tests.cpp LIBS galaxy_runtime_settings)

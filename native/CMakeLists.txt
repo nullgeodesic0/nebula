@@ -44,7 +44,8 @@ add_library(smg_game SHARED
     ${game_sources}
     ${sdk_sources}
     ${layer_sources}
-    msl/src/msl_runtime.c)
+    msl/src/msl_runtime.c
+    libm/nebula_libm.c)
 
 target_include_directories(smg_game BEFORE PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/msl/include"
@@ -108,6 +109,8 @@ target_compile_options(smg_game PRIVATE
     $<$<NOT:$<PLATFORM_ID:Windows>>:-fms-extensions>
     -fsigned-char -fshort-wchar
     -fno-strict-aliasing -fno-strict-float-cast-overflow -fno-math-errno -fno-stack-protector
+    # The same float results on every x86 PC (netplay): never fused multiply-adds or AVX code paths.
+    $<$<OR:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},AMD64>,$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},x86_64>>:-mno-fma -mno-avx -ffp-contract=off>
     $<$<NOT:$<PLATFORM_ID:Windows>>:-fno-plt>
     -fno-ms-compatibility -fno-delayed-template-parsing
     ${diagnostics}

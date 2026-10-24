@@ -228,14 +228,14 @@ typedef int BOOL;
 /* just some common intrinsics */
 
 #if defined(TARGET_PC)
-// The game follows the reciprocal square root estimate with a Newton step wherever it uses it, so natively it is the
-// host's estimate (docs/NATIVE_PERFORMANCE.md: half the latency of 1/sqrtf, the same accuracy after the step): SSE's
-// 12-bit rsqrtss, or AArch64's 8-bit frsqrte with one step of its own to reach the console's precision.
+// The game follows the reciprocal square root estimate with a Newton step wherever it uses it. On x86 it is the exact
+// 1/sqrtf, not SSE's rsqrtss: rsqrtss's estimate differs between Intel and AMD processors, and netplay needs every PC
+// to compute the same game (docs/NATIVE_PERFORMANCE.md has the cost: a few nanoseconds). AArch64's 8-bit frsqrte with
+// one step of its own reaches the console's precision.
 #include <math.h>
 #include <string.h>
 #if defined(__SSE__)
-#include <xmmintrin.h>
-static inline f32 __frsqrte(f32 x) { return _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(x))); }
+static inline f32 __frsqrte(f32 x) { return 1.0f / sqrtf(x); }
 #elif defined(__aarch64__)
 #include <arm_neon.h>
 static inline f32 __frsqrte(f32 x) {
