@@ -86,6 +86,18 @@ namespace Nebula.Plus
             string sha = Json.Str(commit, "sha");
             if (string.IsNullOrEmpty(sha) || sha.Length != 40) throw new InvalidDataException("GitHub returned no commit for branch " + config.Branch + ".");
             if (installed != null && string.Equals(installed.Commit, sha, StringComparison.OrdinalIgnoreCase)) return null;
+            if (installed != null && !string.IsNullOrEmpty(installed.Commit))
+            {
+                // Only a commit after the installed one: a branch reset to an older commit is not an update.
+                string status = null;
+                try
+                {
+                    status = Json.Str(Json.Parse(Downloader.GetString("https://api.github.com/repos/" + config.Repository + "/compare/" +
+                        installed.Commit + "..." + sha, "application/vnd.github+json")), "status");
+                }
+                catch (System.Net.WebException) { /* the installed commit is not on GitHub (a local build): offer the branch */ }
+                if (status == "behind" || status == "identical") return null;
+            }
             string message = Json.Str(Json.Obj(commit, "commit") ?? new Dictionary<string, object>(), "message") ?? "";
             return new PlusUpdate { Kind = "branch", Commit = sha, Version = "branch-" + sha.Substring(0, 12), Notes = message.Split('\n')[0].Trim() };
         }

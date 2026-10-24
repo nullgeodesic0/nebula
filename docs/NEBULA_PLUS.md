@@ -52,7 +52,8 @@ What the install does:
 
 1. **Game files.** Copies the official install's retained game inputs (`game-inputs`, hash-checked against its
    `inputs.json`) and packed content (`content\game.pak`, 4 GB). Without them, it extracts and packs your disc
-   with the package's `nebula-recomp` (`--disc`).
+   with the package's `nebula-recomp`. `NebulaPlusCli.exe --disc` packs from the disc even when the official
+   files are there; the window uses the disc only when they are not.
 2. **Compiler.** Copies the official install's compiler toolchain when it is the same pinned one
    (`installer/toolchain.json`), or downloads it from Microsoft and GitHub with pinned SHA-256s (you accept the
    Microsoft C++ Build Tools license first; `--accept-build-tools-license` in a terminal).
@@ -166,9 +167,9 @@ Both players need the same Plus build and the same mods. Plus's launchers set `G
 source commit, the module key, the module instruction set, the toolchain and a digest of the built mods (new in
 Plus's runtime; the official runtime compares the exe's and the game module's size and write time, which never
 match between two PCs that compiled the game themselves). A friend with different mod files is told the builds
-differ. Live join moves the game's native stacks between the two processes and relies on identical code; two
-PCs on the same toolchain and module instruction set compile identical code, but this has not been tried on two
-separate PCs yet.
+differ. Live join moves the game's native stacks between the two processes and relies on identical code. Two
+Plus installs compiled from the same package (same toolchain and module instruction set) produced modules that
+differ only in the PE timestamp; live join has not yet been tried between two separate PCs.
 
 ## Trust model
 
