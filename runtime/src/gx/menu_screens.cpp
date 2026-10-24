@@ -85,6 +85,7 @@ ScreensActions Screens::update(const ScreensInput& in, const Assets& assets, con
     hints(in, assets, space, list, frames);
     cards(in, assets, space, list, frames);
     panel(in, assets, space, list, frames, actions);
+    file_select(in, assets, space, list, frames, actions);
     return actions;
 }
 
@@ -105,11 +106,11 @@ void Screens::hints(const ScreensInput& in, const Assets& assets, const Space& s
         measure.font_h = 27.0f;
         measure.char_space = 1.0f;
         const float glyph_h = 30.0f;
-        const GlyphRect* rect = assets.glyphs ? assets.glyphs->find(device.family, GlyphButton::Start) : nullptr;
+        const GlyphRect* rect = assets.glyphs ? assets.glyphs->find(device.join_glyph) : nullptr;
         const float glyph_w = rect ? glyph_h * rect->aspect : 0.0f;
         const float width = glyph_w + 8.0f + text_width(assets, measure, words);
         const float left = -width * 0.5f;
-        glyph(list, assets, space, device.family, GlyphButton::Start, left + glyph_w * 0.5f, y, glyph_h, alpha);
+        glyph(list, assets, space, device.join_glyph, left + glyph_w * 0.5f, y, glyph_h, alpha);
         hud_text(list, assets, space, left + glyph_w + 8.0f, y, words, alpha, TextStyle::Align::Left);
         y += 36.0f;
     }
@@ -202,7 +203,8 @@ void Screens::panel(const ScreensInput& in, const Assets& assets, const Space& s
     for (const DeviceView& device : in.devices) {
         const float column = device.keyboard ? x : left + 128.0f;
         if (!device.keyboard) {
-            glyph(list, assets, space, device.family, GlyphButton::Controller, left + 28.0f, row_y, 38.0f, alpha);
+            glyph(list, assets, space, standard_glyph(device.family, GlyphButton::Controller), left + 28.0f, row_y, 38.0f,
+                  alpha);
         }
         text(list, assets, space, body_text(0.62f), column, row_y + 17.0f, device.name, alpha);
         buttons_.push_back({column, row_y - 13.0f, device.key, false});
@@ -277,6 +279,67 @@ void Screens::panel(const ScreensInput& in, const Assets& assets, const Space& s
             }
         }
         pill(list, assets, space, style, button.x, button.y, label, anim.look(kDialogHover), alpha);
+    }
+}
+
+void Screens::file_select(const ScreensInput& in, const Assets& assets, const Space& space, DrawList& list,
+                          float frames, ScreensActions& actions) {
+    if (in.file_select) {
+        options_anim_.open();
+    } else {
+        options_anim_.close();
+    }
+    options_anim_.step(frames);
+    if (!options_anim_.visible()) {
+        option_hovered_ = -1;
+        return;
+    }
+    const float alpha = options_anim_.alpha();
+    // Bottom right, in the game's info window: a row per option, its button, its name and a switch.
+    constexpr float kWidth = 300.0f, kRow = 50.0f;
+    const float height = 24.0f + 2.0f * kRow;
+    const float x = in.extent_x - 12.0f - kWidth * 0.5f + options_anim_.slide_x() * 0.4f;
+    const float y = -228.0f + 14.0f + height * 0.5f;
+    const float left = x - kWidth * 0.5f;
+    window(list, assets, space, x, y, kWidth, height, alpha);
+    PillStyle style = panel_pill();
+    style.width = 56.0f;
+    style.cap = 18.0f;
+    style.hit_w = 92.0f;
+    const struct {
+        const char16_t* name;
+        bool on;
+        GlyphRef glyph;
+    } rows[2] = {{u"Two players", in.two_players, in.two_players_glyph},
+                 {u"Odyssey moves", in.odyssey_moves, in.odyssey_moves_glyph}};
+    const float px = in.pointer_x * in.extent_x, py = -in.pointer_y * 228.0f;
+    if (in.pointer_valid && std::fabs(px - x) <= kWidth * 0.5f + 30.0f && std::fabs(py - y) <= height * 0.5f + 40.0f) {
+        actions.cover_pointer = true;
+        actions.pointer_lx = px;
+        actions.pointer_ly = py;
+    }
+    int hovered = -1;
+    float row_y = y + height * 0.5f - 12.0f - kRow * 0.5f;
+    for (int i = 0; i < 2; ++i) {
+        const float pill_x = left + kWidth - 14.0f - 46.0f;
+        glyph(list, assets, space, rows[i].glyph, left + 30.0f, row_y, 30.0f, alpha);
+        TextStyle name = body_text(0.75f);
+        name.align = TextStyle::Align::Left;
+        text(list, assets, space, name, left + 54.0f, row_y, rows[i].name, alpha);
+        if (in.pointer_valid && options_anim_.settled() && pill_hit(style, pill_x, row_y, px, py)) hovered = i;
+        ButtonAnim& anim = option_anims_[static_cast<std::size_t>(i)];
+        if (anim.decided()) anim.phase = ButtonAnim::Phase::Hovered;
+        anim.hover(hovered == i);
+        anim.step(frames);
+        pill(list, assets, space, style, pill_x, row_y, rows[i].on ? u"On" : u"Off", anim.look(kDialogHover), alpha);
+        row_y -= kRow;
+    }
+    if (hovered != option_hovered_ && hovered >= 0) actions.sounds.push_back(MenuSound::Cursor);
+    option_hovered_ = hovered;
+    if (hovered >= 0 && (in.pressed & kA) != 0u) {
+        option_anims_[static_cast<std::size_t>(hovered)].decide();
+        (hovered == 0 ? actions.toggle_two_players : actions.toggle_odyssey_moves) = true;
+        actions.sounds.push_back(MenuSound::Decide);
     }
 }
 

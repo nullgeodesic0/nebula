@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <span>
+#include <unordered_map>
 #include <string_view>
 #include <vector>
 
@@ -134,21 +135,29 @@ struct WindowAnim {
 // ---- Button prompts: each controller family's own art (button_prompts.h for Xbox and DualSense, the game's
 // picture font for the Wii's), packed in one texture.
 enum class GlyphFamily : std::uint8_t { Wii = 0, Xbox = 1, DualSense = 2 };
-// What a prompt shows (button_prompts.h Label for the pads; the Wii's equivalents for Wii).
+// A prompt: for Xbox and DualSense a prompts::Label value, for the Wii a picturefont.brfnt glyph index
+// (prompts::kSlotGlyph: A 1, B 2, + 25, - 24, 1 6, 2 7, the Remote 4...).
+struct GlyphRef {
+    GlyphFamily family = GlyphFamily::Wii;
+    std::uint16_t code = 0;
+};
+// The prompts the menus name by role.
 enum class GlyphButton : std::uint8_t { Start, Confirm, Back, Select, Dpad, Controller };
+[[nodiscard]] GlyphRef standard_glyph(GlyphFamily family, GlyphButton button) noexcept;
 struct GlyphRect {
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
     float aspect = 1.0f;  // width / height
 };
 struct GlyphAtlas {
-    std::array<std::array<GlyphRect, 6>, 3> rects{};
-    std::array<std::array<bool, 6>, 3> present{};
-    [[nodiscard]] const GlyphRect* find(GlyphFamily family, GlyphButton button) const noexcept {
-        const auto f = static_cast<std::size_t>(family), b = static_cast<std::size_t>(button);
-        return f < 3u && b < 6u && present[f][b] ? &rects[f][b] : nullptr;
+    std::unordered_map<std::uint32_t, GlyphRect> rects;
+    [[nodiscard]] static std::uint32_t key(GlyphRef ref) noexcept {
+        return (static_cast<std::uint32_t>(ref.family) << 16u) | ref.code;
+    }
+    [[nodiscard]] const GlyphRect* find(GlyphRef ref) const noexcept {
+        const auto it = rects.find(key(ref));
+        return it != rects.end() ? &it->second : nullptr;
     }
 };
-
 // ---- Widgets. Positions are layout units (the centre of the widget); `alpha` 0..1 multiplies everything.
 struct Assets {
     const GlyphAtlas* glyphs = nullptr;
@@ -200,8 +209,8 @@ void text(DrawList& list, const Assets& assets, const Space& space, const TextSt
 [[nodiscard]] float text_width(const Assets& assets, const TextStyle& style, std::u16string_view str) noexcept;
 
 // A button prompt `height` layout units tall, centred on (x, y); returns its width (0 if the atlas lacks it).
-float glyph(DrawList& list, const Assets& assets, const Space& space, GlyphFamily family, GlyphButton button, float x,
-            float y, float height, float alpha);
+float glyph(DrawList& list, const Assets& assets, const Space& space, GlyphRef ref, float x, float y, float height,
+            float alpha);
 
 // The first player's Star Pointer hand (DPDPointer.arc HandPointer) with its tip at (x, y): the game draws its own
 // under the picture, so over a host menu this one takes its place.

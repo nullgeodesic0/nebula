@@ -10863,6 +10863,8 @@ void draw_native_settings_hint(RendererD3D12& renderer) {
 // The save-select screen's switches (coop_guest.cpp file_select_frame): Multiplayer and the Odyssey moveset, each
 // with the button that flips it, at the bottom right.
 void draw_file_select_options(RendererD3D12& renderer) {
+    // The host menus draw these options in the game's style once their art has loaded (host_menus.cpp).
+    if (renderer.menu_kit_assets() != nullptr) return;
     if (!file_select_options_shown() || s_native_settings_visible.load(std::memory_order_relaxed) ||
         s_bb_width < 427u || s_bb_height < 240u) {
         return;
@@ -11170,7 +11172,8 @@ bool RendererD3D12::present(
         draw_host_menus(*this,
                         {static_cast<float>(content_viewport.left), static_cast<float>(content_viewport.top),
                          static_cast<float>(content_viewport.width), static_cast<float>(content_viewport.height)},
-                        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                        s_native_settings_visible.load(std::memory_order_relaxed));
         if (stall_watch_overlay) {
             const double stall_watch_ms =
                 std::chrono::duration<double, std::milli>(

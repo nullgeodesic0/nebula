@@ -11,59 +11,33 @@ namespace galaxy::gx::menu {
 namespace {
 
 struct Piece {
-    GlyphFamily family;
-    GlyphButton button;
+    GlyphRef ref;
     int width = 0, height = 0;
     std::vector<std::uint8_t> rgba;
 };
 
-prompts::Label pad_label(GlyphButton button) {
-    switch (button) {
-    case GlyphButton::Start: return prompts::Label::Start;
-    case GlyphButton::Confirm: return prompts::Label::South;
-    case GlyphButton::Back: return prompts::Label::East;
-    case GlyphButton::Select: return prompts::Label::Back;
-    case GlyphButton::Dpad: return prompts::Label::Dpad;
-    case GlyphButton::Controller: return prompts::Label::Controller;
-    }
-    return prompts::Label::None;
-}
-
-// The picture font's glyph index of the Wii button each prompt stands for (button_prompts.h kSlotGlyph).
-int wii_glyph(GlyphButton button) {
-    switch (button) {
-    case GlyphButton::Start: return 25;       // +
-    case GlyphButton::Confirm: return 1;      // A
-    case GlyphButton::Back: return 2;         // B
-    case GlyphButton::Select: return 24;      // -
-    case GlyphButton::Dpad: return 20;
-    case GlyphButton::Controller: return 4;   // the Wii Remote
-    }
-    return -1;
-}
-
 }  // namespace
 
 GlyphAtlasImage build_glyph_atlas(const GameFont* picture_font, float scale) {
-    constexpr std::array kButtons{GlyphButton::Start, GlyphButton::Confirm, GlyphButton::Back,
-                                  GlyphButton::Select, GlyphButton::Dpad, GlyphButton::Controller};
     std::vector<Piece> pieces;
+    // Every pad prompt (any button can be bound to a Wii target), and every Wii button the game draws.
     for (const GlyphFamily family : {GlyphFamily::Xbox, GlyphFamily::DualSense}) {
         const auto prompt_family = family == GlyphFamily::Xbox ? prompts::Family::Xbox : prompts::Family::DualSense;
-        for (const GlyphButton button : kButtons) {
-            Piece piece{family, button};
-            prompts::render_glyph_scaled(prompt_family, pad_label(button), scale, piece.width, piece.height, piece.rgba);
+        for (int label = static_cast<int>(prompts::Label::South); label <= static_cast<int>(prompts::Label::Digit2);
+             ++label) {
+            Piece piece{{family, static_cast<std::uint16_t>(label)}};
+            prompts::render_glyph_scaled(prompt_family, static_cast<prompts::Label>(label), scale, piece.width,
+                                         piece.height, piece.rgba);
             if (piece.width > 0 && piece.height > 0) pieces.push_back(std::move(piece));
         }
     }
     if (picture_font != nullptr) {
-        for (const GlyphButton button : kButtons) {
-            const int index = wii_glyph(button);
-            if (index < 0 || static_cast<std::size_t>(index) >= picture_font->glyphs.size()) continue;
-            const FontGlyph& g = picture_font->glyphs[static_cast<std::size_t>(index)];
+        for (const std::uint8_t index : prompts::kSlotGlyph) {
+            if (index >= picture_font->glyphs.size()) continue;
+            const FontGlyph& g = picture_font->glyphs[index];
             if (g.sheet >= picture_font->sheets.size()) continue;
             const DecodedTexture& sheet = picture_font->sheets[g.sheet];
-            Piece piece{GlyphFamily::Wii, button, picture_font->cell_width, picture_font->cell_height};
+            Piece piece{{GlyphFamily::Wii, index}, picture_font->cell_width, picture_font->cell_height};
             piece.rgba.resize(static_cast<std::size_t>(piece.width) * piece.height * 4u);
             for (int y = 0; y < piece.height; ++y) {
                 for (int x = 0; x < piece.width; ++x) {
@@ -76,7 +50,6 @@ GlyphAtlasImage build_glyph_atlas(const GameFont* picture_font, float scale) {
             pieces.push_back(std::move(piece));
         }
     }
-
     // Shelves 1024 wide, a texel of clear border around each.
     GlyphAtlasImage out;
     constexpr int kWidth = 1024;
@@ -106,12 +79,10 @@ GlyphAtlasImage build_glyph_atlas(const GameFont* picture_font, float scale) {
                         &piece.rgba[static_cast<std::size_t>(row) * piece.width * 4u],
                         static_cast<std::size_t>(piece.width) * 4u);
         }
-        const auto f = static_cast<std::size_t>(piece.family), b = static_cast<std::size_t>(piece.button);
-        out.atlas.rects[f][b] = {static_cast<float>(places[i].x) / kWidth, static_cast<float>(places[i].y) / height,
-                                 static_cast<float>(places[i].x + piece.width) / kWidth,
-                                 static_cast<float>(places[i].y + piece.height) / height,
-                                 static_cast<float>(piece.width) / static_cast<float>(piece.height)};
-        out.atlas.present[f][b] = true;
+        out.atlas.rects[GlyphAtlas::key(piece.ref)] = {
+            static_cast<float>(places[i].x) / kWidth, static_cast<float>(places[i].y) / height,
+            static_cast<float>(places[i].x + piece.width) / kWidth, static_cast<float>(places[i].y + piece.height) / height,
+            static_cast<float>(piece.width) / static_cast<float>(piece.height)};
     }
     return out;
 }

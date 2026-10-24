@@ -1,5 +1,7 @@
 #include "galaxy/gx/menu_kit.h"
 
+#include "galaxy/button_prompts.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -208,9 +210,20 @@ float font_scale_y(const GameFont& font, const TextStyle& style) {
 
 }  // namespace
 
-float glyph(DrawList& list, const Assets& assets, const Space& space, GlyphFamily family, GlyphButton button, float x,
-            float y, float height, float alpha) {
-    const GlyphRect* rect = assets.glyphs != nullptr ? assets.glyphs->find(family, button) : nullptr;
+GlyphRef standard_glyph(GlyphFamily family, GlyphButton button) noexcept {
+    if (family == GlyphFamily::Wii) {
+        // picturefont.brfnt (prompts::kSlotGlyph): +, A, B, -, the D-pad, the Wii Remote.
+        constexpr std::uint16_t kWii[] = {25, 1, 2, 24, 20, 4};
+        return {family, kWii[static_cast<std::size_t>(button)]};
+    }
+    using prompts::Label;
+    constexpr Label kPad[] = {Label::Start, Label::South, Label::East, Label::Back, Label::Dpad, Label::Controller};
+    return {family, static_cast<std::uint16_t>(kPad[static_cast<std::size_t>(button)])};
+}
+
+float glyph(DrawList& list, const Assets& assets, const Space& space, GlyphRef ref, float x, float y, float height,
+            float alpha) {
+    const GlyphRect* rect = assets.glyphs != nullptr ? assets.glyphs->find(ref) : nullptr;
     if (rect == nullptr || alpha <= 0.0f) return 0.0f;
     const float width = height * rect->aspect;
     const Rgba white = fade(rgb255(255, 255, 255), alpha);

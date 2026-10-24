@@ -89,8 +89,8 @@ int main() {
     // The screens: a join hint that fades after 10 s, a card that comes and goes, the panel's buttons.
     {
         GlyphAtlas atlas;
-        atlas.present[1][0] = true;  // Xbox Start
-        atlas.rects[1][0] = {0, 0, 0.1f, 0.1f, 1.0f};
+        const GlyphRef start = standard_glyph(GlyphFamily::Xbox, GlyphButton::Start);
+        atlas.rects[GlyphAtlas::key(start)] = {0, 0, 0.1f, 0.1f, 1.0f};
         Assets assets;
         assets.glyphs = &atlas;
         Screens screens;
@@ -103,6 +103,7 @@ int main() {
         pad.family = GlyphFamily::Xbox;
         pad.name = u"Xbox 2";
         pad.join_candidate = true;
+        pad.join_glyph = start;
         in.devices.push_back(pad);
         const auto glyphs_drawn = [](const DrawList& list) {
             int n = 0;
