@@ -1,9 +1,10 @@
-"""Builds Nebula's custom-voice mod: Mario's voice lines from a folder of clips (made for the
+﻿"""Builds Nebula's custom-voice mod: Mario's voice lines from a folder of clips (made for the
 "Super Mario Odyssey Voice" sm64ex character pack: "(Mario) Jump 1.ogg" and so on).
 
     py -3 tools/animations/build_voice_mod.py --clips "C:/path/SMO Mario Voice/sound" --content C:/nb/build/content
 
-Writes <content>/mods/voice: each clip as 16-bit mono WAV at 32000 Hz (the rate Galaxy's DSP mixes at),
+Writes <content>/mods/voice: each clip as 16-bit mono WAV at 32000 Hz (the rate Galaxy's DSP mixes at;
+band-limited resampling), loudness-normalised with a true-peak ceiling (report.txt),
 and voices.txt, which lists for each of Galaxy's player-voice sound IDs the clips to pick from. Nebula
 silences the game's line and plays one of these instead (runtime/include/galaxy/voice_replacement.h);
 F1 > General > Custom voice switches it live. Needs numpy and soundfile.
@@ -11,9 +12,13 @@ F1 > General > Custom voice switches it live. Needs numpy and soundfile.
 import argparse
 import os
 import struct
+import sys
 
 import numpy as np
 import soundfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import audio  # noqa: E402
 
 # Galaxy player-voice sound (AudioRes/SMR.szs sound name table, section 0, PLAYER_VOICE) -> clip names
 # (without "(Mario) " and ".ogg"). Lines not listed keep the game's voice (the spin and flips keep Galaxy's).
@@ -56,25 +61,37 @@ LINES = {
     0x10053: ('SE_PV_WALL_HIT_BODY', ['oof 1']),
 }
 RATE = 32000
-# Loudness of the converted clips: RMS of the voiced part, with peaks capped. Like the game's own voice samples,
-# they are near full scale: the game's channel volume and placement turn them down in the mix.
-TARGET_RMS = 0.25
-PEAK_CAP = 0.95
-# Quiet lines are quieter than shouts: a factor on TARGET_RMS per clip.
+# Every clip is brought to one loudness (ITU-R BS.1770, LUFS) and its true peak held under the ceiling by a
+# look-ahead limiter. Nebula plays the clips at that level on the game's voice channel, whose volume and
+# placement the game still applies (voice_replacement.cpp). The sources range from -37 to -6 LUFS, and ten
+# of them (the jumps, double jumps and electrocutions) peak 2-4 dB over full scale.
+TARGET_LUFS = -12.0
+CEILING_DBTP = -1.0
+# Quiet lines are quieter than shouts: a factor on the target's level per clip.
 SOFT = {'Sleeping 1': 0.25, 'Sleeping 2': 0.25, 'Yawning': 0.45, 'Panting 1': 0.45, 'Panting 2': 0.45,
         'Panting 3': 0.45, 'Grab Ledge': 0.8, 'Get up from Ledge 1': 0.7, 'Get up from Ledge 2': 0.7,
         'Get up from Ledge 3': 0.7, 'Lands': 0.8}
+FADE_IN, FADE_OUT = 0.001, 0.005  # seconds: no click where a clip starts or stops mid-wave
 
 
-def resample(x, src, dst):
-    if src == dst:
-        return x
-    n = int(round(len(x) * dst / src))
-    spectrum = np.fft.rfft(x)
-    keep = n // 2 + 1
-    out = np.zeros(keep, dtype=complex)
-    out[:min(keep, len(spectrum))] = spectrum[:min(keep, len(spectrum))]
-    return np.fft.irfft(out, n) * (n / len(x))
+def limit(x, rate, ceiling, lookahead=0.0015, release=0.06):
+    """Look-ahead peak limiter: the gain falls over the look-ahead window before a peak over the ceiling
+    (measured 4x oversampled) and recovers over the release, so attacks keep their shape."""
+    over = np.abs(audio.resample(x, rate, rate * 4, half_taps=24))
+    over = np.pad(over, (0, (-len(over)) % 4)).reshape(-1, 4).max(1)[:len(x)]
+    need = np.minimum(1.0, ceiling / np.maximum(over, 1e-9))
+    ahead = max(1, int(lookahead * rate))
+    held = np.array([need[i:i + ahead].min() for i in range(len(need))])
+    gain = np.empty_like(held)
+    g = 1.0
+    rel = np.exp(-1.0 / (release * rate))
+    for i, h in enumerate(held):
+        g = h if h < g else h + (g - h) * rel
+        gain[i] = g
+    # Eased across the look-ahead, never above what the peaks need.
+    gain = np.minimum(gain, np.convolve(np.pad(gain, (ahead, ahead), mode='edge'), np.ones(ahead) / ahead,
+                                        mode='same')[ahead:-ahead])
+    return x * gain
 
 
 def write_wav(path, samples):
@@ -92,7 +109,11 @@ def main():
     args = ap.parse_args()
     out = os.path.join(args.content, 'mods', 'voice')
     os.makedirs(out, exist_ok=True)
+    for f in os.listdir(out):
+        if f.endswith('.wav') or f == 'voices.txt':
+            os.remove(os.path.join(out, f))  # clips of lines no longer replaced (the flips) go too
     converted = {}
+    report = []
     lines = ['# Nebula custom voice, built by tools/animations/build_voice_mod.py',
              '# sound id, then the clips to pick from']
     for sound_id, (name, clips) in sorted(LINES.items()):
@@ -104,20 +125,31 @@ def main():
                 continue
             if clip not in converted:
                 data, rate = soundfile.read(src, always_2d=True)
-                mono = data.mean(1)
-                mono = resample(mono, rate, RATE)
-                voiced = mono[np.abs(mono) > 0.02 * (np.abs(mono).max() or 1.0)]
-                rms = float(np.sqrt(np.mean(voiced ** 2))) if len(voiced) else 1.0
-                gain = TARGET_RMS * SOFT.get(clip, 1.0) / (rms or 1.0)
-                gain = min(gain, PEAK_CAP / (np.abs(mono).max() or 1.0))
+                mono = audio.resample(data.mean(1), rate, RATE)
+                target = TARGET_LUFS + 20 * np.log10(SOFT.get(clip, 1.0))
+                # The limiter takes some loudness off peaky clips: normalise and limit again until on target.
+                for _ in range(12):
+                    short = target - audio.loudness(mono, RATE)
+                    if abs(short) < 0.1:
+                        break
+                    mono = limit(mono * 10 ** (short / 20), RATE, 10 ** (CEILING_DBTP / 20))
+                fade_in, fade_out = int(FADE_IN * RATE), int(FADE_OUT * RATE)
+                mono[:fade_in] *= np.linspace(0.0, 1.0, fade_in, endpoint=False)
+                mono[-fade_out:] *= np.linspace(1.0, 0.0, fade_out)
                 file = clip.lower().replace(' ', '_') + '.wav'
-                write_wav(os.path.join(out, file), mono * gain)
+                write_wav(os.path.join(out, file), mono)
                 converted[clip] = file
+                report.append((clip, rate, mono))
             files.append(converted[clip])
         if files:
             lines.append('0x%08X %s  # %s' % (sound_id, ' '.join(files), name))
     with open(os.path.join(out, 'voices.txt'), 'w', newline='\n') as f:
         f.write('\n'.join(lines) + '\n')
+    with open(os.path.join(out, 'report.txt'), 'w', newline='\n') as f:
+        f.write('clip                     source Hz   LUFS  true peak dBTP\n')
+        for clip, rate, mono in report:
+            f.write('%-24s %9d %6.1f %8.1f\n' % (clip, rate, audio.loudness(mono, RATE),
+                                                  20 * np.log10(max(audio.true_peak(mono, RATE), 1e-9))))
     print('%d lines, %d clips -> %s' % (len(lines) - 2, len(converted), out))
 
 
