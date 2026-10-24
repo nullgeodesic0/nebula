@@ -17,6 +17,10 @@ void start_relay() noexcept;
 // crash paths call it so the last lines are not lost.
 void drain_relay(std::chrono::milliseconds limit) noexcept;
 
+// The stream's original destination (1 standard output, 2 error) while the relay stands in for it, else null: a
+// process this one starts gets these, not the relay's pipes, which end with this process.
+[[nodiscard]] void* original_destination(int stream) noexcept;
+
 // Bytes the relay dropped because more than its memory cap was waiting on a stalled consumer.
 [[nodiscard]] std::uint64_t relay_dropped_bytes() noexcept;
 

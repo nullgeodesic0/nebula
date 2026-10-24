@@ -28,6 +28,7 @@ public:
     bool start(DWORD std_id, int fd, std::FILE* stream, const wchar_t* name) noexcept;
     void drain(std::chrono::steady_clock::time_point deadline) noexcept;
     std::uint64_t dropped() const noexcept { return dropped_.load(std::memory_order_relaxed); }
+    HANDLE destination() const noexcept { return destination_; }
 
 private:
     void read_loop() noexcept;
@@ -226,6 +227,11 @@ void drain_relay(std::chrono::milliseconds limit) noexcept {
     if (s_error != nullptr) {
         s_error->drain(deadline);
     }
+}
+
+void* original_destination(int stream) noexcept {
+    const Relay* relay = stream == 1 ? s_output : stream == 2 ? s_error : nullptr;
+    return relay != nullptr ? relay->destination() : nullptr;
 }
 
 std::uint64_t relay_dropped_bytes() noexcept {

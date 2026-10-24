@@ -3,6 +3,7 @@
 #include "galaxy/coop_guest.h"
 #include "galaxy/netplay.h"
 #include "galaxy/netplay_session.h"
+#include "galaxy/output_relay.h"
 #include "galaxy/runtime_settings.h"
 
 #ifndef NOMINMAX
@@ -188,6 +189,27 @@ bool receive_message(SOCKET s, sockaddr_in& from, Header& header, std::string& t
     PROCESS_INFORMATION process{};
     std::fprintf(stderr, variables.empty() ? "[lobby] restarting on its own\n" : "[lobby] restarting into the session\n");
     std::fflush(stderr);
+    galaxy::output::drain_relay(std::chrono::milliseconds(500));
+    // The new process writes where this one's output went (the log a launcher or test redirected it to), not into
+    // the output relay's pipes, which end with this process.
+    const HANDLE self = GetCurrentProcess();
+    const auto inheritable = [self](void* relayed, DWORD std_id) {
+        const HANDLE source = relayed != nullptr ? static_cast<HANDLE>(relayed) : GetStdHandle(std_id);
+        HANDLE copy = nullptr;
+        if (source == nullptr || source == INVALID_HANDLE_VALUE ||
+            !DuplicateHandle(self, source, self, &copy, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+            return static_cast<HANDLE>(nullptr);
+        }
+        return copy;
+    };
+    const HANDLE child_out = inheritable(galaxy::output::original_destination(1), STD_OUTPUT_HANDLE);
+    const HANDLE child_err = inheritable(galaxy::output::original_destination(2), STD_ERROR_HANDLE);
+    if (child_out != nullptr || child_err != nullptr) {
+        startup.dwFlags |= STARTF_USESTDHANDLES;
+        startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        startup.hStdOutput = child_out;
+        startup.hStdError = child_err;
+    }
     if (CreateProcessW(exe, command_line.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &process)) {
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
