@@ -1,0 +1,363 @@
+# Mario and Luigi
+
+Nebula can put Mario and Luigi in the same level, each with their own controller, progressing together to
+the star. It is runtime code only (`runtime/include/galaxy/coop.h`, `runtime/src/coop_guest.cpp`) plus
+hooks the recompiler wraps around thirteen game calls (`coop_call_id` in `translate.rs`): no game data
+changes.
+
+There are three steps:
+
+1. **Local, one screen** (done). One world, two players, one shared camera that frames them both.
+2. **Local split screen** (done). When the players are far apart, the screen splits Lego-style along
+   the line between them, each half following its own player; it joins again when they meet.
+3. **Online.** One player hosts a lobby and the other joins. Both PCs run the same two-player world and
+   exchange only controller inputs each frame (lockstep, as Dolphin's netplay does), so enemies, objects
+   and everything else stay identical without sending game state. Each PC draws its own player's camera.
+   A per-frame checksum of the game state catches drift.
+
+## Switching it on
+
+Nebula Settings > General > "Two players: Mario and Luigi", or `coop=on` in `runtime_settings.ini`
+(`GALAXY_TWO_PLAYERS=1`; not `GALAXY_COOP`, which is the cooperative thread scheduler) picks the value at
+start-up. On the save-select screen, a panel in the bottom-right corner switches it as well:
+
+| Button (first controller) | Switch |
+| --- | --- |
+| Wii 1 (Xbox X, DualSense square, keyboard 1) | Multiplayer on or off, for the save about to be chosen |
+| Wii + (Menu / Options, keyboard + or P), pressed alone | Odyssey moves on or off (both players) |
+
+Both are written to `runtime_settings.ini` at once. The Multiplayer switch says whether a save starts with both
+players; either way a second player can drop in and out at any time (below). − and + together still open the
+settings. The panel shows the buttons of the controller in use. `moveset_second_player=off` keeps the Odyssey
+moves for Mario only.
+
+## Drop in, drop out
+
+As in the LEGO games, a second player can join and leave at any time, with no restart and no stage reload. The
+second brother is made in every stage whatever the setting; while nobody plays him he sits out as a player out
+of lives does (down and out: hidden, untouchable, carried beside the first, `sit_out`), and the camera, split
+screen, talks, pipes, Pull Stars, star bunnies, items and the miss all pass him over. His HUD is hidden (the
+first player's meter and lives counter stand where the game keeps them), his Remote reads still and
+disconnected, so no second pointer shows.
+
+- Drop in: + on a second controller (one that is not the first player's: not the one driving him). He appears
+  beside the first player with full health, his HUD comes back, and split screen, lives and the rest start from
+  there. That controller is his until he leaves. (Not while the first player is down, a miss plays or a level
+  starts: press again after.)
+- Drop out: − held for a second on his controller, or his controller disconnecting. He sits out again, and the
+  controllers all drive the first player, as in one-player play.
+- In or out is kept across stage changes; loading a save from the save select starts as its Multiplayer switch
+  says. Online the second player is the other PC's for the whole session.
+
+While he sits out every controller drives the first player; only the + of a controller other than the one in
+use is taken for the drop-in (`native_host.cpp`), so a lone player's own controller still pauses. Done in
+`update_presence` (coop_guest.cpp, in his turn), from his controller's input, so the agent's second controller
+drops in the same way (`press 2 PLUS 6`; `launch --solo` starts a game with him out). `GALAXY_COOP_HOT_JOIN=0`
+turns it off: co-op only with the setting, as before.
+
+## Controllers
+
+The first player plays whichever character the save file plays; the second player is the other one.
+
+- A second player who dropped in has the controller he dropped in with.
+- A save started with both players: with two or more controllers, the first connected controller is the first
+  player's, the second is the second player's; with one controller, the keyboard and mouse are the first
+  player's and the controller is the second player's. Keyboard and mouse stay the first player's.
+
+The second player uses their controller's own bindings (F1 > Controls); the spin is the shake binding or a
+real shake. They have the game's second Star Pointer ("P2"). A gyro controller (DualSense, Switch) aims it
+while the right stick turns their camera; otherwise the right stick aims it and the D-pad turns their camera.
+The recenter button centres it, and it hides when left still. The game counts it as a connected second Remote
+(WPad::mIsConnected, set by coop_guest.cpp each frame).
+
+### Star Pointers
+
+Each brother's pointer is his own, as the first player's is in one-player play:
+
+- Both collect Star Bits, and the second also shoots them with B.
+- Pull Stars answer the brother whose pointer is on them: his A grabs, and the Pull Star pulls him. The game
+  wired them to the first Remote only (GCapture reads channel 0); while the second player's pointer has them,
+  GCapture and GCaptureTarget run with him as the game's player and his pointer and A as channel 0's: calls into
+  their code (hook 77, `capture_code_begin`) and their nerve steps (Spine::update, hook 82, since their nerves
+  reach them by tail branches). A bind by the other brother's body, standing next to him, is refused (requestBind
+  skipped, false). They change hands only while nobody is being pulled.
+- The game's Co-Star help on the second pointer's A is off, since A is the second player's jump: it no longer
+  makes the other brother jump (MarioActor::isRequestJump2P and kin), holds enemies
+  (MR::isStarPointerPointing2POnPressButton/OnTriggerButton) or fires launch stars
+  (MR::isPlayerPointedBy2POnTriggerButton). Their results are zeroed (hook 81).
+- In split screen a pointer hits what is drawn under it, in either half: the game tests targets with one camera,
+  the shared one, so each pointer's tests (isStarPointerPointingCore, hook 74) are given the camera and
+  projection of the half its cursor is over, as that half was drawn (`pointer_half_begin`), and GCapture's
+  choice of the nearest Pull Star (MR::calcScreenPosition, hook 75) likewise for the capturing brother's pointer.
+  The cursors are drawn where they are aimed, as before. Checked with the agent: each brother's pointer on a
+  Star Bit in the other's half collects it.
+- Star Bit shots: each pointer has the game's StarPieceShooter, which aims from the game's player through the
+  game camera and throws from beside that camera, so the second player's shots left from the first player's
+  camera and aimed through it. Now the second pointer's shot aims from the second player (MR::getPlayerPos in
+  `calcShootGoalUsingPointingDepth`, hook 52) and leaves from his own camera in split screen (300 to its left,
+  as the game's second pointer does) or from above his head on one shared screen, under his gravity
+  (`shot_from_second_player`, before StarPiece::throwToTarget/throwToTargetCore, hook 86). In split screen
+  either pointer's world point (StarPointerController::mWorldPos, from the EFB depth under it) is made again
+  with the camera and off-centre lens of the half it is over, and a far aim (the sky) follows that half's ray
+  (`shot_goal_player_pos`, coop::unproject_pointer and star_bit_shot_goal, tested in coop_tests); a thrown point
+  stops at the first wall seen from that camera. The charge sparkle still shows at the first player.
+
+## What happens in game
+
+- Both characters' models are loaded at the start (the player heap grows by 2 MB for it).
+- The second player appears beside the first when the first is placed in a level, and moves through the
+  game's own player code each frame with their own controller. He is kept out of the game's movement list
+  (suspended): a galaxy's start resumes the scene's suspended objects, and the game would then move him a second
+  time each frame with the first player's controller.
+- Each brother animates as himself. The game resolves its one player's animations into one static table
+  (`marioAnimeTable`, through `luigiAnimeSwapTable` when he is Luigi), so the second player gets his own copy of
+  it after his `init2` and the first player's is put back (`coop_guest.cpp`, namespace `anime`). With the custom
+  animations, Luigi resolves through the content's `mods/animations-model/luigi_swap.txt` (or
+  `mods/animations/luigi_swap.txt` without the custom model): Galaxy's own clips (`luigi<name>.bck`) where the mod
+  changed Mario's, and the Odyssey moveset's roll, dive, belly slide, ground-pound jump and dash shared with Mario.
+  Without the file Luigi keeps Galaxy's swap table. Solo Luigi saves use it too. `GALAXY_TRACE_ANIM=1` logs each
+  brother's animation as it changes (`[anim]`), and the agent's status has each player's `bck` and `motion`.
+- The players bump into each other: when their bodies (50 units round, 150 tall) overlap, each is pushed
+  half the overlap apart through the game's own `Mario::push`, so walls and floors still hold them.
+- The camera looks at the point between the players. When one is about to leave the picture the screen splits
+  (below). There is no tether: in split screen each brother may explore the whole level alone, however far
+  apart (only the one-screen mode, `GALAXY_COOP_SPLIT=0`, brings the second player back, below).
+
+## Split screen
+
+When a player is about to leave the shared picture (85% of the way from its middle to an edge, or 6000 units
+apart) the screen splits, Lego Indiana Jones 2 style: the line between the halves runs
+through the middle of the screen, square to where the second player is from the first on screen, so each
+player takes the side they are on (left and right, top and bottom, or any angle between), and the line turns
+smoothly as they move around each other; a black line between the halves fades in with the split. It joins
+again when both are back within 60% of the shared picture (the gap keeps it from flickering). The change takes
+1.25 s, eased to be still at both ends, and is seamless:
+
+1. At the split each half shows exactly its part of the shared picture, so nothing on screen moves.
+2. Each half then slides to centre on its own player: the first player's camera eases from the midpoint to
+   them, and the second player's camera pans from the first player's view to its own.
+3. Joining runs the same backwards, and the single screen comes back only when both halves show one
+   picture again.
+
+The second player's camera is the game's own camera system run a second time for them: a second
+CameraDirector (`make_second_director`, made when they are, as CameraDirector's constructor makes its parts:
+its own camera holder with every camera type, camera man, target (the second player), pose, interpolation,
+shaker; the stage's camera parameters, rails and registers shared with the game's). It runs each frame right
+after the game's camera (`run_second_director`, movement category 2) with the second player as the game's player
+and as MR::getCameraDirector's answer, and CameraContext is the game camera's again after it. So their half gets
+the stage's camera areas (CubeCamera), ground camera codes and every camera type as the first player's does: the
+Pull Star stretches in Space Junk frame the same for either brother. They turn it as the first player turns
+theirs (their controller's camera buttons). `GALAXY_COOP_GAME_CAMERA=0` falls back to the old follow camera: 1000
+units behind and 380 above along their gravity, steered with the pointer stick or the D-pad, short of walls.
+Event cameras (warps, launch stars, cutscenes) remain the game camera's, handed over as below.
+
+Only the brother in an event gets its camera; the other keeps his own the whole time. One brother's own event (a
+launch star he rides, a warp, a pipe) splits the screen even when they stand together (`solo_event`), but only with
+both brothers in play: with the other down or sitting out there is one screen, as in single player. A camera
+event the second player sets off plays in their half with the game's own camera (easing in from the second
+player's), and the first player's half keeps the game camera's last view of him, carried along with him; after
+it, his half keeps that view until the game camera is back with him (within 2500 units and settled), then eases
+into it. (A third CameraDirector run for the first player, the game's own player, made replays diverge at audio
+interrupt timing, though the second player's director does not; it was taken out.) A launch star the
+first player rides plays in his half with the game camera at once, even when it starts out near the second
+player (`first_event`), and the second player's half keeps his own camera.
+Each half's EFB copies (the bloom, blur and final scene captures) are its own, so neither half's effects
+show the other's picture. While split, the second player's stick is relative to their own camera, things only the second player can
+see are not clipped (they move and are drawn), their side keeps its shadows (`ShadowController`'s far clip is
+measured from their camera too), and the HUD is drawn once over the whole screen.
+
+How: `GameScene::draw3D` runs a second time with the second player's camera in `CameraContext` and its
+view matrices recalculated (`SceneFunction::executeCalcViewAndEntryList`). Viewports and scissors stay
+full-screen, so the game's screen-space passes (the shadow and bloom composites, which draw textures of the
+whole screen) line up. Each half's camera picture is moved to the middle of its side by shifting the
+projection's centre as the split eases in, and a `SplitClip` marker in the GX stream tells the renderer the
+line: for draws over the whole screen every vertex shader clips the other side away before rasterizing
+(`SV_ClipDistance0`), so nothing is written there, colour, depth or stencil (smaller viewports, such as
+Mario's shadow capture in a corner of the EFB, are left whole; lines and points are not clipped).
+`GALAXY_COOP_SPLIT=0` keeps one shared screen (the camera then hands back to the first player between 1200
+and 2600 units, and the second player is brought back after two seconds past 2600).
+## Lives, HUD and launch stars
+
+Lives work as in New Super Mario Bros. Wii, without the bubble:
+
+- Each player has their own lives and life meter. The first player's lives are the game's own (in the save);
+  the second player's start with as many each time a save is loaded (the game starts the first player at 4) and are kept while the game runs.
+- A player who goes down (no health left, a fall, a crush) while the other plays on spends one of their lives,
+  vanishes after their fall and comes back beside the other about two seconds later, with full health, standing
+  (MarioActor::_B90, which keeps the down pose, is cleared). The game's own miss (the "Too Bad!", the restart
+  from the checkpoint) does not happen.
+- A black hole is a fall like any other: one life, and back beside the other. The black hole's cameras (its
+  actor camera and the global "ブラックホール" event) never take the camera from the one still playing, and end
+  when the fallen player is back, so the camera follows him again; the HUD the fall puts away stays up, and the
+  fall's shrink, effect and the trail of his colour drawn after him are undone (`MR::forceDeleteEffectAll`). A
+  fall's later steps (exeGameOverBlackHole2) do not count it again.
+- A 1-Up (a mushroom, or a stomp chain's) goes to the brother who collects it only (`MR::incPlayerLeft` hook 89:
+  a 1-Up item nearer the second player, or his own trample jump, is his).
+- With no lives left a player sits out, carried along hidden beside the other, until the stage reloads.
+- Both down at once is the game's own miss, and each spends a life; game over only when both are out of lives.
+- A coin heals the brother who takes it only (it is taken in his turn, so `MR::incPlayerLife` heals him).
+
+HUD: the second player's life meter, tinted green, stands where the first player's would (top right), the first player's just left of it; the second player's lives counter,
+with their face, stands where the first player's would (bottom left), the first player's above it (comet timers
+use the bottom centre). They are the game's own layouts
+(HitPointMeter, PlayerLeft), made with the stage's HUD and shown, hidden and killed with the first player's; a
+life lost alone shows on the counter.
+
+Vehicles (the Star Ball, the manta ray): the first player mounts them, and the second rides along. A vehicle
+level is built for one rider (one Star Ball or ray, its goal, timer and race), so the second player's body is
+refused the mount (`MarioActor::addRushSensor` skipped for a Tamakoro or SurfRay sensor, hook 83), and while
+the first player rides (his rush partner is the vehicle) the second goes with him unseen and untouchable at
+his side, one screen; he gets off beside him when the ride ends. Each brother riding his own vehicle is left
+open: the refusal is the one place to change. Checked with the agent on Rolling Green's Star Ball (the manta
+ray, handed over by the penguin in Loopdeeloop, is not yet checked in game).
+
+Launch stars: a launch star takes only the brother on it; the other stays where he is and plays on (split screen
+shows both), and follows through the star himself or not. A launch star ridden by the second player runs with
+him as the game's player, so the flight's animations, camera and its end are his.
+
+Poles and other bind objects (a pole, swing, rope, plant or cannon the player jumps into): either brother uses
+them, one at a time. The object binds whoever jumps in (MarioActor::_924 is its sensor), and from then on its own
+nerve steps drive "the player" (his animation, climb, turn, jump off, end of the bind, channel 0's stick and A).
+A bound object's nerve step (`Spine::update`, hook 82) runs with the brother it binds as the game's player
+(`bind_spine_begin`), so the second brother climbs with his own stick and jumps off with his own A. A pole free of
+both also runs as the brother nearer it (its grab sensor slides along it to the game's player's height). An object
+one brother is bound to is not the other's (`addRushSensor` skipped, hook 83: a pole holds one rider), and a pole
+that let the second brother go unseen (an enemy hitting it, with the first as the game's player) has his bind ended
+in his turn. Launch stars, pipes, Pull Stars, the star get and vehicles keep their own handling above. Before this,
+a pole the second brother grabbed ran as the first: the second hung on it in his run animation, the first's stick
+climbed the pole, and the first's A let go of a rider who was never let go; the second's next base-matrix update
+went to the empty rider and the game closed with no crash log (Rolling Green, after the Star Ball).
+`tools/agent/coop_pole_check.py` checks it there. Only the pole is checked in game; swings, ropes, plants and
+cannons take the same path but may do some of their work outside their nerve steps.
+
+Pipes work as in New Super Mario Bros. Wii. The first brother into a green pipe (EarthenPipe) waits inside,
+held before he crosses over, until the other reaches its mouth or 6 seconds pass. Then he comes out of the
+other end, and the pipe takes the other in right behind him (put on its mouth if he did not come): both play
+the pipe's own enter and exit, and arrive together. While one waits, the other moves freely (no travelling
+beside the first). A pipe the second player goes through runs with him as the game's player, as launch stars
+do. Hooks: `EarthenPipe::exeReady/exePlayerIn/exeTargetPipeShowUp/exePlayerOut` (`pipe_holds`,
+`pipe_after_exit`).
+
+Talks: the brother nearest an NPC gets its A prompt, and his A starts the talk, which plays on him (the NPC
+turns to him; the text names him, and lines that ask whether the player is Luigi answer for him). Talks do not
+freeze the world: there is no talk cutscene (scene stop, player hold), talk pose or talk camera, so both brothers
+keep moving and the world keeps running. The talk window stands in the world over the NPC, like the walk-by
+balloons, at 0.7 of its size (`talk_window_in_world`; `GALAXY_TALK_WINDOW="dx,dy,scale"` overrides the placement),
+rather than across the top of the screen. It is kept on screen and, in split screen, wholly inside its talker's
+half (`keep_talk_window_in_view`), at 0.55 of its size there. It works
+in split screen too: the talk director takes its talker from the NPC it has in hand, not the last NPC that asked. Either brother's A pages the text (A does not jump while a talk
+window is open), and either chooses yes or no, with A or the pointer. A cutscene the talk sets off (a Power Star
+appearing, a Luma turning into a launch star) waits for the talk's end and plays as usual. Talks inside a
+cutscene and the short walk-by balloons are unchanged. Star bunnies run their code as the nearer brother, so
+their talk, chase and caught scene are whoever comes up to them; the caught scene binds that brother. Hooks:
+`talk_begin`, `talk_director_begin`, `talk_calm_skips`, `nearer_player_code` (ids 53-71).
+
+Level of detail: objects choose their detailed, middle or low model by the distance to the nearer brother
+(`LodCtrl::calcDistanceToCamera`, hook 72), so models are detailed around both and low only where neither is.
+
+Items: coins, purple coins and star chips are collected by whichever brother touches them (checked with the
+agent's `actors` command). `MR::isNearPlayer` and `isNearPlayerAnyTime` count either brother; switch areas
+(`SwitchArea`: SwitchCube, SwitchSphere, SwitchCylinder, which let star bunnies out, start boss fights and the
+like) see the second player when he is inside and the first is not; star bunnies (`TrickRabbit`,
+`RunawayRabbit`) run from the nearer brother. Koopa shells (`JetTurtle`, `GoldenTurtle`) run their code as the
+brother at them (hook 53, and their nerve steps through Spine::update): far from the first brother a shell stays
+in place for the second (it went back to its place, far from the game's player), and is taken by the one whose
+sensor touches it. Checked with the agent in Tear Drop: each brother, 5900 units from the other, took a shell
+and carried it.
+
+Star Bits: a Star Bit tests the pointers only within 150 m of the game's player (`StarPiece::tryGotJudge`) and
+then flies to him, so far from the first brother the second's pointer did nothing. A Star Bit's code runs with the
+brother nearer it as the game's player (calls into it, hook 86, and its nerve steps through Spine::update), so
+one near either brother is pointable and flies to whoever is near it. The far plane's frustum test (hook 88)
+also leaves alone what the second player's half shows. Checked with the agent: 26000 units from Mario, Luigi's
+pointer collected 10 Star Bits around him.
+
+Sound: the game hears 3D sounds from its camera, so far from the first brother the second's surroundings fell
+silent. After `AudDopplerAudienceState::convertAbsToRel` (hook 87; every positioned sound's volume, pan,
+surround, reverb, priority and cut-off come from its result) a source nearer the second brother is placed as it
+stands from him but around the first, and the result is made again (`sound_from_nearer_brother`): each brother's
+surroundings are heard alike. Guest state only, so online both PCs hear it the same.
+
+The star get with both brothers: whichever brother takes a Power Star, the other stands beside him for the star
+get, as on the Luigi missions: pinned beside the star (its matrix, the one the taker is held to), held by the
+game's remote-demo hold (no moving, no falling), without hit sensors (no damage, no death) and playing the star
+get animation; the screen is one picture meanwhile. Done in each brother's own turn (`star_get_watch`,
+`star_get_update`), from the taker's rush partner being a PowerStar and `MR::isPowerStarGetDemoActive`. The
+stage ends after it, so nothing undoes the hold.
+
+Boss arenas: when a cutscene starts (or a boss's music, `MR::startBossBGM`, hook 84) and a boss (Bowser, Bowser Jr.
+and his ship, Kamella, Topmaniac, Bugaboom, Dino Piranha, Fiery Dino Piranha, Major Burrows, Kingfin, Bouldergeist,
+Tarantox, Megaleg, Baron Brr) is within 8000 units of a brother while the other is away, the other is brought
+beside him (`gather_for_boss`). Other cutscenes move nobody. Checked with the agent on Dino Piranha's intro, Luigi
+24000 units away. Either brother starts a fight: a boss whose start is a switch area (Dino Piranha, Topmaniac,
+Bugaboom, Kingfin, Kamella's) starts for the second player entering it, and the first is then brought beside
+him (checked with the agent on Dino Piranha's planet, Mario 23000 units away). An area that also wants the
+player standing (arg0 set, Topmaniac's) waits for the first player to be on the ground, wherever he is.
+
+
+Online, each PC shows only its own brother's cursor: around the other brother's pointer layout's draw
+(`StarPointerLayout::drawDecoration`, hook 85) the renderer clips everything away, with the same host-side marker
+as split screen's line; guest drawing and state are the same on both PCs (checked with `determinism.py netpair`).
+
+The runtime side is in `coop_guest.cpp` (`on_game_over_call`, `update_down_player`, `create_hud`,
+`rides_star`); the rules are `coop::go_down_alone` and `coop::respawn_due`, tested in `coop_tests.cpp`.
+
+## Known limits
+
+These come from a game written for one player and are what the playtest should look at:
+
+- Enemies, doors and stars act on the first player. The second player can stomp, spin and collect: coins,
+  purple coins (Battlerock's), star chips and star bunnies (Gusty Garden's) were checked with the agent. A
+  bunny's talk and caught scene play on whichever brother comes up to it.
+- Talks: not yet checked in game are NPC actions after a non-freezing talk (a Luma becoming a launch star, a
+  Power Star presented, a Hungry Luma's transformation) and the yes/no choice; the A that starts a talk may
+  also make the talker hop.
+- Rumble goes to the first player's controller.
+- The Observatory's doors and domes (AstroChangeStageCube areas) test the game's player, the first: when the
+  second player walks into one the first is not in, the players swap places, so the game takes them through
+  (and both arrive in the next scene). Warps, launch stars and cutscenes the game starts for the first player
+  move the first player only; the second rejoins them at the next level start.
+- The flight into a galaxy from a dome (and the level start after it) takes the second player along with the
+  first. While a cutscene plays or the game otherwise holds the first player's controls, the second player is
+  held where he stands, and stays there after it: he is never brought to the first for one. Otherwise they
+  are free.
+- Power-ups: a stage loads the second player's power-up archives (BeeLuigi, IceLuigi, ...) with the first
+  player's, so both can take every power-up. Both cannot be Boos at once (the second's Boo parts share the
+  first's Boo draw buffer): whoever becomes a Boo second keeps their form.
+- The players push each other aside; neither stomps the other (a landing on the partner bounced forever).
+- After a black hole's fall a brother comes back standing twisted (his up vector still the hole's) until he
+  first moves; the game updates it only on the move.
+- Voices: the brother who is not the save's character speaks with its voice. Each line is one sound whose Luigi
+  take AudSystem::switchToLuigi picks by AudSceneMgr's player mode (+0x14) from the player voice wave set
+  (bank 0x22: set mask 2 Mario, 4 Luigi) that AudSceneMgr::loadPlayerResource loads for the save's character
+  only. Both sets do not fit the 14 MiB ARAM heap (the second takes about 630 KB, and the stage's own sound loads
+  then never finish), so each brother's own voice waits for a larger emulated ARAM (branch `coop-voice-wip`: the
+  mode swapped with gIsLuigi in each player's turn, and the partner's set loaded after loadPlayerResource). The
+  custom voice (`content\mods\voice`) replaces Mario's take only: a line in Luigi's take (its output track's
+  port 12 holds 0x14) keeps the game's voice unless voices.txt gives `luigi` clips for it.
+- Split screen: mirror reflections follow the first player's camera only; the second player's camera has no
+  camera areas (the game's fixed and rail cameras are the first player's); an event the second player starts
+  through an object (not their own move) plays in the first player's half; the temporal upscaler and motion blur assume one camera a
+  frame, so turn them off while playing split. The 3D scene costs twice as much to draw while split.
+- Memory: the Wii's 24 MB of MEM1 has no room for a second player on the fullest stages. When the stage's MEM1
+  heap is full, the runtime takes the allocation from the stage's MEM2 heap instead (`[heap]` in the log); a
+  stage that fills both still stops.
+
+## Playtest
+
+Run with `GALAXY_TRACE_COOP=1` to log each co-op step to the console. Things to check, in order:
+
+1. The game boots to the file select with co-op on (archive loading worked).
+2. Entering a level shows both characters (trace: a `players: first ... second ...` line).
+3. The second controller moves the second character only, and jumping, spinning and Z work.
+4. The camera frames both, and walking far apart brings the second player back.
+5. Walking into each other pushes both apart; walking apart splits the screen smoothly and walking back
+   joins it (trace: `split: second player on the right`).
+6. While split, enemies near only the second player move, and the second player's stick follows their half.
+7. Stomping an enemy, collecting star bits and touching the star with the second player.
+6. Dying with either player, and leaving a level.
+
+A crash or a missing character, with the trace's last lines, is the most useful report.
+
+An agent can run most of these unattended with the play-testing tools (docs/AGENT_TESTING.md): a test copy
+that jumps straight into a galaxy mission, gives either player power-ups, moves them and reports crashes.

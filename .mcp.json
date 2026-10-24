@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "nebula-playtest": {
+      "command": "py",
+      "args": ["-3", "-I", "tools/agent/nebula_mcp.py"]
+    }
+  }
+}
