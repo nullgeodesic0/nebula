@@ -196,6 +196,21 @@ Launch stars: a launch star takes only the brother on it; the other stays where 
 shows both), and follows through the star himself or not. A launch star ridden by the second player runs with
 him as the game's player, so the flight's animations, camera and its end are his.
 
+Poles and other bind objects (a pole, swing, rope, plant or cannon the player jumps into): either brother uses
+them, one at a time. The object binds whoever jumps in (MarioActor::_924 is its sensor), and from then on its own
+nerve steps drive "the player" (his animation, climb, turn, jump off, end of the bind, channel 0's stick and A).
+A bound object's nerve step (`Spine::update`, hook 82) runs with the brother it binds as the game's player
+(`bind_spine_begin`), so the second brother climbs with his own stick and jumps off with his own A. A pole free of
+both also runs as the brother nearer it (its grab sensor slides along it to the game's player's height). An object
+one brother is bound to is not the other's (`addRushSensor` skipped, hook 83: a pole holds one rider), and a pole
+that let the second brother go unseen (an enemy hitting it, with the first as the game's player) has his bind ended
+in his turn. Launch stars, pipes, Pull Stars, the star get and vehicles keep their own handling above. Before this,
+a pole the second brother grabbed ran as the first: the second hung on it in his run animation, the first's stick
+climbed the pole, and the first's A let go of a rider who was never let go; the second's next base-matrix update
+went to the empty rider and the game closed with no crash log (Rolling Green, after the Star Ball).
+`tools/agent/coop_pole_check.py` checks it there. Only the pole is checked in game; swings, ropes, plants and
+cannons take the same path but may do some of their work outside their nerve steps.
+
 Pipes work as in New Super Mario Bros. Wii. The first brother into a green pipe (EarthenPipe) waits inside,
 held before he crosses over, until the other reaches its mouth or 6 seconds pass. Then he comes out of the
 other end, and the pipe takes the other in right behind him (put on its mouth if he did not come): both play
