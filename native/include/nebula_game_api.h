@@ -140,6 +140,19 @@ enum {
     NEBULA_OPTION_DRAW_IDENTITIES, /* 1 while the renderer reads host markers (__NebulaGXHostMarker) */
     NEBULA_OPTION_RT_SHADOW_CASTERS, /* 1 while the ray tracer lights the scene: clipped actors whose shadows can
                                         reach the view stay drawn (ClippingActorInfo::judgeShadowDraw) */
+    NEBULA_OPTION_MOVESET,      /* the Odyssey moves (nebula_odyssey_moveset.h): NEBULA_MOVESET_* bits */
+    NEBULA_OPTION_MOTION_STYLE, /* how characters move (nebula_motion_style.h): 0 original, 1 smooth, 2 modern */
+};
+
+/* NEBULA_OPTION_MOVESET: the moves on, then each of them, and whether a co-op second player has them too. */
+enum {
+    NEBULA_MOVESET_ON = 1,
+    NEBULA_MOVESET_ROLL = 2,
+    NEBULA_MOVESET_ROLL_JUMP = 4,
+    NEBULA_MOVESET_GROUND_POUND_JUMP = 8,
+    NEBULA_MOVESET_DIVE = 16,
+    NEBULA_MOVESET_TURN_BOOST = 32,
+    NEBULA_MOVESET_SECOND_PLAYER = 64,
 };
 
 /* game_light: the game's lights, from the objects that own them; `values` per kind. */

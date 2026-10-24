@@ -509,9 +509,9 @@ int main() {
 
     passed &= expect(key(VK_TAB), "Tab enters the general page");
     snapshot = galaxy::gx::native_settings_overlay_snapshot();
-    passed &= expect(snapshot.tab == 4u && snapshot.row_count == 10u,
-                     "general page has text speed, language, Discord status, button prompts, custom voice, HOME Menu "
-                     "and Mii import (a heading, import, count, folder)");
+    passed &= expect(snapshot.tab == 4u && snapshot.row_count == 12u,
+                     "general page has text speed, language, Discord status, button prompts, custom voice, HOME Menu, "
+                     "Odyssey moves, motion style and Mii import (a heading, import, count, folder)");
     passed &= expect(galaxy::get_runtime_settings().text_speed == 1u, "text speed starts at the game's pace");
     passed &= expect(key(VK_RIGHT) && galaxy::get_runtime_settings().text_speed == 2u, "right raises text speed live");
     passed &= expect(key(VK_RIGHT) && key(VK_RIGHT) && galaxy::get_runtime_settings().text_speed == 4u,

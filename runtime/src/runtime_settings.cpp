@@ -160,6 +160,21 @@ void apply_kv(RuntimeSettings& settings, const char* key, const char* value) {
         if (_stricmp(value, "playstation") == 0) settings.button_prompts = ButtonPrompts::DualSense;
     } else if (std::strcmp(key, "custom_voice") == 0) {
         settings.custom_voice = value[0] != '0' && _stricmp(value, "off") != 0;
+    } else if (std::strcmp(key, "motion_style") == 0) {
+        for (unsigned style = 0u; style < 3u; ++style) {
+            if (_stricmp(value, motion_style_key(style)) == 0) settings.motion_style = style;
+        }
+    } else {
+        // The Odyssey moves: on or off, each of them.
+        const bool on = value[0] != '0' && _stricmp(value, "off") != 0;
+        OdysseyMovesetSettings& moves = settings.moveset;
+        if (std::strcmp(key, "odyssey_moveset") == 0) moves.enabled = on;
+        else if (std::strcmp(key, "moveset_roll") == 0) moves.roll = on;
+        else if (std::strcmp(key, "moveset_roll_jump") == 0) moves.roll_jump = on;
+        else if (std::strcmp(key, "moveset_ground_pound_jump") == 0) moves.ground_pound_jump = on;
+        else if (std::strcmp(key, "moveset_dive") == 0) moves.dive = on;
+        else if (std::strcmp(key, "moveset_turn_boost") == 0) moves.turn_boost = on;
+        else if (std::strcmp(key, "moveset_second_player") == 0) moves.second_player = on;
     }
 }
 
@@ -302,6 +317,10 @@ void apply_env_overrides(RuntimeSettings& settings) {
         settings, "GALAXY_AUDIO_WIIMOTE_SPEAKER_GAIN", "audio_wiimote_speaker_gain");
     apply_env(settings, "GALAXY_TEXT_SPEED", "text_speed");
     apply_env(settings, "GALAXY_LANGUAGE", "language");
+    apply_env(settings, "GALAXY_BUTTON_PROMPTS", "button_prompts");
+    apply_env(settings, "GALAXY_CUSTOM_VOICE", "custom_voice");
+    apply_env(settings, "GALAXY_MOTION_STYLE", "motion_style");
+    apply_env(settings, "GALAXY_ODYSSEY_MOVESET", "odyssey_moveset");
 }
 
 }  // namespace
@@ -351,6 +370,10 @@ const char* game_language_key(GameLanguage language) noexcept {
     case GameLanguage::English: break;
     }
     return "english";
+}
+
+const char* motion_style_key(unsigned style) noexcept {
+    return style == 1u ? "smooth" : style == 2u ? "modern" : "original";
 }
 
 const char* button_prompts_key(ButtonPrompts prompts) noexcept {
@@ -448,6 +471,14 @@ bool save_runtime_settings_to_file() {
                  << "discord_status=" << (settings.discord_status ? 1 : 0) << '\n'
                  << "button_prompts=" << button_prompts_key(settings.button_prompts) << '\n'
                  << "custom_voice=" << (settings.custom_voice ? "on" : "off") << '\n'
+                 << "motion_style=" << motion_style_key(settings.motion_style) << '\n'
+                 << "odyssey_moveset=" << (settings.moveset.enabled ? "on" : "off") << '\n'
+                 << "moveset_roll=" << (settings.moveset.roll ? "on" : "off") << '\n'
+                 << "moveset_roll_jump=" << (settings.moveset.roll_jump ? "on" : "off") << '\n'
+                 << "moveset_ground_pound_jump=" << (settings.moveset.ground_pound_jump ? "on" : "off") << '\n'
+                 << "moveset_dive=" << (settings.moveset.dive ? "on" : "off") << '\n'
+                 << "moveset_turn_boost=" << (settings.moveset.turn_boost ? "on" : "off") << '\n'
+                 << "moveset_second_player=" << (settings.moveset.second_player ? "on" : "off") << '\n'
                  << input::format_controls_settings(input::get_controls_config());
         if (!contents) {
             return false;

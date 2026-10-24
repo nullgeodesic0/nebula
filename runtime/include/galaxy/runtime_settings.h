@@ -34,6 +34,19 @@ enum class GameLanguage : std::uint8_t { English = 1, French = 3, Spanish = 4 };
 // PlayStation while one is, the Wii Remote's otherwise) or always one family.
 enum class ButtonPrompts : std::uint8_t { Auto = 0, Wii = 1, Xbox = 2, DualSense = 3 };
 
+// The Odyssey moveset (nebula_odyssey_moveset.h): roll, roll boost, roll jump, ground-pound jump and roll, and dive
+// on top of Galaxy's own moves. Off by default; each move can be switched off on its own in runtime_settings.ini.
+struct OdysseyMovesetSettings {
+    bool enabled = false;
+    bool roll = true;
+    bool roll_jump = true;
+    bool ground_pound_jump = true;
+    bool dive = true;
+    bool turn_boost = true;
+    bool second_player = true;  // co-op: the second player has the moveset too
+    friend bool operator==(const OdysseyMovesetSettings&, const OdysseyMovesetSettings&) = default;
+};
+
 struct RuntimeSettings {
     RuntimeInputMode input_mode = RuntimeInputMode::Auto;
     RuntimeAudioSettings audio{};
@@ -47,6 +60,11 @@ struct RuntimeSettings {
     // Mario's voice lines from the user's clips (the mods folder's voice mod, built by
     // tools/animations/build_voice_mod.py). Changes live.
     bool custom_voice = true;
+    // The Odyssey moves. Changes live.
+    OdysseyMovesetSettings moveset{};
+    // Animation smoothing and Mario's movement feel (nebula_motion_style.h): 0 original, 1 smooth, 2 modern.
+    // Changes live.
+    unsigned motion_style = 0u;
 };
 
 // The language the game runs in this session: the setting when the game first asks (at boot), then
@@ -56,6 +74,8 @@ struct RuntimeSettings {
 [[nodiscard]] bool running_game_language(GameLanguage& language) noexcept;
 // "english", "french" or "spanish" (runtime_settings.ini).
 [[nodiscard]] const char* game_language_key(GameLanguage language) noexcept;
+// "original", "smooth" or "modern" (runtime_settings.ini `motion_style`).
+[[nodiscard]] const char* motion_style_key(unsigned style) noexcept;
 // "auto", "wii", "xbox" or "dualsense" (runtime_settings.ini `button_prompts`).
 [[nodiscard]] const char* button_prompts_key(ButtonPrompts prompts) noexcept;
 

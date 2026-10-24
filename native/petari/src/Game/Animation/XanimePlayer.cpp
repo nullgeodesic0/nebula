@@ -1,4 +1,5 @@
 #include "Game/Animation/XanimePlayer.hpp"
+#include "Game/Player/NebulaOdysseyMoves.hpp"
 #include "Game/Animation/XanimeCore.hpp"
 #include "Game/Animation/XanimeResource.hpp"
 #include <JSystem/J3DGraphAnimator/J3DAnimation.hpp>
@@ -455,6 +456,10 @@ void XanimePlayer::updateAfterMovement() {
 void XanimePlayer::updateInterpoleRatio() {
     if (_20->getRate() != 0.0f || _20->getAttribute() == 1) {
         if (_20->_14 != 0) {
+#ifdef TARGET_PC
+            // Nebula's motion style: the cross-fade eased (and lengthened in the modern style).
+            NebulaOdysseyMoves::shapeInterpole(&_08, &_20->_14);
+#endif
             _08 += (1.0f - _08) / _20->_14;
             _20->_14 -= 1;
         } else {

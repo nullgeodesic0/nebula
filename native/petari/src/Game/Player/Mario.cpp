@@ -1,4 +1,5 @@
 #include "Game/Player/Mario.hpp"
+#include "Game/Player/NebulaOdysseyMoves.hpp"
 #include "Game/Animation/XanimeCore.hpp"
 #include "Game/Enemy/KarikariDirector.hpp"
 #include "Game/LiveActor/Binder.hpp"
@@ -1821,6 +1822,10 @@ void Mario::update() {
 
     _A8C[1] = mVelocity;
 
+#ifdef TARGET_PC
+    // Nebula's Odyssey moves and motion style (NebulaOdysseyMoves.hpp), before his action uses what they change.
+    NebulaOdysseyMoves::tick(this);
+#endif
     actionMain();
 
     _A8C[3] = mVelocity;

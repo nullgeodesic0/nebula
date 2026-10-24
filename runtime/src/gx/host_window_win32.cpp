@@ -3254,6 +3254,31 @@ std::vector<SettingsRow> game_page(const RuntimeSettings& runtime) {
                         s_native_settings_dirty.store(true, std::memory_order_release);
                     },
                     "WHETHER WII HOME OPENS THE HOME MENU"});
+    rows.push_back({"ODYSSEY MOVES", runtime.moveset.enabled ? std::string("ON") : std::string("OFF"),
+                    [](RenderConfig&, int delta) {
+                        // Changes live (no apply).
+                        if (delta == 0) return;
+                        RuntimeSettings settings = get_runtime_settings();
+                        settings.moveset.enabled = !settings.moveset.enabled;
+                        set_runtime_settings(settings);
+                        s_native_settings_dirty.store(true, std::memory_order_release);
+                    },
+                    "ROLL, DIVE AND GROUND-POUND JUMP. THE CAP BUTTON IS WII 1"});
+    {
+        static constexpr const char* kStyles[] = {"ORIGINAL", "SMOOTH", "MODERN"};
+        rows.push_back({"MOTION STYLE", kStyles[std::min(runtime.motion_style, 2u)],
+                        [](RenderConfig&, int delta) {
+                            // Changes live (no apply).
+                            RuntimeSettings settings = get_runtime_settings();
+                            const unsigned next = settings_step(std::min(settings.motion_style, 2u), 3u, delta);
+                            if (next != settings.motion_style) {
+                                settings.motion_style = next;
+                                set_runtime_settings(settings);
+                                s_native_settings_dirty.store(true, std::memory_order_release);
+                            }
+                        },
+                        "SMOOTH: EASED ANIMATION BLENDS. MODERN: ALSO QUICKER STARTS, STOPS AND TURNS"});
+    }
     {
         rows.push_back({"MIIS", {}, nullptr, {}, true});
         std::string status;

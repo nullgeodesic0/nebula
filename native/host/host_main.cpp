@@ -1967,6 +1967,24 @@ uint32_t svc_option(void*, uint32_t what) {
 #else
         return 1;
 #endif
+    case NEBULA_OPTION_MOVESET: {
+#if defined(NEBULA_HOST_RENDERER)
+        const galaxy::OdysseyMovesetSettings moves = galaxy::get_runtime_settings().moveset;
+        return (moves.enabled ? NEBULA_MOVESET_ON : 0u) | (moves.roll ? NEBULA_MOVESET_ROLL : 0u) |
+               (moves.roll_jump ? NEBULA_MOVESET_ROLL_JUMP : 0u) |
+               (moves.ground_pound_jump ? NEBULA_MOVESET_GROUND_POUND_JUMP : 0u) |
+               (moves.dive ? NEBULA_MOVESET_DIVE : 0u) | (moves.turn_boost ? NEBULA_MOVESET_TURN_BOOST : 0u) |
+               (moves.second_player ? NEBULA_MOVESET_SECOND_PLAYER : 0u);
+#else
+        return 0;
+#endif
+    }
+    case NEBULA_OPTION_MOTION_STYLE:
+#if defined(NEBULA_HOST_RENDERER)
+        return std::min(galaxy::get_runtime_settings().motion_style, 2u);
+#else
+        return 0;
+#endif
     case NEBULA_OPTION_DRAW_IDENTITIES:
 #if defined(NEBULA_HOST_RENDERER)
         return galaxy::gx::draw_identity_wanted() ? 1u : 0u;

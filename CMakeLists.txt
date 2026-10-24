@@ -576,6 +576,11 @@ galaxy_test(galaxy_achievements_tests SOURCES ${rt}/achievements_tests.cpp LIBS 
 galaxy_test(galaxy_stats_tests SOURCES ${rt}/stats_tests.cpp LIBS galaxy_runtime_settings)
 galaxy_test(galaxy_controls_tests SOURCES ${rt}/controls_tests.cpp LIBS galaxy_runtime_settings galaxy_native_input)
 galaxy_test(galaxy_split_effects_tests SOURCES ${rt}/gx/split_effects_tests.cpp)
+# The Odyssey moveset and motion style run in the game module; their rules (native/include) are tested here.
+galaxy_test(galaxy_odyssey_moveset_tests SOURCES ${rt}/odyssey_moveset_tests.cpp)
+target_include_directories(galaxy_odyssey_moveset_tests PRIVATE native/include)
+galaxy_test(galaxy_motion_style_tests SOURCES ${rt}/motion_style_tests.cpp)
+target_include_directories(galaxy_motion_style_tests PRIVATE native/include)
 if(WIN32)
     galaxy_test(galaxy_button_prompts_tests SOURCES ${rt}/button_prompts_tests.cpp LIBS galaxy_runtime_settings galaxy_native_input)
 endif()

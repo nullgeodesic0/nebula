@@ -522,6 +522,13 @@ public:
         mCurrentTable = tbl;
     }
 
+#ifdef TARGET_PC
+    /// @brief Returns table `tbl` (0 or 1): Nebula's motion style sets a few fields in both.
+    MarioConstTable* getTableAt(u32 tbl) const {
+        return mTable[tbl & 1];
+    }
+#endif
+
 private:
     /// @brief The array of player character constant tables.
     /* 0x00 */ MarioConstTable* mTable[2];
