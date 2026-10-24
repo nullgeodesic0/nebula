@@ -4527,6 +4527,26 @@ galaxy::input::WiimoteInputSnapshot native_game_wiimote_snapshot(
     const galaxy::input::tilt::Section section = tilt_section == 1u ? galaxy::input::tilt::Section::StarBall
         : tilt_section == 2u ? galaxy::input::tilt::Section::Ray
         : galaxy::input::tilt::Section::None;
+    // GALAXY_INPUT_SCRIPT_ONLY=1 (determinism tests): the input scripts alone, nothing timed by this PC's clock
+    // (pointer hiding, tilt easing), so two runs given the same scripts send the same reports.
+    static const bool script_only = read_env_flag("GALAXY_INPUT_SCRIPT_ONLY");
+    if (script_only) {
+        const NativeInputScriptOverlay script = build_native_input_script_overlay(current_vi);
+        galaxy::input::WiimoteInputSnapshot snapshot{};
+        snapshot.buttons = script.buttons;
+        snapshot.nunchuk.stick_x = galaxy::input::native_stick_axis_byte(script.has_stick ? script.stick_x : 0.0f,
+                                                                         0x15, 0x7b, 0xe0);
+        snapshot.nunchuk.stick_y = galaxy::input::native_stick_axis_byte(script.has_stick ? script.stick_y : 0.0f,
+                                                                         0x1d, 0x81, 0xe6);
+        snapshot.nunchuk.c = script.nunchuk_c;
+        snapshot.nunchuk.z = script.nunchuk_z;
+        galaxy::input::publish_wiimote_ir_dots(snapshot, script.pointer_x, script.pointer_y,
+                                               script.has_pointer && ir_enabled);
+        static galaxy::input::tilt::Tilt s_tilt{};
+        apply_tilt_accel(snapshot, s_tilt, galaxy::input::tilt::Section::None, nullptr, 0.0f, 0.0f, false);
+        snapshot.shake = script.shake;
+        return snapshot;
+    }
     return build_native_hid_input_snapshot(
         current_vi, galaxy::get_runtime_input_mode_state(), ir_enabled, context, section);
 }

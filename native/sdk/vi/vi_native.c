@@ -36,6 +36,11 @@ static BOOL sDimming;
 static u32 sIdleRetraces;
 
 NEBULA_GAME_API void nebula_game_vi_retrace(void) {
+    /* Deterministic mode: the host grants the retrace; the simulation thread delivers it in its order (os_native.c). */
+    if (nebula_deterministic()) {
+        nebula_det_grant_retrace();
+        return;
+    }
     nebula_raise_interrupt(__OS_INTERRUPT_PI_VI);
 }
 

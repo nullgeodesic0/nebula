@@ -160,7 +160,14 @@ static void time_init(void) {
 #endif
 }
 
+/* Deterministic mode (below): its virtual clock. */
+static int sDeterministic;
+static int64_t sVirtualTime;
+
 int64_t nebula_time_base(void) {
+    if (sDeterministic) {
+        return ++sVirtualTime;
+    }
 #if defined(_WIN32)
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -212,6 +219,45 @@ enum { kDecrementerShift = 32 };
 static _Atomic uint64_t sPending;
 static atomic_int sIdle;
 
+/* Deterministic mode (NEBULA_OPTION_DETERMINISTIC), for netplay: two PCs given the same input compute the same game.
+   The host's threads then decide nothing the game sees by their timing:
+   - The time base is virtual: it moves only by the scheduled events below, and by one tick per read, so a thread
+     spinning on the clock still sees it advance.
+   - Interrupts host threads raise are held (sDeferred) instead of delivered where the game happens to be.
+   - When the game has nothing to run (an idle point: __NebulaIdle, __NebulaPoll), the simulation thread takes the
+     next event itself (det_step): the host requests in flight complete first (it waits for the host's work, so a
+     request always completes at the first idle point after it was sent); else the virtual clock moves to the
+     earliest of the decrementer's deadline, the audio interface's next block (at its rate) and the next retrace.
+     A retrace waits for the host to grant it (nebula_det_grant_retrace: netplay grants frame N once both players'
+     inputs for it are in), and delivers the held controller interrupts with it.
+   - The renderer's draw-sync and draw-done events complete at once on the simulation thread (gx_fifo.c).
+   - The calendar is the host's NEBULA_OPTION_CALENDAR (the session's) rather than this PC's clock. */
+static int64_t sNextRetrace;
+static _Atomic uint64_t sDeferred;
+static atomic_int sRetraceGrants;
+static atomic_int sIoInFlight;
+static int64_t sAiNext = INT64_MAX;
+static int64_t sAiPeriod;
+#if defined(_WIN32)
+static DWORD sSimulationThread;
+#endif
+
+enum { kFieldTicks = OS_TIMER_CLOCK / 60 };
+
+int nebula_deterministic(void) {
+    return sDeterministic;
+}
+
+static void det_step(void);
+
+static int on_simulation_thread(void) {
+#if defined(_WIN32)
+    return GetCurrentThreadId() == sSimulationThread;
+#else
+    return 1;
+#endif
+}
+
 #if defined(_WIN32)
 static HANDLE sWake;
 #else
@@ -232,6 +278,11 @@ static void wake_simulation(void) {
 }
 
 static void raise_pending(uint64_t bits) {
+    if (sDeterministic && !on_simulation_thread()) {
+        atomic_fetch_or(&sDeferred, bits);
+        wake_simulation();
+        return;
+    }
     atomic_fetch_or(&sPending, bits);
     if (atomic_load(&sIdle)) {
         wake_simulation();
@@ -550,7 +601,7 @@ BOOL OSRestoreInterrupts(BOOL level) {
 void PPCMtdec(u32 ticks) {
     const int64_t deadline = nebula_time_base() + (int64_t)ticks;
     atomic_store(&sDecrementerDeadline, deadline);
-    if (deadline < atomic_load(&sClockArmed)) {
+    if (!sDeterministic && deadline < atomic_load(&sClockArmed)) {
         clock_rearm();
     }
 }
@@ -587,15 +638,99 @@ void __NebulaPoll(void) {
         return;
     }
     if (!work_pending()) {
-        atomic_store(&sIdle, 1);
-        if ((atomic_load(&sPending) & ~(uint64_t)sInterruptMask) == 0) {
-            sleep_for_work();
+        if (sDeterministic) {
+            det_step();
+        } else {
+            atomic_store(&sIdle, 1);
+            if ((atomic_load(&sPending) & ~(uint64_t)sInterruptMask) == 0) {
+                sleep_for_work();
+            }
+            atomic_store(&sIdle, 0);
         }
-        atomic_store(&sIdle, 0);
     }
     if (work_pending()) {
         deliver_interrupts();
     }
+}
+
+void nebula_io_begin(void) {
+    atomic_fetch_add(&sIoInFlight, 1);
+}
+
+void nebula_io_end(void) {
+    atomic_fetch_sub(&sIoInFlight, 1);
+    if (sDeterministic) {
+        wake_simulation();
+    }
+}
+
+void nebula_det_grant_retrace(void) {
+    atomic_fetch_add(&sRetraceGrants, 1);
+    wake_simulation();
+}
+
+void nebula_det_ai(int running, uint32_t blockBytes, uint32_t rate) {
+    if (!running || blockBytes == 0 || rate == 0) {
+        sAiNext = INT64_MAX;
+        return;
+    }
+    const int64_t period = (int64_t)((uint64_t)(blockBytes / 4) * OS_TIMER_CLOCK / rate);
+    sAiPeriod = period > 0 ? period : 1;
+    if (sAiNext == INT64_MAX) {
+        sAiNext = sVirtualTime + sAiPeriod;
+    }
+}
+
+/* Deterministic mode's idle point (above): the next event, taken on the simulation thread. */
+static void det_step(void) {
+    const uint64_t ioBits = OS_INTERRUPTMASK(__OS_INTERRUPT_PI_DI) | OS_INTERRUPTMASK(__OS_INTERRUPT_PI_ACR);
+    /* Completions that came while the game ran: delivered now. */
+    const uint64_t completed = atomic_fetch_and(&sDeferred, ~ioBits) & ioBits;
+    if (completed != 0 && atomic_load(&sIoInFlight) == 0) {
+        atomic_fetch_or(&sPending, completed);
+        return;
+    }
+    atomic_fetch_or(&sDeferred, completed);
+    if (atomic_load(&sIoInFlight) > 0) {
+        while (atomic_load(&sIoInFlight) > 0) {
+            atomic_store(&sIdle, 1);
+            if (atomic_load(&sIoInFlight) > 0) {
+                sleep_for_work();
+            }
+            atomic_store(&sIdle, 0);
+        }
+        atomic_fetch_or(&sPending, atomic_fetch_and(&sDeferred, ~ioBits) & ioBits);
+        return;
+    }
+    const int64_t decrementer = atomic_load(&sDecrementerDeadline);
+    const int64_t next = decrementer < sAiNext ? decrementer : sAiNext;
+    if (next <= sNextRetrace) {
+        if (next > sVirtualTime) {
+            sVirtualTime = next;
+        }
+        if (next == decrementer) {
+            atomic_store(&sDecrementerDeadline, INT64_MAX);
+            atomic_fetch_or(&sPending, DECREMENTER_PENDING);
+        } else {
+            sAiNext += sAiPeriod;
+            atomic_fetch_or(&sPending, OS_INTERRUPTMASK(__OS_INTERRUPT_DSP_AI));
+        }
+        return;
+    }
+    while (atomic_load(&sRetraceGrants) == 0) {
+        atomic_store(&sIdle, 1);
+        if (atomic_load(&sRetraceGrants) == 0) {
+            sleep_for_work();
+        }
+        atomic_store(&sIdle, 0);
+    }
+    atomic_fetch_sub(&sRetraceGrants, 1);
+    nebula_det_commit_inputs();
+    if (sNextRetrace > sVirtualTime) {
+        sVirtualTime = sNextRetrace;
+    }
+    sNextRetrace += kFieldTicks;
+    atomic_fetch_or(&sPending, (atomic_fetch_and(&sDeferred, ioBits) & ~ioBits) | OS_INTERRUPTMASK(__OS_INTERRUPT_PI_VI));
 }
 
 /* No thread can run (SelectThread, interrupts disabled): deliver interrupts and sleep until one can. */
@@ -606,6 +741,12 @@ void __NebulaIdle(void) {
         sInterruptsEnabled = FALSE;
         if (RunQueueBits != 0) {
             break;
+        }
+        if (sDeterministic) {
+            if ((atomic_load(&sPending) & ~(uint64_t)sInterruptMask) == 0) {
+                det_step();
+            }
+            continue;
         }
         atomic_store(&sIdle, 1);
         if ((atomic_load(&sPending) & ~(uint64_t)sInterruptMask) == 0) {
@@ -942,7 +1083,18 @@ void nebula_os_boot(void (*gameMain)(void)) {
 #endif
     time_init();
     calendar_init();
-    clock_start();
+    sDeterministic = nebula_host()->option(nebula_host()->user, NEBULA_OPTION_DETERMINISTIC) != 0;
+    if (sDeterministic) {
+#if defined(_WIN32)
+        sSimulationThread = GetCurrentThreadId();
+#endif
+        sNextRetrace = kFieldTicks;
+        /* The session's calendar (seconds since 2000-01-01), the same on every PC of it. */
+        sCalendarBase = (int64_t)nebula_host()->option(nebula_host()->user, NEBULA_OPTION_CALENDAR) * OS_TIMER_CLOCK;
+        nebula_log("Nebula: deterministic mode (netplay)\n");
+    } else {
+        clock_start();
+    }
     if (!nebula_memory_init()) {
         nebula_fatal("could not reserve the game's memory");
     }

@@ -146,6 +146,9 @@ enum {
                                    Wii Remote channel 1 is connected and sits out otherwise), 0: one player */
     NEBULA_OPTION_TEST_DOWN_SECOND, /* tests (GALAXY_TEST_DOWN_SECOND): the co-op second player's turn at which he
                                        falls (MarioActor::forceKill), 0 never */
+    NEBULA_OPTION_DETERMINISTIC,    /* 1: deterministic mode (netplay): the module's virtual clock and scheduled events
+                                       (sdk/os/os_native.c); the host grants each retrace (vi_retrace) */
+    NEBULA_OPTION_CALENDAR,         /* deterministic mode: the calendar at boot, seconds since 2000-01-01 */
     NEBULA_OPTION_TEST_STAR_BITS,   /* tests (GALAXY_TEST_STAR_BITS): Star Bits given as the co-op players land, 0 none */
     NEBULA_OPTION_TEST_LAUNCH_STAR, /* tests (GALAXY_TEST_LAUNCH_STAR): the co-op second player's turn at which the
                                        first player is put on the scene's launch star (SuperSpinDriver), 0 never */

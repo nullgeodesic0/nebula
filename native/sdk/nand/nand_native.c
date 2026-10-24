@@ -47,6 +47,7 @@ NEBULA_GAME_API void nebula_game_fs_complete(uint32_t slot, int32_t result) {
         sSlots[slot].result = result;
         atomic_store_explicit(&sSlots[slot].done, 1, memory_order_release);
         nebula_raise_interrupt(__OS_INTERRUPT_PI_ACR);
+        nebula_io_end();
     }
 }
 
@@ -132,6 +133,7 @@ static Slot* claim(void) {
 }
 
 static void issue(Slot* slot) {
+    nebula_io_begin();
     nebula_host()->fs_request(nebula_host()->user, &slot->request, (uint32_t)(slot - sSlots));
 }
 

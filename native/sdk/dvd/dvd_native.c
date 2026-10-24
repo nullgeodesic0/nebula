@@ -52,6 +52,7 @@ NEBULA_GAME_API void nebula_game_disc_complete(uint32_t slot, int32_t result) {
         sSlots[slot].result = result;
         atomic_store_explicit(&sSlots[slot].done, 1, memory_order_release);
         nebula_raise_interrupt(__OS_INTERRUPT_PI_DI);
+        nebula_io_end();
     }
 }
 
@@ -153,6 +154,7 @@ BOOL DVDReadAbsAsyncPrio(DVDCommandBlock* block, void* addr, s32 length, u32 off
     block->callback = callback;
     const int free = claim_slot(block);
     OSRestoreInterrupts(enabled);
+    nebula_io_begin();
     nebula_host()->disc_read(nebula_host()->user, (uint64_t)offset << 2, (uint32_t)length, addr, (uint32_t)free);
     return TRUE;
 }

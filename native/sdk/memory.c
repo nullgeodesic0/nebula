@@ -79,7 +79,19 @@ static void find_image(void) {
    space only. */
 int nebula_memory_init(void) {
 #if defined(_WIN32)
-    uint8_t* base = (uint8_t*)VirtualAlloc(NULL, 2 * (SIZE_T)kReserveSize, MEM_RESERVE, PAGE_NOACCESS);
+    /* Deterministic mode (netplay): at the same address in every process, since the game keeps native pointers into
+       its memory there (so two PCs' memories match byte for byte, and a snapshot loads into another process). */
+    uint8_t* base = NULL;
+    if (nebula_deterministic()) {
+        base = (uint8_t*)VirtualAlloc((void*)(uintptr_t)0x7D0000000000ull, 2 * (SIZE_T)kReserveSize, MEM_RESERVE,
+                                      PAGE_NOACCESS);
+        if (base == NULL) {
+            nebula_log("Nebula: the game's memory could not take its fixed address; netplay may desync\n");
+        }
+    }
+    if (base == NULL) {
+        base = (uint8_t*)VirtualAlloc(NULL, 2 * (SIZE_T)kReserveSize, MEM_RESERVE, PAGE_NOACCESS);
+    }
     if (base == NULL) {
         return 0;
     }

@@ -73,11 +73,59 @@ static Deferred sDeferred[kDeferred];
 static u32 sDeferredCount;
 static BOOL sInitialized;
 
+/* Deterministic mode (netplay; os_native.c): what the host sends for a frame waits here until that frame's retrace
+   (nebula_det_commit_inputs), so the game takes it at the same point on every PC, never early (a callback the game runs
+   mid-frame would otherwise take the next frame's report). The host sends one set per retrace. */
+typedef struct {
+    _Atomic int connect; /* 0 none, 1 connect, 2 disconnect */
+    NebulaWiimoteConnection connection;
+    _Atomic int hasReport;
+    u8 report[kReportBytes];
+    size_t reportSize;
+    BOOL hasPointer;
+    NebulaWpadPointer pointer;
+    _Atomic int hasShake;
+    u32 shake;
+} Staged;
+
+static Staged sStaged[kChannels];
+
+static void apply_connect(uint32_t chan, int connected, const NebulaWiimoteConnection* connection);
+static void apply_report(uint32_t chan, const uint8_t* report, size_t size, const NebulaWpadPointer* pointer);
+static void apply_shake(uint32_t chan, uint32_t held);
+
+void nebula_det_commit_inputs(void) {
+    for (uint32_t chan = 0; chan < kChannels; chan++) {
+        Staged* s = &sStaged[chan];
+        const int connect = atomic_exchange(&s->connect, 0);
+        if (connect != 0) {
+            apply_connect(chan, connect == 1, &s->connection);
+        }
+        if (atomic_exchange(&s->hasReport, 0)) {
+            apply_report(chan, s->report, s->reportSize, s->hasPointer ? &s->pointer : NULL);
+        }
+        if (atomic_exchange(&s->hasShake, 0)) {
+            apply_shake(chan, s->shake);
+        }
+    }
+}
+
 /* The host's entry points, called from any thread. */
 NEBULA_GAME_API void nebula_game_wpad_connect(uint32_t chan, int connected, const NebulaWiimoteConnection* connection) {
     if (chan >= kChannels) {
         return;
     }
+    if (nebula_deterministic()) {
+        if (connection != NULL) {
+            sStaged[chan].connection = *connection;
+        }
+        atomic_store(&sStaged[chan].connect, connected ? 1 : 2);
+        return;
+    }
+    apply_connect(chan, connected, connection);
+}
+
+static void apply_connect(uint32_t chan, int connected, const NebulaWiimoteConnection* connection) {
     Channel* c = &sChannels[chan];
     if (connected && connection != NULL) {
         memcpy(c->eeprom, connection->eeprom, sizeof(c->eeprom));
@@ -96,6 +144,21 @@ NEBULA_GAME_API void nebula_game_wpad_report(uint32_t chan, const uint8_t* repor
     if (chan >= kChannels || size == 0) {
         return;
     }
+    if (nebula_deterministic()) {
+        Staged* s = &sStaged[chan];
+        s->reportSize = size < kReportBytes ? size : kReportBytes;
+        memcpy(s->report, report, s->reportSize);
+        s->hasPointer = pointer != NULL;
+        if (pointer != NULL) {
+            s->pointer = *pointer;
+        }
+        atomic_store(&s->hasReport, 1);
+        return;
+    }
+    apply_report(chan, report, size, pointer);
+}
+
+static void apply_report(uint32_t chan, const uint8_t* report, size_t size, const NebulaWpadPointer* pointer) {
     Channel* c = &sChannels[chan];
     const u32 head = atomic_load_explicit(&c->head, memory_order_relaxed);
     if (head - atomic_load_explicit(&c->tail, memory_order_acquire) >= kQueue) {
@@ -115,6 +178,15 @@ NEBULA_GAME_API void nebula_game_wpad_shake(uint32_t chan, uint32_t held) {
     if (chan >= kChannels) {
         return;
     }
+    if (nebula_deterministic()) {
+        sStaged[chan].shake = held;
+        atomic_store(&sStaged[chan].hasShake, 1);
+        return;
+    }
+    apply_shake(chan, held);
+}
+
+static void apply_shake(uint32_t chan, uint32_t held) {
     Channel* c = &sChannels[chan];
     const u32 previous = atomic_exchange(&c->shakeHeld, held);
     for (u32 device = 0; device < 2; device++) {

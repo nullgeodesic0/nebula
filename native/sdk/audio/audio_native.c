@@ -24,9 +24,23 @@ int __NebulaDSPCommands(const u32* words, u32 count) {
 
 static AIDCallback sDMACallback;
 static BOOL sAIInitialized;
+static u32 sDMAStart, sDMALength;
 
 NEBULA_GAME_API void nebula_game_ai_interrupt(void) {
+    /* Deterministic mode: the module schedules the blocks itself (nebula_det_ai). */
+    if (nebula_deterministic()) {
+        return;
+    }
     nebula_raise_interrupt(__OS_INTERRUPT_DSP_AI);
+}
+
+static BOOL sDMARunning;
+static u32 sDMARate = 32000;
+
+static void update_det_ai(void) {
+    if (nebula_deterministic()) {
+        nebula_det_ai(sDMARunning, sDMALength, sDMARate);
+    }
 }
 
 static void ai_interrupt(__OSInterrupt interrupt, OSContext* context) {
@@ -55,12 +69,11 @@ AIDCallback AIRegisterDMACallback(AIDCallback callback) {
     return previous;
 }
 
-static u32 sDMAStart, sDMALength;
-
 void AIInitDMA(uintptr_t start, u32 length) {
     sDMAStart = OSCachedToPhysical((const void*)start);
     sDMALength = length;
     nebula_host()->ai_dma(nebula_host()->user, sDMAStart, length);
+    update_det_ai();
 }
 
 u32 AIGetDMAStartAddr(void) {
@@ -73,15 +86,21 @@ u32 AIGetDMALength(void) {
 
 void AIStartDMA(void) {
     nebula_host()->ai_control(nebula_host()->user, NEBULA_AI_START, 0);
+    sDMARunning = TRUE;
+    update_det_ai();
 }
 
 void AIStopDMA(void) {
     nebula_host()->ai_control(nebula_host()->user, NEBULA_AI_STOP, 0);
+    sDMARunning = FALSE;
+    update_det_ai();
 }
 
 /* 0: 32 kHz, 1: 48 kHz (the DSP's output rate). */
 void AISetDSPSampleRate(u32 rate) {
-    nebula_host()->ai_control(nebula_host()->user, NEBULA_AI_RATE, rate != 0 ? 48000 : 32000);
+    sDMARate = rate != 0 ? 48000 : 32000;
+    nebula_host()->ai_control(nebula_host()->user, NEBULA_AI_RATE, sDMARate);
+    update_det_ai();
 }
 
 enum { kARBase = 0x4000 };

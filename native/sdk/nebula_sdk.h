@@ -56,6 +56,17 @@ void nebula_raise_interrupt(int interrupt);
 void nebula_signal_simulation(void);
 /* The console's time base: OSGetTime ticks (60.75 MHz) since boot. */
 int64_t nebula_time_base(void);
+
+/* Deterministic mode (NEBULA_OPTION_DETERMINISTIC: netplay; os_native.c has the scheme): whether it runs, a
+   host request in flight (begin on the simulation thread as it is sent, end on the host's thread after its
+   completion is raised), the host's grant of the next retrace, and the audio interface's DMA as the game sets it. */
+int nebula_deterministic(void);
+void nebula_io_begin(void);
+void nebula_io_end(void);
+void nebula_det_grant_retrace(void);
+void nebula_det_ai(int running, uint32_t blockBytes, uint32_t rate);
+/* The remotes' input the host sent for the coming retrace, taken in as it is delivered (wpad_native.c). */
+void nebula_det_commit_inputs(void);
 /* Runs the game: the OS core's boot, then the game's entry on its boot thread. Does not return. */
 void nebula_os_boot(void (*gameMain)(void)) __attribute__((noreturn));
 

@@ -273,6 +273,16 @@ void __NebulaGXPeMarker(int finish, u16 token) {
     if (sLinked) {
         nebula_host()->gx_pe_marker(nebula_host()->user, finish, token);
     }
+    /* Deterministic mode: the draw-sync token or draw done completes at once, on the simulation thread, rather than
+       when this PC's GPU gets there. */
+    if (nebula_deterministic()) {
+        if (finish) {
+            nebula_raise_interrupt(__OS_INTERRUPT_PI_PE_FINISH);
+        } else {
+            __atomic_store_n(&sPeRegs[7], token, __ATOMIC_RELEASE);
+            nebula_raise_interrupt(__OS_INTERRUPT_PI_PE_TOKEN);
+        }
+    }
 }
 
 void __NebulaGXSceneMarker(u32 marker, const f32 (*view)[4]) {
@@ -503,6 +513,10 @@ void GXDisableBreakPt(void) {
 
 /* The renderer's PE events (any thread): the token or finish register, then the SDK's PE interrupt. */
 NEBULA_GAME_API void nebula_game_gx_event(int finish, uint16_t token) {
+    /* Deterministic mode: the events completed as they were sent (__NebulaGXPeMarker). */
+    if (nebula_deterministic()) {
+        return;
+    }
     if (finish) {
         nebula_raise_interrupt(__OS_INTERRUPT_PI_PE_FINISH);
     } else {

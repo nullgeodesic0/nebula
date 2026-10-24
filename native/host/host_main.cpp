@@ -789,6 +789,13 @@ void ai_thread() {
     }
 }
 
+// Deterministic mode's frame clock (vi_thread) needs these, defined below.
+bool deterministic();
+void send_wpad_reports(uint32_t frame);
+extern std::atomic<uint32_t> gRetraces;
+extern std::atomic<int> gWpadStarted;
+extern std::atomic<uint32_t> gWpadStartRetrace;
+
 // The display's retrace at 60 Hz: the console's NTSC 59.94 would repeat a frame every 17 s on a 60 Hz display. A late
 // wake-up skips the fields it missed, as a display does, rather than delivering them back to back. On Android the
 // retrace follows the display's own vsync (every second one at 120 Hz), so frames never drift against it and each
@@ -819,6 +826,20 @@ void vi_thread() {
         }
         // The last frame's work (the game and render threads' CPU time), to the performance hints (Android).
         [[maybe_unused]] const int64_t work = galaxy::host::perf_hint_retrace();
+        if (deterministic()) {
+            // Retrace N once the game has taken N - 1 (vi_frame counts them), with frame N's remote reports.
+            static uint32_t granted = 0;
+            while (gRetraces.load(std::memory_order_acquire) < granted) {
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+            // Once WPAD started in a retrace before this one: the game took that retrace, so it shows here whatever
+            // the threads' timing.
+            if (gWpadStarted.load(std::memory_order_acquire) &&
+                gWpadStartRetrace.load(std::memory_order_relaxed) < granted) {
+                send_wpad_reports(granted + 1);
+            }
+            ++granted;
+        }
         gModule.vi_retrace();
         next += period;
         const auto now = Clock::now();
@@ -1719,7 +1740,24 @@ void svc_gx_stripe_particle(void*, size_t span_offset, uint32_t particle, uint32
 #endif
 }
 
+// Deterministic mode (GALAXY_DETERMINISTIC=1, netplay; the module's sdk/os/os_native.c has the scheme): the module keeps
+// a virtual clock and takes its events itself; the host grants each retrace from the frame clock, with that frame's
+// remote reports, once the game has taken the previous one.
+bool deterministic() {
+    static const bool on = [] {
+        const char* value = std::getenv("GALAXY_DETERMINISTIC");
+        return value != nullptr && value[0] == '1';
+    }();
+    return on;
+}
+
 uint32_t svc_gx_peek_efb(void*, uint16_t x, uint16_t y, uint32_t type, uint16_t token) {
+    // Deterministic mode: what the GPU drew is this PC's (its resolution, its timing); the game reads a far depth and
+    // black everywhere.
+    if (deterministic()) {
+        (void)x, (void)y, (void)token;
+        return type == 0 ? 0u : 0x00FFFFFFu;
+    }
 #if defined(NEBULA_HOST_RENDERER)
     const auto kind = type == 0 ? galaxy::gx::EfbPeekKind::Color : galaxy::gx::EfbPeekKind::Depth;
     uint32_t value = 0;
@@ -1798,14 +1836,22 @@ void note_mod_file(uint64_t offset) {
     galaxy::crash::note_mod_read(mod, *path);
 }
 
+// Disc reads posted and not yet finished (the state hash waits for them: a read in progress fills memory the game does
+// not look at yet).
+std::atomic<int> gDiscInFlight{0};
+
 void svc_disc_read(void*, uint64_t offset, uint32_t size, void* dst, uint32_t slot) {
     gDiscReads.fetch_add(1, std::memory_order_relaxed);
+    gDiscInFlight.fetch_add(1, std::memory_order_acq_rel);
     // GALAXY_TEST_DISC_DELAY_US: a slow drive (each read takes this long), so waits on loads are exercised.
     static const uint32_t test_delay_us = [] {
         const char* value = std::getenv("GALAXY_TEST_DISC_DELAY_US");
         return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
     }();
     gDisc.post([=] {
+        struct Done {
+            ~Done() { gDiscInFlight.fetch_sub(1, std::memory_order_acq_rel); }
+        } done;
         if (test_delay_us != 0) {
             std::this_thread::sleep_for(std::chrono::microseconds(test_delay_us));
         }
@@ -1931,6 +1977,10 @@ void svc_vi_frame(void*, uint32_t xfb, int black, uint32_t retrace) {
 // The shape the game draws for (display_native.c turns it into the game's screen width and camera aspect): the
 // latched output shape; headless, the Wii's 16:9.
 uint32_t svc_display_extent(void*) {
+    // Deterministic mode: the game's own picture shape on every PC (the window's would change what the camera sees).
+    if (deterministic()) {
+        return 0;
+    }
 #if defined(NEBULA_HOST_RENDERER)
     return static_cast<uint32_t>(galaxy::g_experimental_dynamic_aspect_word.load(std::memory_order_acquire));
 #else
@@ -2016,6 +2066,16 @@ uint32_t svc_option(void*, uint32_t what) {
 #else
         return 0;
 #endif
+    case NEBULA_OPTION_DETERMINISTIC:
+        return deterministic() ? 1u : 0u;
+    case NEBULA_OPTION_CALENDAR: {
+        // GALAXY_DET_CALENDAR: seconds since 2000-01-01 (a netplay session's host sends its own); 2026-01-01 else.
+        static const uint32_t seconds = [] {
+            const char* value = std::getenv("GALAXY_DET_CALENDAR");
+            return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 820454400u;
+        }();
+        return seconds;
+    }
     case NEBULA_OPTION_COOP:
 #if defined(NEBULA_HOST_RENDERER)
         return galaxy::coop_for_boot() ? 1u : 0u;
@@ -2121,6 +2181,9 @@ uint32_t svc_sc_get(void*, uint32_t item) {
 // connected when the game starts WPAD and reporting 100 times a second in the format the game asks for. Headless, the
 // same remote at rest: the game sees a connected controller (no "connect the Wii Remote" pause) and no input.
 std::atomic<int> gWpadStarted{0};
+// The retrace the game had last taken when it started WPAD (the simulation thread's own count, so the same on every
+// run): deterministic mode sends reports from the retraces after it.
+std::atomic<uint32_t> gWpadStartRetrace{0};
 // Per channel: 0 the first player's remote, 1 co-op's second player's (connected while he plays).
 std::atomic<uint32_t> gWpadReport[2]{0x30, 0x30};
 std::atomic<int> gWpadDpd{0};
@@ -2180,36 +2243,36 @@ size_t idle_wiimote_report(uint8_t id, uint8_t* report) {
 }
 #endif
 
-void wpad_thread() {
-    name_thread(L"Nebula Host WPAD");
-    while (!gWpadStarted.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    NebulaWiimoteConnection connection{};
+// The remotes' reports for one moment (`frame`: the retrace the input scripts count): remote 0 connected with the
+// first report, co-op's remote 1 while its player is in. The WPAD thread sends them 100 times a second; in deterministic
+// mode the frame clock sends one set per retrace, before granting it.
+void send_wpad_reports(uint32_t frame) {
+    static NebulaWiimoteConnection connection{};
+    static bool connected = false;
+    static bool partner_connected = false;
+    if (!connected) {
 #if defined(NEBULA_HOST_RENDERER)
-    galaxy::host::native_game_wiimote_calibration(connection.eeprom, connection.extension_calibration);
+        galaxy::host::native_game_wiimote_calibration(connection.eeprom, connection.extension_calibration);
 #else
-    idle_wiimote_calibration(connection.eeprom, connection.extension_calibration);
+        idle_wiimote_calibration(connection.eeprom, connection.extension_calibration);
 #endif
-    connection.extension = 1;  // WPAD_DEV_FREESTYLE: the Nunchuk
-    connection.battery = 0xC0;
-    gModule.wpad_connect(0, 1, &connection);
-    bool partner_connected = false;
+        connection.extension = 1;  // WPAD_DEV_FREESTYLE: the Nunchuk
+        connection.battery = 0xC0;
+        gModule.wpad_connect(0, 1, &connection);
+        connected = true;
+    }
     (void)partner_connected;
-    const auto period = std::chrono::milliseconds(10);
-    auto next = Clock::now() + period;
-    for (;;) {
-        sleep_until_precise(next);
-        next += period;
+    (void)frame;
+    {
         const uint8_t id = static_cast<uint8_t>(gWpadReport[0].load(std::memory_order_relaxed));
 #if !defined(NEBULA_HOST_RENDERER)
         uint8_t idle[22];
         gModule.wpad_report(0, idle, idle_wiimote_report(id, idle), nullptr);
-        continue;
+        return;
 #else
         const int32_t mode = gStarPointerMode.load(std::memory_order_relaxed);
         const auto snapshot = galaxy::host::native_game_wiimote_snapshot(
-            gRetraces.load(std::memory_order_relaxed), gWpadDpd.load(std::memory_order_relaxed) != 0, mode,
+            frame, gWpadDpd.load(std::memory_order_relaxed) != 0, mode,
             static_cast<uint8_t>(gTiltSection.load(std::memory_order_relaxed)));
         // Every report renews the motor's state (a stale one stops), as the console's remote keeps its motor bit.
         galaxy::host::native_game_rumble(gMotor.load(std::memory_order_relaxed), mode);
@@ -2223,8 +2286,7 @@ void wpad_thread() {
         }
         // Co-op's second player: his remote connects when he joins and goes when he leaves (NebulaCoop.cpp).
         galaxy::input::WiimoteInputSnapshot partner{};
-        const bool partner_in = galaxy::host::native_game_partner_snapshot(
-            gRetraces.load(std::memory_order_relaxed), mode, partner);
+        const bool partner_in = galaxy::host::native_game_partner_snapshot(frame, mode, partner);
         if (partner_in != partner_connected) {
             partner_connected = partner_in;
             gModule.wpad_connect(1, partner_in ? 1 : 0, &connection);
@@ -2242,6 +2304,23 @@ void wpad_thread() {
     }
 }
 
+void wpad_thread() {
+    name_thread(L"Nebula Host WPAD");
+    while (!gWpadStarted.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (deterministic()) {
+        return;  // the frame clock sends them (vi_thread)
+    }
+    const auto period = std::chrono::milliseconds(10);
+    auto next = Clock::now() + period;
+    for (;;) {
+        sleep_until_precise(next);
+        next += period;
+        send_wpad_reports(gRetraces.load(std::memory_order_relaxed));
+    }
+}
+
 void svc_wpad_control(void*, uint32_t chan, uint32_t what, uint32_t value) {
     if (chan == 1 && what == NEBULA_WPAD_FORMAT) {
         gWpadReport[1].store(report_id_for_format(value), std::memory_order_relaxed);
@@ -2252,6 +2331,7 @@ void svc_wpad_control(void*, uint32_t chan, uint32_t what, uint32_t value) {
     }
     switch (what) {
     case NEBULA_WPAD_INIT:
+        gWpadStartRetrace.store(gRetraces.load(std::memory_order_relaxed), std::memory_order_relaxed);
         gWpadStarted.store(1, std::memory_order_release);
         break;
     case NEBULA_WPAD_FORMAT:
@@ -2391,17 +2471,68 @@ void write_state_hash(uint64_t scene_frame) {
     }();
     if (scene_frame % every != 0) return;
     ensure_guest_memory();
+    while (gDiscInFlight.load(std::memory_order_acquire) > 0) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    // GALAXY_STATE_DUMP=<scene frame>:<file>: the readable memory regions at that hash, raw (to diff two runs).
+    static const char* const dump = std::getenv("GALAXY_STATE_DUMP");
+    if (dump != nullptr && std::strtoull(dump, nullptr, 10) == scene_frame && std::strchr(dump, ':') != nullptr) {
+        FILE* out = nullptr;
+        if (fopen_s(&out, std::strchr(dump, ':') + 1, "wb") == 0 && out != nullptr) {
+            for (const galaxy::GuestMemoryRegion& region : gRegions) {
+                for (size_t at = 0; at < region.size; at += 4096) {
+                    MEMORY_BASIC_INFORMATION info{};
+                    const bool ok = VirtualQuery(region.host_base + at, &info, sizeof(info)) != 0 &&
+                                    info.State == MEM_COMMIT && (info.Protect & PAGE_GUARD) == 0 &&
+                                    (info.Protect & (PAGE_READONLY | PAGE_READWRITE)) != 0;
+                    static const std::byte zeros[4096]{};
+                    std::fwrite(ok ? region.host_base + at : zeros, 1, std::min<size_t>(4096, region.size - at), out);
+                }
+            }
+            std::fclose(out);
+        }
+    }
+    // MEM1 and MEM2 once each (not their mirrors), without what is this process's alone: the native stacks (the boot
+    // stack below MEM1's arena, the stack pool at MEM2's top: dead frames hold the host runtime's values) and words that
+    // look like host addresses outside the game's fixed memory and module (host buffers some game objects point to).
+    auto host_address = [](uint64_t word) {
+        return word >= 0x0000010000000000ull && word < 0x00007FF000000000ull &&
+               !(word >= 0x00007D0000000000ull && word < 0x00007E0100000000ull);
+    };
     uint64_t total = 1469598103934665603ull;
     std::string chunk_text;
     for (const galaxy::GuestMemoryRegion& region : gRegions) {
+        if (region.guest_base != 0x00000000u && region.guest_base != 0x10000000u) continue;
         const auto* words = reinterpret_cast<const uint64_t*>(region.host_base);
         const size_t count = region.size / sizeof(uint64_t);
+        size_t skip_from = count;
+        size_t skip_to = count;
+        if (region.guest_base == 0x00000000u) {
+            skip_from = 0x80000u / 8u;
+            skip_to = 0x100000u / 8u;
+        } else if (region.size > 0x2000000u) {
+            skip_from = (region.size - 0x2000000u) / 8u;
+            skip_to = count;
+        }
         constexpr size_t kChunkWords = (1u << 20) / sizeof(uint64_t);
         for (size_t start = 0; start < count; start += kChunkWords) {
             uint64_t hash = 1469598103934665603ull;
             const size_t end = std::min(count, start + kChunkWords);
-            for (size_t i = start; i < end; ++i) {
-                hash = (hash ^ words[i]) * 1099511628211ull;
+            size_t i = start;
+            while (i < end) {
+                MEMORY_BASIC_INFORMATION info{};
+                if (VirtualQuery(words + i, &info, sizeof(info)) == 0) break;
+                const auto* region_end = reinterpret_cast<const uint64_t*>(
+                    static_cast<const std::byte*>(info.BaseAddress) + info.RegionSize);
+                const size_t stop = std::min(end, static_cast<size_t>(region_end - words));
+                const bool readable = info.State == MEM_COMMIT && (info.Protect & PAGE_GUARD) == 0 &&
+                                      (info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ |
+                                                       PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)) != 0;
+                for (; i < stop; ++i) {
+                    uint64_t word = readable && (i < skip_from || i >= skip_to) ? words[i] : 0ull;
+                    if (host_address(word)) word = 0;
+                    hash = (hash ^ word) * 1099511628211ull;
+                }
             }
             total = (total ^ hash) * 1099511628211ull;
             if (chunks) {
