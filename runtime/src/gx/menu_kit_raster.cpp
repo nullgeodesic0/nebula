@@ -37,6 +37,12 @@ Shaded shade(const Quad& quad, const Rgba& vertex, const std::array<float, 4>& t
     case Mode::Coverage:
         s.a = vertex.a * texel[3];
         break;
+    case Mode::Image:
+        s.r = vertex.r * texel[0];
+        s.g = vertex.g * texel[1];
+        s.b = vertex.b * texel[2];
+        s.a = vertex.a * texel[3];
+        break;
     case Mode::Text: {
         // The GPU widens the edge by the screen-space rate of change; a fixed width stands in for it here.
         const float t = std::clamp((texel[3] - 0.42f) / 0.16f, 0.0f, 1.0f);
@@ -108,6 +114,21 @@ DecodedTexture mirror_cap_vertically(const DecodedTexture& quarter) {
     for (unsigned y = 0; y < quarter.height; ++y) {
         std::copy_n(&quarter.rgba8[y * row], row, &out.rgba8[y * row]);
         std::copy_n(&quarter.rgba8[y * row], row, &out.rgba8[(out.height - 1u - y) * row]);
+    }
+    return out;
+}
+
+DecodedTexture mirror_horizontally(const DecodedTexture& half) {
+    DecodedTexture out;
+    out.width = half.width * 2u;
+    out.height = half.height;
+    out.rgba8.resize(static_cast<std::size_t>(out.width) * out.height * 4u);
+    for (unsigned y = 0; y < half.height; ++y) {
+        for (unsigned x = 0; x < half.width; ++x) {
+            const std::uint8_t* src = &half.rgba8[(static_cast<std::size_t>(y) * half.width + x) * 4u];
+            std::copy_n(src, 4u, &out.rgba8[(static_cast<std::size_t>(y) * out.width + x) * 4u]);
+            std::copy_n(src, 4u, &out.rgba8[(static_cast<std::size_t>(y) * out.width + (out.width - 1u - x)) * 4u]);
+        }
     }
     return out;
 }

@@ -9,6 +9,7 @@
 #include "galaxy/gx/game_disc.h"
 #include "galaxy/gx/game_font.h"
 #include "galaxy/gx/font_sdf.h"
+#include "galaxy/gx/menu_glyphs.h"
 #include "galaxy/gx/host_menus.h"
 #include "galaxy/gx/menu_kit.h"
 #include "galaxy/gx/menu_kit_raster.h"
@@ -6034,6 +6035,9 @@ float4 ps_main(PsIn i) : SV_Target {
     float a = i.color.a;
     if (mode == 1) {
         a *= texel.a;
+    } else if (mode == 5) {
+        rgb *= texel.rgb;
+        a *= texel.a;
     } else if (mode == 4) {
         // A distance-field glyph: the edge stays one pixel wide at any size.
         const float w = max(fwidth(texel.a) * 0.75, 0.02);
@@ -6070,6 +6074,9 @@ struct MenuKitPrepared {
     galaxy::gx::DecodedTexture cap;
     galaxy::gx::DecodedTexture corner;
     std::vector<galaxy::gx::DecodedTexture> font_fields;
+    galaxy::gx::menu::GlyphAtlasImage glyphs;
+    std::array<galaxy::gx::DecodedTexture, 4> hand;  // Tex::Hand .. Tex::HandStar
+    bool hand_loaded = false;
 };
 
 std::optional<MenuKitPrepared> prepare_menu_kit(std::string content_root) {
@@ -6097,6 +6104,21 @@ std::optional<MenuKitPrepared> prepare_menu_kit(std::string content_root) {
         out.cap = galaxy::gx::menu::mirror_cap_vertically(*cap);
         out.corner = std::move(*corner);
         for (const auto& sheet : out.font.sheets) out.font_fields.push_back(galaxy::gx::coverage_to_sdf(sheet));
+        const auto picture_bytes = out.disc->read_arc_entry("LayoutData/Font.arc", "picturefont.brfnt");
+        const auto picture = picture_bytes ? galaxy::gx::parse_brfnt(*picture_bytes) : std::nullopt;
+        out.glyphs = galaxy::gx::menu::build_glyph_atlas(picture ? &*picture : nullptr);
+        // The Star Pointer's hand, to draw again over the menus.
+        const char* hand_files[4] = {"handpointerpoint.tpl", "handpointerpointshadow.tpl", "dpdoutstar.tpl", "dpdpointer.tpl"};
+        out.hand_loaded = true;
+        for (std::size_t i = 0; i < 4u; ++i) {
+            const auto bytes = out.disc->read_arc_entry("LayoutData/DPDPointer.arc", hand_files[i]);
+            auto tex = bytes ? galaxy::gx::decode_tpl(*bytes) : std::nullopt;
+            if (!tex) {
+                out.hand_loaded = false;
+                break;
+            }
+            out.hand[i] = i >= 2u ? galaxy::gx::menu::mirror_horizontally(*tex) : std::move(*tex);
+        }
         return out;
     } catch (const std::exception& e) {
         std::cerr << "[Renderer] menus unavailable: " << e.what() << '\n';
@@ -6110,6 +6132,7 @@ struct RendererD3D12::MenuKitState {
     std::future<std::optional<MenuKitPrepared>> pending;
     std::unique_ptr<galaxy::gx::GameDisc> disc;
     std::optional<galaxy::gx::GameFont> font;
+    galaxy::gx::menu::GlyphAtlas glyphs;
     galaxy::gx::menu::Assets assets;
     std::array<ComPtr<ID3D12Resource>, galaxy::gx::menu::kMaxTextures> textures;
     std::vector<ComPtr<ID3D12Resource>> uploads;  // kept until shutdown (a few MB, once)
@@ -6205,6 +6228,13 @@ bool RendererD3D12::ensure_menu_kit_loaded() {
         upload_texture(0u, white);
         upload_texture(static_cast<std::size_t>(menu::Tex::ButtonCap), prepared->cap);
         upload_texture(static_cast<std::size_t>(menu::Tex::WindowCorner), prepared->corner);
+        upload_texture(static_cast<std::size_t>(menu::Tex::Glyphs), prepared->glyphs.texture);
+        if (prepared->hand_loaded) {
+            for (std::size_t i = 0; i < 4u; ++i) {
+                upload_texture(static_cast<std::size_t>(menu::Tex::Hand) + i, prepared->hand[i]);
+            }
+        }
+        kit.glyphs = prepared->glyphs.atlas;
         for (std::size_t sheet = 0; sheet < kit.font->sheets.size(); ++sheet) {
             const std::size_t slot = static_cast<std::size_t>(menu::Tex::Font) + sheet;
             if (slot >= menu::kMaxTextures) break;
@@ -6312,7 +6342,12 @@ bool RendererD3D12::ensure_menu_kit_loaded() {
         d3d_check(kit.vertices->Map(0, &no_read, &mapped), "map menu vertex ring");
         kit.mapped = static_cast<std::uint8_t*>(mapped);
 
-        kit.assets = {&*kit.font, true, true, true};
+        kit.assets.glyphs = &kit.glyphs;
+        kit.assets.font = &*kit.font;
+        kit.assets.button_cap = true;
+        kit.assets.window_corner = true;
+        kit.assets.font_sdf = true;
+        kit.assets.pointer_hand = prepared->hand_loaded;
         kit.ready = true;
         std::cout << "[Renderer] menus: the game's font and menu art loaded from game.pak\n";
     } catch (const std::exception& e) {

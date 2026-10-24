@@ -3,6 +3,7 @@
 
 #include "galaxy/gx/menu_kit.h"
 #include "galaxy/gx/menu_kit_raster.h"
+#include "galaxy/gx/menu_screens.h"
 
 #include <cmath>
 #include <cstdio>
@@ -84,6 +85,94 @@ int main() {
     ok &= expect(near(middle.r, 1) && near(middle.g, 1) && near(rim.r, 0) && near(rim.b, 1), "white middle, cyan rim");
     const Shaded bottom = shade(q, rgb255(60, 65, 70), {1, 1, 1, 1});
     ok &= expect(near(bottom.r, 120.0f / 255.0f * kPictureGain), "the gradient's dark end, doubled, with the gain");
+
+    // The screens: a join hint that fades after 10 s, a card that comes and goes, the panel's buttons.
+    {
+        GlyphAtlas atlas;
+        atlas.present[1][0] = true;  // Xbox Start
+        atlas.rects[1][0] = {0, 0, 0.1f, 0.1f, 1.0f};
+        Assets assets;
+        assets.glyphs = &atlas;
+        Screens screens;
+        ScreensInput in;
+        in.local_coop = true;
+        in.in_level = true;
+        in.extent_x = 405.0f;
+        DeviceView pad;
+        pad.key = 0x0101u;
+        pad.family = GlyphFamily::Xbox;
+        pad.name = u"Xbox 2";
+        pad.join_candidate = true;
+        in.devices.push_back(pad);
+        const auto glyphs_drawn = [](const DrawList& list) {
+            int n = 0;
+            for (const Quad& q : list) n += q.tex == Tex::Glyphs && q.v[0].color.a > 0.0f ? 1 : 0;
+            return n;
+        };
+        DrawList list;
+        for (double t = 0.0; t <= 1.0; t += 1.0 / 60.0) {
+            list.clear();
+            in.seconds = t;
+            screens.update(in, assets, space, list);
+        }
+        ok &= expect(glyphs_drawn(list) == 1, "a free controller shows its Start prompt");
+        for (double t = 1.0; t <= 11.0; t += 1.0 / 60.0) {
+            list.clear();
+            in.seconds = t;
+            screens.update(in, assets, space, list);
+        }
+        ok &= expect(glyphs_drawn(list) == 0, "and fades after 10 s without input");
+        in.devices[0].input = true;
+        for (double t = 11.0; t <= 11.5; t += 1.0 / 60.0) {
+            list.clear();
+            in.seconds = t;
+            screens.update(in, assets, space, list);
+        }
+        ok &= expect(glyphs_drawn(list) == 1, "touching it brings it back");
+
+        in.devices[0].input = false;
+        in.events.push_back({CardKind::Joined, 0x0101u});
+        list.clear();
+        in.seconds = 12.0;
+        screens.update(in, assets, space, list);
+        in.events.clear();
+        in.second_present = true;
+        for (double t = 12.0; t <= 12.5; t += 1.0 / 60.0) {
+            list.clear();
+            in.seconds = t;
+            screens.update(in, assets, space, list);
+        }
+        ok &= expect(!list.empty(), "a join card shows");
+        for (double t = 12.5; t <= 16.0; t += 1.0 / 60.0) {
+            list.clear();
+            in.seconds = t;
+            screens.update(in, assets, space, list);
+        }
+        ok &= expect(list.empty(), "and is gone after its time (the hint is off while he plays)");
+
+        in.pause_shown = true;
+        for (double t = 16.0; t <= 17.0; t += 1.0 / 60.0) {
+            list.clear();
+            in.seconds = t;
+            screens.update(in, assets, space, list);
+        }
+        const auto& buttons = screens.panel_buttons();
+        ok &= expect(buttons.size() == 2u && buttons[1].leave, "the pause menu shows the panel: the pad and Leave");
+        in.pointer_valid = true;
+        in.pointer_x = buttons[0].x / in.extent_x;
+        in.pointer_y = -buttons[0].y / 228.0f;
+        in.pressed = 1u;  // A
+        list.clear();
+        in.seconds = 17.02;
+        const ScreensActions actions = screens.update(in, assets, space, list);
+        ok &= expect(actions.seats.size() == 1u && actions.seats[0].second == SeatChoice::First && actions.cover_pointer,
+                     "A on a device's button seats it on the next choice, and the hand is drawn over the panel");
+        in.pointer_x = buttons[1].x / in.extent_x;
+        in.pointer_y = -buttons[1].y / 228.0f;
+        list.clear();
+        in.seconds = 17.04;
+        ok &= expect(screens.update(in, assets, space, list).leave, "A on Leave asks him to leave");
+    }
 
     std::printf("%s\n", ok ? "menu kit: all passed" : "menu kit: FAILED");
     return ok ? 0 : 1;

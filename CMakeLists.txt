@@ -338,7 +338,8 @@ target_link_libraries(
 add_library(galaxy_runtime_settings STATIC
     runtime/src/runtime_settings.cpp
     runtime/src/input_bindings.cpp
-    runtime/src/player_devices.cpp)
+    runtime/src/player_devices.cpp
+    runtime/src/game_menu_probe.cpp)
 target_link_libraries(
     galaxy_runtime_settings
     PUBLIC galaxy_runtime_abi galaxy_atomic_file)
@@ -711,6 +712,8 @@ add_library(galaxy_gx STATIC
     runtime/src/gx/menu_kit_raster.cpp
     runtime/src/gx/host_menus.cpp
     runtime/src/gx/font_sdf.cpp
+    runtime/src/gx/menu_glyphs.cpp
+    runtime/src/gx/menu_screens.cpp
 )
 # AMD FidelityFX FSR 3.1 (MIT): the FidelityFX SDK 1.1.4 `sdk` directory
 # after its own build (bin/ffx_sdk holds the static libraries with the
@@ -771,6 +774,7 @@ target_compile_features(galaxy_game_menu_assets_tests PRIVATE cxx_std_20)
 set(galaxy_menu_kit_sources
     runtime/src/gx/menu_kit.cpp
     runtime/src/gx/menu_kit_raster.cpp
+    runtime/src/gx/menu_screens.cpp
     runtime/src/gx/font_sdf.cpp
     runtime/src/gx/game_disc.cpp
     runtime/src/gx/game_font.cpp

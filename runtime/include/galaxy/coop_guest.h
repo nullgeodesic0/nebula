@@ -61,6 +61,12 @@ void rejoin_frame(PpcContext* context, GuestMemoryV1* memory, const NativeServic
 void coop_set_second_present(bool present) noexcept;
 // Online live join: the second player drops in beside the first at the next chance (both PCs, the same frame).
 void coop_request_drop_in() noexcept;
+// The Players panel's Leave: the second player sits out at his next turn (local play).
+void coop_request_drop_out() noexcept;
+// Whether the second player is Luigi (a Mario save) or Mario (a Luigi save), for the menus' words.
+[[nodiscard]] bool coop_second_is_luigi() noexcept;
+// Whether a stage is playing (the co-op turn ran in the last quarter second), for the host menus.
+[[nodiscard]] bool coop_in_stage() noexcept;
 [[nodiscard]] bool coop_second_present() noexcept;
 
 // The second player's controller, published by the input thread and read once a game frame.

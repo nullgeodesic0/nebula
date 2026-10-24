@@ -8910,7 +8910,8 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
         galaxy::players::Status status;
         for (std::size_t index = 0; index < device_frame_count && index < status.devices.size(); ++index) {
             const galaxy::players::DeviceKey key = device_frames[index].key;
-            status.devices[status.device_count++] = {key, s_router.seat(key), key == route.driving, key == route.second};
+            status.devices[status.device_count++] = {key, s_router.seat(key), key == route.driving, key == route.second,
+                                                     route.is_join_candidate(key), device_frames[index].input};
         }
         status.second_present = coop_routing && second_present;
         status.waiting = route.waiting;
@@ -9497,6 +9498,17 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     (void)advance_nunchuk_shake_accel(
         snapshot, held(WiiTarget::NunchukShake) || motion_shake_nunchuk,
         s_previous_nunchuk_shake, s_nunchuk_shake_frames);
+    {
+        // The host menus read the first player's buttons and pointer beside the game (player_devices.h).
+        using galaxy::players::MenuInput;
+        const auto bit = [](bool on, std::uint32_t mask) { return on ? mask : 0u; };
+        galaxy::players::publish_menu_input(
+            bit(snapshot.buttons.a, MenuInput::kA) | bit(snapshot.buttons.b, MenuInput::kB) |
+                bit(snapshot.buttons.up, MenuInput::kUp) | bit(snapshot.buttons.down, MenuInput::kDown) |
+                bit(snapshot.buttons.left, MenuInput::kLeft) | bit(snapshot.buttons.right, MenuInput::kRight) |
+                bit(snapshot.buttons.plus, MenuInput::kPlus) | bit(snapshot.buttons.minus, MenuInput::kMinus),
+            pointer_active, s_pointer_x, s_pointer_y);
+    }
     if (galaxy::net_session_requested()) {
         // Online: this PC's player, as the Remote and Nunchuk above have it (netplay.cpp makes its KPAD status).
         namespace button = galaxy::coop::button;

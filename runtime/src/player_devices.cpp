@@ -290,6 +290,26 @@ std::vector<std::pair<DeviceKey, Seat>> take_seat_requests() {
     return taken;
 }
 
+namespace {
+MenuInput s_menu_input;
+}  // namespace
+
+void publish_menu_input(std::uint32_t held, bool pointer_valid, float pointer_x, float pointer_y) {
+    std::lock_guard lock(s_lock);
+    s_menu_input.pressed |= held & ~s_menu_input.held;
+    s_menu_input.held = held;
+    s_menu_input.pointer_valid = pointer_valid;
+    s_menu_input.pointer_x = pointer_x;
+    s_menu_input.pointer_y = pointer_y;
+}
+
+MenuInput take_menu_input() {
+    std::lock_guard lock(s_lock);
+    const MenuInput taken = s_menu_input;
+    s_menu_input.pressed = 0u;
+    return taken;
+}
+
 void post_events(std::vector<Event> events) {
     if (events.empty()) return;
     std::lock_guard lock(s_lock);

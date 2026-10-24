@@ -49,7 +49,11 @@ int main(int argc, char** argv) {
     for (std::size_t i = 0; i < sdf.size() && static_cast<std::size_t>(Tex::Font) + i < kMaxTextures; ++i) {
         textures[static_cast<std::size_t>(Tex::Font) + i] = &sdf[i];
     }
-    Assets assets{&*font, true, true, true};
+    Assets assets;
+    assets.font = &*font;
+    assets.button_cap = true;
+    assets.window_corner = true;
+    assets.font_sdf = true;
     const Space space = Space::for_picture(0, 0, static_cast<float>(image.width), static_cast<float>(image.height));
     const std::string scene = argv[6];
     const float frame = argc > 7 ? static_cast<float>(std::atof(argv[7])) : 20.0f;

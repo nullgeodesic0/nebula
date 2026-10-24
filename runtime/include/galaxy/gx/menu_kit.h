@@ -31,6 +31,12 @@ enum class Tex : std::uint16_t {
     None = 0,
     ButtonCap = 1,      // MyButtonATypeSide.tpl, mirrored vertically to the whole 32x64 round end
     WindowCorner = 2,   // MySysInfoWindow.tpl, the info window's 24x24 corner
+    Glyphs = 3,         // the button prompts (GlyphAtlas)
+    // The Star Pointer's hand (DPDPointer.arc), drawn again over the menus when the pointer is on them.
+    Hand = 4,           // HandPointerPoint.tpl
+    HandShadow = 5,     // HandPointerPointShadow.tpl
+    HandRing = 6,       // DPDOutStar.tpl, mirrored to the whole star outline
+    HandStar = 7,       // DPDPointer.tpl, mirrored to the whole star
     Font = 8,           // MessageFont26 sheet 0; sheet n is Font + n
 };
 inline constexpr std::size_t kMaxTextures = 16u;
@@ -43,7 +49,8 @@ inline constexpr std::size_t kMaxTextures = 16u;
 // - Additive: as Material, added to what is under it (the decide shine).
 // Every mode's colour is then multiplied by kPictureGain, the brightness the game's picture reaches on screen.
 // - Text: the vertex colour, alpha times the edge of a distance-field glyph sheet (font_sdf.h), sharp at any size.
-enum class Mode : std::uint16_t { Solid = 0, Coverage = 1, Material = 2, Additive = 3, Text = 4 };
+// - Image: the texture's colour times the vertex colour (the button prompts).
+enum class Mode : std::uint16_t { Solid = 0, Coverage = 1, Material = 2, Additive = 3, Text = 4, Image = 5 };
 inline constexpr float kPictureGain = 1.24f;
 
 struct Vertex {
@@ -124,13 +131,33 @@ struct WindowAnim {
     [[nodiscard]] float alpha() const noexcept;
 };
 
+// ---- Button prompts: each controller family's own art (button_prompts.h for Xbox and DualSense, the game's
+// picture font for the Wii's), packed in one texture.
+enum class GlyphFamily : std::uint8_t { Wii = 0, Xbox = 1, DualSense = 2 };
+// What a prompt shows (button_prompts.h Label for the pads; the Wii's equivalents for Wii).
+enum class GlyphButton : std::uint8_t { Start, Confirm, Back, Select, Dpad, Controller };
+struct GlyphRect {
+    float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+    float aspect = 1.0f;  // width / height
+};
+struct GlyphAtlas {
+    std::array<std::array<GlyphRect, 6>, 3> rects{};
+    std::array<std::array<bool, 6>, 3> present{};
+    [[nodiscard]] const GlyphRect* find(GlyphFamily family, GlyphButton button) const noexcept {
+        const auto f = static_cast<std::size_t>(family), b = static_cast<std::size_t>(button);
+        return f < 3u && b < 6u && present[f][b] ? &rects[f][b] : nullptr;
+    }
+};
+
 // ---- Widgets. Positions are layout units (the centre of the widget); `alpha` 0..1 multiplies everything.
 struct Assets {
+    const GlyphAtlas* glyphs = nullptr;
     const GameFont* font = nullptr;  // MessageFont26
     bool button_cap = false;
     bool window_corner = false;
     // The font's sheets are bound as distance fields (Mode::Text) rather than coverage.
     bool font_sdf = false;
+    bool pointer_hand = false;
 };
 
 // The pause menu's pill button (PauseMenu.arc NBackUp): centre width and height of the face, the pane scale
@@ -171,6 +198,14 @@ void text(DrawList& list, const Assets& assets, const Space& space, const TextSt
           std::u16string_view str, float alpha);
 // A line's width in layout units.
 [[nodiscard]] float text_width(const Assets& assets, const TextStyle& style, std::u16string_view str) noexcept;
+
+// A button prompt `height` layout units tall, centred on (x, y); returns its width (0 if the atlas lacks it).
+float glyph(DrawList& list, const Assets& assets, const Space& space, GlyphFamily family, GlyphButton button, float x,
+            float y, float height, float alpha);
+
+// The first player's Star Pointer hand (DPDPointer.arc HandPointer) with its tip at (x, y): the game draws its own
+// under the picture, so over a host menu this one takes its place.
+void pointer_hand(DrawList& list, const Assets& assets, const Space& space, float x, float y, float alpha);
 
 // A plain rectangle (the menu backdrop, dividers), layout units.
 void rect(DrawList& list, const Space& space, float x0, float y0, float x1, float y1, const Rgba& top,

@@ -5,6 +5,7 @@
 #include "galaxy/motion_style.h"
 #include "galaxy/odyssey_moveset_guest.h"
 #include "galaxy/experimental_ultrawide_aspect.h"
+#include "galaxy/game_menu_probe.h"
 #include "galaxy/layout_aspect.h"
 #include "galaxy/layout_aspect_cinema.h"
 #include "galaxy/layout_aspect_fits.h"
@@ -146,6 +147,35 @@ void fit_rmge01_scenario_camera(GuestMemoryV1* memory, const NativeServicesV1* s
     }
 }
 
+// The host menus' view of the game's own menus (game_menu_probe.h): the name of every layout drawn and not
+// hidden. LayoutManager +0x60 hidden, +0x78 name; a manager keeps its name for life, so names are cached by
+// manager (and the name's first word, against a recycled address). Reads only.
+void note_rmge01_layout(PpcContext* context, GuestMemoryV1* memory, const NativeServicesV1* services) {
+    if (context->gpr[2] != 0x806AB280u) return;
+    constexpr std::uint32_t pc = 0x80367E64u;
+    const std::uint32_t manager = context->gpr[31];
+    if (!rmge01_guest_object(manager) || guest_load_u8(memory, manager + 0x60u, services, pc) != 0u) return;
+    const std::uint32_t name = guest_load_u32(memory, manager + 0x78u, services, pc);
+    if (!rmge01_guest_object(name)) return;
+    struct Slot {
+        std::uint32_t manager = 0u, name = 0u, word = 0u;
+        std::array<char, 24> text{};
+        std::size_t length = 0u;
+    };
+    static std::array<Slot, 256> slots;
+    const std::uint32_t word = guest_load_u32(memory, name, services, pc);
+    Slot& slot = slots[((manager >> 3u) * 0x9E3779B1u) >> 24u];
+    if (slot.manager != manager || slot.name != name || slot.word != word) {
+        slot = Slot{manager, name, word, {}, 0u};
+        while (slot.length + 1u < slot.text.size()) {
+            const auto byte = guest_load_u8(memory, name + static_cast<std::uint32_t>(slot.length), services, pc);
+            if (byte == 0u) break;
+            slot.text[slot.length++] = static_cast<char>(byte);
+        }
+    }
+    game_menus::note_layout_drawn({slot.text.data(), slot.length});
+}
+
 }  // namespace
 
 void dispatch_site_hook(
@@ -160,6 +190,7 @@ void dispatch_site_hook(
     prompts::tick(memory, services, guest_pc);
     switch (static_cast<SiteHookKind>(kind)) {
     case SiteHookKind::CinemaAndHud:
+        note_rmge01_layout(context, memory, services);
         apply_rmge01_cinema_vertical(context, memory, services);
         apply_rmge01_layout_fits(context, memory, services);
         return;

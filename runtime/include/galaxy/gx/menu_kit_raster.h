@@ -29,5 +29,7 @@ struct Shaded {
 
 // The button cap as the renderer binds it: the 32x32 quarter mirrored into the whole 32x64 round end.
 [[nodiscard]] DecodedTexture mirror_cap_vertically(const DecodedTexture& quarter);
+// A left half mirrored into the whole (the pointer's star and its outline).
+[[nodiscard]] DecodedTexture mirror_horizontally(const DecodedTexture& half);
 
 }  // namespace galaxy::gx::menu

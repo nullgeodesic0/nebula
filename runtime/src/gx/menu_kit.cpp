@@ -208,6 +208,33 @@ float font_scale_y(const GameFont& font, const TextStyle& style) {
 
 }  // namespace
 
+float glyph(DrawList& list, const Assets& assets, const Space& space, GlyphFamily family, GlyphButton button, float x,
+            float y, float height, float alpha) {
+    const GlyphRect* rect = assets.glyphs != nullptr ? assets.glyphs->find(family, button) : nullptr;
+    if (rect == nullptr || alpha <= 0.0f) return 0.0f;
+    const float width = height * rect->aspect;
+    const Rgba white = fade(rgb255(255, 255, 255), alpha);
+    push(list, space, x - width * 0.5f, y + height * 0.5f, x + width * 0.5f, y - height * 0.5f, rect->u0, rect->v0,
+         rect->u1, rect->v1, white, white, Tex::Glyphs, Mode::Image);
+    return width;
+}
+void pointer_hand(DrawList& list, const Assets& assets, const Space& space, float x, float y, float alpha) {
+    if (!assets.pointer_hand || alpha <= 0.0f) return;
+    // HandPointer > Hand at (8, -20): its shadow (3, -3) black at 90, the hand (lerp from (119,196,255) to white by
+    // the texture), the player's star outline at (0, -9) in cyan and the star in it (white to (10,110,250)).
+    const float hx = x + 8.0f, hy = y - 20.0f;
+    const Rgba white = fade(rgb255(255, 255, 255), alpha);
+    const Rgba shadow = fade(rgb255(0, 0, 0, 90), alpha);
+    push(list, space, hx + 3.0f - 27.0f, hy - 3.0f + 27.0f, hx + 3.0f + 27.0f, hy - 3.0f - 27.0f, 0, 0, 1, 1, shadow,
+         shadow, Tex::HandShadow, Mode::Coverage);
+    push(list, space, hx - 27.0f, hy + 27.0f, hx + 27.0f, hy - 27.0f, 0, 0, 1, 1, white, white, Tex::Hand,
+         Mode::Material, rgb255(119, 196, 255), rgb255(255, 255, 255), 1.0f);
+    const Rgba cyan = fade(rgb255(0, 255, 255), alpha);
+    push(list, space, hx - 12.0f, hy - 9.0f + 12.0f, hx + 12.0f, hy - 9.0f - 12.0f, 0, 0, 1, 1, cyan, cyan,
+         Tex::HandRing, Mode::Coverage);
+    push(list, space, hx - 11.0f, hy - 9.0f + 11.0f, hx + 11.0f, hy - 9.0f - 11.0f, 0, 0, 1, 1, white, white,
+         Tex::HandStar, Mode::Material, rgb255(255, 255, 255), rgb255(10, 110, 250), 1.0f);
+}
 void rect(DrawList& list, const Space& space, float x0, float y0, float x1, float y1, const Rgba& top,
           const Rgba& bottom) {
     push(list, space, x0, y0, x1, y1, 0, 0, 1, 1, top, bottom, Tex::None, Mode::Solid);

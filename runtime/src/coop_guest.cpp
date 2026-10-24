@@ -7,6 +7,7 @@
 #include "galaxy/netplay_session.h"
 #include "galaxy/runtime_settings.h"
 
+#include <chrono>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -2309,6 +2310,12 @@ void respawn_player(const Guest& guest, std::uint32_t actor_address, coop::Vec3 
 
 constexpr unsigned kLeaveHoldFrames = 60u;
 
+// The Players panel's Leave (coop_request_drop_out), from the render thread; and which brother joins, for its words.
+std::atomic<bool> s_drop_out_requested{false};
+std::atomic<bool> s_second_is_luigi{true};
+// When a stage last ran the second player's turn (coop_in_stage), steady milliseconds.
+std::atomic<long long> s_stage_seen_ms{0};
+
 void hide_second_hud(const Guest& guest, const State& s) {
     for (const std::uint32_t layout : {s.second_meter, s.second_left}) {
         if (plausible(layout) && (guest.call(fn::kIsLayoutDead, layout) & 0xFFu) == 0u) guest.call(fn::kLayoutKill, layout);
@@ -2363,6 +2370,11 @@ void update_presence(const Guest& guest, State& s, coop::Vec3 first_position, co
         }
         return;
     }
+    s_second_is_luigi.store(coop::partner_of(s.own) == coop::Character::Luigi, std::memory_order_relaxed);
+    s_stage_seen_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch()).count(),
+                          std::memory_order_relaxed);
+    const bool leave_asked = s_drop_out_requested.exchange(false, std::memory_order_relaxed);
     const coop::PartnerInput input = coop_partner_input();
     const std::uint32_t buttons = input.connected ? input.buttons : 0u;
     const std::uint32_t pressed = buttons & ~s.join_buttons;
@@ -2376,13 +2388,13 @@ void update_presence(const Guest& guest, State& s, coop::Vec3 first_position, co
     s.leave_frames = (buttons & b::kMinus) != 0u ? s.leave_frames + 1u : 0u;
     if (input.connected) s.join_seen_connected = true;
     const bool unplugged = !input.connected && s.join_seen_connected;
-    if (s.leave_frames < kLeaveHoldFrames && !unplugged) return;
+    if (s.leave_frames < kLeaveHoldFrames && !unplugged && !leave_asked) return;
     s.present = false;
     s.leave_frames = 0u;
     s.join_seen_connected = false;
     coop_set_second_present(false);
     sit_out(guest, s);
-    trace("second player drops out (%s)", unplugged ? "controller gone" : "- held");
+    trace("second player drops out (%s)", leave_asked ? "Players panel" : unplugged ? "controller gone" : "- held");
 }
 
 // The bosses' own actors (their vtables): Bowser, Bowser Jr. and his ship, Kamella, Topmaniac, Bugaboom, Dino
@@ -3789,6 +3801,21 @@ void coop_request_second_player_mode(std::uint16_t mode) noexcept {
 
 void coop_request_drop_in() noexcept {
     state().drop_in_requested = true;
+}
+
+void coop_request_drop_out() noexcept {
+    s_drop_out_requested.store(true, std::memory_order_relaxed);
+}
+
+bool coop_second_is_luigi() noexcept {
+    return s_second_is_luigi.load(std::memory_order_relaxed);
+}
+
+bool coop_in_stage() noexcept {
+    const long long seen = s_stage_seen_ms.load(std::memory_order_relaxed);
+    const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch()).count();
+    return seen != 0 && now - seen < 250;
 }
 
 int coop_second_lives() noexcept {

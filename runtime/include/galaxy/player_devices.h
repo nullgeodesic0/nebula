@@ -122,6 +122,8 @@ struct DeviceStatus {
     Seat seat = Seat::Auto;
     bool driving = false;
     bool second = false;
+    bool join_candidate = false;  // its + would drop the second player in
+    bool input = false;           // it had input in the last poll
 };
 struct Status {
     std::array<DeviceStatus, 12> devices{};
@@ -137,6 +139,21 @@ void publish_status(const Status& status);
 void request_seat(DeviceKey key, Seat seat);
 // Taken by the input poll.
 [[nodiscard]] std::vector<std::pair<DeviceKey, Seat>> take_seat_requests();
+// The first player's buttons and pointer for the host menus (host_menus.cpp), which sit beside the game's own and
+// read the same input without taking it from the game. Presses between two takes are kept (OR'd).
+struct MenuInput {
+    enum Button : std::uint32_t {
+        kA = 1u << 0, kB = 1u << 1, kUp = 1u << 2, kDown = 1u << 3, kLeft = 1u << 4, kRight = 1u << 5,
+        kPlus = 1u << 6, kMinus = 1u << 7,
+    };
+    std::uint32_t held = 0u;
+    std::uint32_t pressed = 0u;
+    bool pointer_valid = false;
+    float pointer_x = 0.0f, pointer_y = 0.0f;  // -1..1 across the picture, y down
+};
+void publish_menu_input(std::uint32_t held, bool pointer_valid, float pointer_x, float pointer_y);
+[[nodiscard]] MenuInput take_menu_input();
+
 // Joins, disconnects and leaves for the status cards (the menus take them).
 void post_events(std::vector<Event> events);
 [[nodiscard]] std::vector<Event> take_posted_events();
