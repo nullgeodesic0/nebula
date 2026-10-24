@@ -202,6 +202,9 @@ struct SchemeTuning {
 struct ControlsConfig {
     std::array<BindingTable, kControlSchemeCount> tables{};
     std::array<SchemeTuning, kControlSchemeCount> tuning{};
+    // runtime_settings.ini `home_menu=on|off`: whether Wii HOME (bound or not) may open the game's HOME
+    // Menu. Off by default (native_input.h set_home_button_enabled).
+    bool home_menu = false;
     [[nodiscard]] BindingTable& table(ControlScheme s) noexcept {
         return tables[static_cast<std::size_t>(s)];
     }
@@ -223,6 +226,12 @@ struct ControlsConfig {
 [[nodiscard]] constexpr bool scheme_has_motion(ControlScheme s) noexcept {
     return s == ControlScheme::SwitchPro || s == ControlScheme::SwitchPro2 ||
            s == ControlScheme::PlayStation || s == ControlScheme::Steam;
+}
+// Pads whose face buttons sit in the Xbox positions (bottom button = Wii A,
+// right = Wii B), as opposed to Nintendo's swapped pair.
+[[nodiscard]] constexpr bool scheme_has_xbox_layout(ControlScheme s) noexcept {
+    return s == ControlScheme::Xbox || s == ControlScheme::PlayStation || s == ControlScheme::Steam ||
+           s == ControlScheme::Generic;
 }
 // Switch, PlayStation, Steam and generic controllers are read from their HID
 // reports (controller_hid.h); Xbox controllers through XInput.
@@ -251,13 +260,19 @@ struct ControlsConfig {
 }
 
 [[nodiscard]] BindingTable default_binding_table(ControlScheme scheme);
-// The defaults of controls versions 1, 2 and 3, kept for migration.
+// The defaults of controls versions 1, 2, 3, 5 (4's tables are 5's), 6 and 7, kept for migration.
 [[nodiscard]] BindingTable legacy_binding_table(ControlScheme scheme);
 [[nodiscard]] BindingTable version2_binding_table(ControlScheme scheme);
 [[nodiscard]] BindingTable version3_binding_table(ControlScheme scheme);
+[[nodiscard]] BindingTable version5_binding_table(ControlScheme scheme);
+[[nodiscard]] BindingTable version6_binding_table(ControlScheme scheme);
+[[nodiscard]] BindingTable version7_binding_table(ControlScheme scheme);
 [[nodiscard]] SchemeTuning legacy_scheme_tuning(ControlScheme scheme);
-// runtime_settings.ini `controls_version`; files without it are version 1.
-inline constexpr unsigned kControlsVersion = 5;
+// runtime_settings.ini `controls_version`; files without it are version 1. Version 6: the left-stick click
+// is Wii 1 (the Odyssey moveset's cap button) and the right-stick click resets the camera (Wii C).
+// Version 7: the west face button is Wii 1 and no longer spins; the left-stick click resets the camera.
+// Version 8: Wii HOME is unbound (keyboard H, Switch Home, PlayStation PS); the HOME Menu is off (home_menu).
+inline constexpr unsigned kControlsVersion = 8;
 // Version 3 still-pointer defaults (pads), replaced in version 4.
 inline constexpr float kVersion3PointerHideSeconds = 4.0f;
 inline constexpr float kVersion3PointerHideRadius = 0.03f;

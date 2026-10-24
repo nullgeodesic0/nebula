@@ -54,6 +54,15 @@ struct WiimoteButtons {
     bool home = false;
 };
 
+// Whether Wii HOME reaches the game (its HOME Menu). Off by default: the input poll sets it from the controls
+// setting `home_menu` (input_bindings.h ControlsConfig::home_menu), GALAXY_HOME_MENU=1 or 0 overriding it.
+// While off, every encoder of the virtual Wii Remote (core-button reports, the synthetic KPAD mask) drops
+// HOME, so no binding, script, mouse button or second player opens the menu.
+void set_home_button_enabled(bool enabled) noexcept;
+[[nodiscard]] bool home_button_enabled() noexcept;
+// The controls setting with GALAXY_HOME_MENU applied (the variable is read once).
+[[nodiscard]] bool home_menu_wanted(bool setting) noexcept;
+
 struct Axis10 {
     std::uint16_t x = 512;
     std::uint16_t y = 512;

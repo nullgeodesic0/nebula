@@ -2087,6 +2087,7 @@ const LiveControls& live_controls() {
         s_live.keyboard_keys = galaxy::input::referenced_keys(
             s_live.config.table(galaxy::input::ControlScheme::Keyboard));
         s_live.generation = generation;
+        galaxy::input::set_home_button_enabled(galaxy::input::home_menu_wanted(s_live.config.home_menu));
     }
     return s_live;
 }

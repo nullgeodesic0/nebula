@@ -947,6 +947,20 @@ bool basic_ir_decoder_preserves_low_ff_visible_coordinates() {
 int main() {
     bool ok = true;
     ok &= settings_pad_toggles_navigates_and_hides_buttons();
+    {
+        // The virtual Wii Remote's core-button report: HOME is byte 1 bit 7.
+        galaxy::input::WiimoteInputSnapshot home;
+        home.buttons.home = true;
+        home.buttons.a = true;
+        std::array<std::uint8_t, 32> report{};
+        const auto built = galaxy::input::build_wiimote_input_report(0x30u, home, report);
+        ok &= expect(built.status == galaxy::input::WiimoteReportBuildStatus::Ok &&
+                         (report[3] & 0x80u) == 0u && (report[3] & 0x08u) != 0u,
+                     "with the HOME Menu off a report never carries HOME (A still does)");
+        galaxy::input::set_home_button_enabled(true);
+        (void)galaxy::input::build_wiimote_input_report(0x30u, home, report);
+        ok &= expect((report[3] & 0x80u) != 0u, "with home_menu=on HOME reaches the report");
+    }
     ok &= basic_ir_decoder_preserves_low_ff_visible_coordinates();
     ok &= native_input_script_unsigned_fields_fail_closed();
     ok &= normalizes_xinput_axes();

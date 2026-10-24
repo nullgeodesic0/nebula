@@ -762,9 +762,10 @@ void test_generic() {
            "button 1 jumps");
     expect(defaults[WiiTarget::Z][1] == InputSource{SourceKind::Button, static_cast<std::uint8_t>(pad::kGripLeftBit)},
            "button 7 crouches");
-    expect(legacy_binding_table(ControlScheme::Generic) == defaults &&
-               version3_binding_table(ControlScheme::Generic) == defaults,
-           "migration never changes generic bindings");
+    // Up to version 5 every version shares one table; the fork's versions 6-8 move the cap button and HOME.
+    expect(legacy_binding_table(ControlScheme::Generic) == version5_binding_table(ControlScheme::Generic) &&
+               version3_binding_table(ControlScheme::Generic) == version5_binding_table(ControlScheme::Generic),
+           "no generic migration before version 5");
     for (std::size_t t = 0; t < kWiiTargetCount; ++t) {
         for (const InputSource source : defaults.targets[t]) {
             if (!source.empty()) {
