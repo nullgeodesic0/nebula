@@ -127,9 +127,6 @@ class Instance:
             'GALAXY_TWO_PLAYERS': '1' if coop else '0',
             'GALAXY_COOP_SPLIT': '1' if split else '0',
             'GALAXY_SHADER_CACHE_DIR': os.path.join(self.dir, 'shadercache'),
-            'GALAXY_GPU_VERTEX_RING_MB': '256',
-            'GALAXY_GPU_INDEX_RING_MB': '64',
-            'GALAXY_GPU_CONSTANT_RING_MB': '32',
             'GALAXY_TRACE_COOP': '1',
             # A controller in use for another game must not play this one too.
             'GALAXY_XINPUT_REQUIRE_FOCUS': '1',
