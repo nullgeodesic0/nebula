@@ -114,6 +114,12 @@ void Mario::closeStatus(MarioState* pState) {
             pCurr = pNext;
         }
 
+#ifdef TARGET_PC
+        // Not open (a status closed already, as by a death mid-talk: the talk's end closes it again): nothing to close.
+        if (pCurr == nullptr) {
+            return;
+        }
+#endif
         pCurr->_8 = pState->_8;
     }
 

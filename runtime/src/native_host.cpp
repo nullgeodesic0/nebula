@@ -606,8 +606,10 @@ private:
 
     // Master volume, applied once to the final output so it also covers audio mixed outside the DSP channels (the
     // movie player). A change ramps across one buffer from the previous value. One submitting thread.
+    // GALAXY_MUTE=1 (test copies): silence at the output only, the game's audio runs as ever.
     void apply_output_master_gain(std::vector<std::byte>& pcm_le) noexcept {
-        const float master = galaxy::get_runtime_settings().audio.master;
+        static const bool muted = read_env_flag_uncached("GALAXY_MUTE", false);
+        const float master = muted ? 0.0f : galaxy::get_runtime_settings().audio.master;
         constexpr std::uint32_t kUnity = galaxy::audio::kNativeAudioUnityGainQ16;
         const std::uint32_t target = galaxy::audio::native_audio_gain_to_q16(master);
         // The first buffer starts at the configured gain; later changes ramp.
@@ -4586,13 +4588,18 @@ std::vector<std::byte> native_game_empty_mii_database() {
 struct NativeGameAudio::State {
     JAudioHostMixer mixer;
     NativeAudioSink sink;
-    std::deque<std::pair<std::uint32_t, JAudioHostMixer>> saves;  // rollback's, oldest first
+    // Rollback's, oldest first: the mixer and the voice clips' playback (both write the game's sound buffers).
+    struct Saved {
+        JAudioHostMixer mixer;
+        voice::PlaybackState voice;
+    };
+    std::deque<std::pair<std::uint32_t, Saved>> saves;
 };
 
 void NativeGameAudio::save_dsp(std::uint32_t frame) {
     auto& saves = state_->saves;
     while (!saves.empty() && saves.back().first >= frame) saves.pop_back();
-    saves.emplace_back(frame, state_->mixer);
+    saves.emplace_back(frame, State::Saved{state_->mixer, voice::save_playback()});
     while (saves.size() > 32) saves.pop_front();
 }
 
@@ -4600,17 +4607,34 @@ bool NativeGameAudio::restore_dsp(std::uint32_t frame) {
     auto& saves = state_->saves;
     while (!saves.empty() && saves.back().first > frame) saves.pop_back();
     if (saves.empty() || saves.back().first != frame) return false;
-    state_->mixer = saves.back().second;
+    state_->mixer = saves.back().second.mixer;
+    voice::restore_playback(saves.back().second.voice);
     return true;
 }
 
 static_assert(std::is_trivially_copyable_v<JAudioHostMixer>, "live join sends the DSP state as bytes");
 
+// The voice clips' playback as bytes: the clip picker's state as its one number (the same on every PC).
+struct VoiceBytes {
+    std::uint32_t playing;
+    std::uint64_t position;
+    std::uint64_t last_start;
+    std::uint8_t rendered;
+    std::uint64_t on_channel, after_channel, centred;
+    std::uint64_t random;
+};
+
 std::vector<std::byte> NativeGameAudio::saved_dsp(std::uint32_t frame) const {
-    for (const auto& [kept, mixer] : state_->saves) {
+    for (const auto& [kept, saved] : state_->saves) {
         if (kept == frame) {
-            std::vector<std::byte> out(sizeof(JAudioHostMixer));
-            std::memcpy(out.data(), &mixer, sizeof(JAudioHostMixer));
+            const voice::PlaybackState& v = saved.voice;
+            std::ostringstream random;
+            random << v.random;
+            const VoiceBytes voice{v.playing, v.position, v.last_start, static_cast<std::uint8_t>(v.rendered ? 1u : 0u),
+                                   v.on_channel, v.after_channel, v.centred, std::stoull(random.str())};
+            std::vector<std::byte> out(sizeof(JAudioHostMixer) + sizeof(VoiceBytes));
+            std::memcpy(out.data(), &saved.mixer, sizeof(JAudioHostMixer));
+            std::memcpy(out.data() + sizeof(JAudioHostMixer), &voice, sizeof(VoiceBytes));
             return out;
         }
     }
@@ -4618,10 +4642,23 @@ std::vector<std::byte> NativeGameAudio::saved_dsp(std::uint32_t frame) const {
 }
 
 bool NativeGameAudio::adopt_dsp(const std::byte* data, std::size_t size) {
-    if (size != sizeof(JAudioHostMixer)) return false;
+    if (size != sizeof(JAudioHostMixer) + sizeof(VoiceBytes)) return false;
     JAudioHostMixer other;
     std::memcpy(static_cast<void*>(&other), data, sizeof(JAudioHostMixer));
     state_->mixer.adopt_state(other);
+    VoiceBytes voice{};
+    std::memcpy(&voice, data + sizeof(JAudioHostMixer), sizeof(VoiceBytes));
+    voice::PlaybackState v;
+    v.playing = voice.playing;
+    v.position = static_cast<std::size_t>(voice.position);
+    v.last_start = voice.last_start;
+    v.rendered = voice.rendered != 0;
+    v.on_channel = voice.on_channel;
+    v.after_channel = voice.after_channel;
+    v.centred = voice.centred;
+    std::istringstream random(std::to_string(voice.random));
+    random >> v.random;
+    voice::restore_playback(v);
     state_->saves.clear();
     return true;
 }

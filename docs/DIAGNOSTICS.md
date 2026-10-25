@@ -10,7 +10,10 @@ Environment variables for testing and debugging the runtime. None of them is nee
 | `GALAXY_RENDER_CONFIG_PATH`, `GALAXY_RUNTIME_SETTINGS_PATH` | Use these settings files instead of the ones in `%LOCALAPPDATA%\Nebula` |
 | `GALAXY_NAND_ROOT` | Save folder |
 | `GALAXY_INSTANCE_LEASE` | Private single-instance lock name, so test sessions can run side by side |
+| `GALAXY_SHADER_CACHE_DIR=<folder>` | This copy's own shader cache (in place of `%LOCALAPPDATA%\Nebula\shadercache\RMGE01`), so copies running at once never share one |
 | `GALAXY_AUDIO_WAV_DUMP=<path>`, `GALAXY_AUDIO_WAV_DUMP_ONLY=1` | Write the mixed audio to a WAV file, optionally without opening the sound device |
+| `GALAXY_MUTE=1` | Silent output (test copies): the master gain is zero at the device; the game's audio runs as ever, so runs stay deterministic |
+| `GALAXY_NET_DESYNC_DUMP=<folder>` | Online tests: on a desync, write this PC's memory at the failing check (`desync-<frame>-<host\|join>.bin`) to compare with the other PC's |
 | `GALAXY_PRESENT_SNAPSHOT_DIR`, `GALAXY_PRESENT_SNAPSHOT_EVERY`, `_FIRST`, `_LAST` | Save every Nth presented frame as a PPM image |
 | `GALAXY_TRACE_PRESENT_STATS=1` | Log presented and new frames per second |
 | `GALAXY_D3D_DEBUG=1` | Enable the Direct3D 12 debug layer |

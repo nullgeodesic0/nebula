@@ -139,6 +139,11 @@ public:
 
     /* 0x00 */ const JMapInfo* mInfo;
     /* 0x04 */ s32 mIndex;
+#ifdef TARGET_PC
+    // The x64 layout's padding, as a member every constructor sets: an iterator returned by value is built in the
+    // caller's stack slot, and copied whole into the objects that keep it, with whatever that slot held.
+    s32 mPadPC = 0;
+#endif
 };
 
 template < typename T >

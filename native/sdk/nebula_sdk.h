@@ -56,6 +56,8 @@ void nebula_load_dol_data(void);
 /* Snapshots (os/snapshot.c, deterministic mode): the retrace boundary's save or restore as the host asks
    (det_boundary), the staged remote input and the GPU ring's unsent commands dropped on a restore. */
 void nebula_snapshot_boundary(uint32_t frame);
+/* The current stack below the caller zeroed (os/os_native.c): no host values left there for the game to pick up. */
+void nebula_clear_dead_stack(void);
 /* Deterministic mode: [addr, addr + size) of the game's memory was written by the host, maybe by the system (a file
    read straight into it, which the snapshots' write watch does not see): marks those pages written. */
 void nebula_snapshot_touch(void* addr, uint32_t size);

@@ -181,6 +181,7 @@ struct Session::Impl {
     std::map<std::uint32_t, std::uint64_t> local_hashes;
     std::map<std::uint32_t, std::uint64_t> remote_hashes;
     std::atomic<std::uint32_t> desyncs{0};
+    std::atomic<std::uint32_t> last_desync_frame{0};
     bool ended = false;
     unsigned remote_channel = 1;
     std::uint32_t remote_confirmed = 0;  // every remote input up to here has come
@@ -211,8 +212,9 @@ struct Session::Impl {
         const auto remote = remote_hashes.find(frame);
         if (local == local_hashes.end() || remote == remote_hashes.end()) return;
         if (local->second != remote->second) {
-            if (desyncs.fetch_add(1) == 0) {
-                std::fprintf(stderr, "[netplay] desync at scene frame %u: %016llx here, %016llx there\n", frame,
+            last_desync_frame.store(frame);
+            if (desyncs.fetch_add(1) < 1000u) {
+                std::fprintf(stderr, "[netplay] desync at frame %u: %016llx here, %016llx there\n", frame,
                              static_cast<unsigned long long>(local->second),
                              static_cast<unsigned long long>(remote->second));
             }
@@ -503,6 +505,16 @@ bool Session::take_state(std::vector<std::uint8_t>& image) {
     return true;
 }
 
+bool Session::poll_state(std::vector<std::uint8_t>& image) {
+    std::lock_guard<std::mutex> guard(impl_->lock);
+    if (!impl_->state_ready) return false;
+    image = std::move(impl_->state);
+    impl_->state = {};
+    impl_->state_ready = false;
+    impl_->state_received = 0;
+    return true;
+}
+
 bool Session::frame_inputs(std::uint32_t frame, FrameInput (&inputs)[2]) {
     if (frame <= base_ + settings_.delay) {
         inputs[0] = {};
@@ -577,6 +589,10 @@ void Session::report_hash(std::uint32_t scene_frame, std::uint64_t hash) {
 
 std::uint32_t Session::desyncs() const noexcept {
     return impl_->desyncs.load();
+}
+
+std::uint32_t Session::last_desync_frame() const noexcept {
+    return impl_->last_desync_frame.load();
 }
 
 void Session::close() {

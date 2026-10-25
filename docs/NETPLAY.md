@@ -17,11 +17,12 @@ at `det_step`):
 - The game's memory, the module, the GX ring, the disc's file table and the main.dol copy sit at fixed addresses in
   every process, so pointers the game keeps are the same everywhere.
 - Floating point is portable: the game's own `libm` (`native/libm`), no FMA, no contraction.
+- Locals the game reads before writing start at zero (`-ftrivial-auto-var-init=zero`): the console's stack held the
+  same leftovers on every run, a PC's holds its host's (a line check's hit classification read one).
 
 `GALAXY_STATE_HASH=<file>` writes a hash of the game's memory every 60 scene frames (`GALAXY_STATE_HASH_EVERY`,
 `GALAXY_STATE_HASH_CHUNKS=1` for one per megabyte), skipping what is a process's own (native stacks, host addresses).
-Known: a one-off difference in one megabyte at a stage change (scene frame 660 of the tour test), gone by the next
-sample.
+Replays of the same input match at every sample.
 
 ## Lockstep (default)
 
@@ -47,8 +48,8 @@ sample.
 - A restore also takes back the host's part of the game's state: the NAND (kept in memory in rollback sessions and
   written to disk once no rollback can undo it), the remotes' state the game set through services, the renderer's GPU
   registers (`stream_checkpoint` / `stream_rewind`, in stream order), the GX commands written but not submitted, the
-  DSP mixer, the scene frame count and the test scripts' progress. The renderer is idle before a save or restore (its
-  EFB copies land in the game's memory).
+  DSP mixer and the voice clips' playback, the scene frame count and the test scripts' progress. The renderer is idle
+  before a save or restore (it reads the game's memory as it draws).
 - A `[netplay]` line every 600 frames gives rollbacks, frames run again and the time spent waiting.
 
 ## Live join
@@ -66,15 +67,47 @@ time.
 
 The host waits for the joiner while it loads (it runs at most 15 frames ahead of the joiner's input).
 
+## Staying in sync
+
+What one PC alone decides never reaches the game online (`netplay_ui_locked`):
+
+- Nebula's settings menu and the HOME Menu stay closed (the HOME button is no one's input): settings change between
+  sessions.
+- The settings that change what the game computes are the host's (above), the language too.
+- The ray tracer's answers to the game's clipping (light reach, traced sun) are those without it, whatever each PC
+  draws with.
+- Achievements and stats are kept on each PC, but the game shows no pop-up and reads none back.
+
+Checks and resync (rollback and live join): every 300 boundaries each PC hashes the game's memory (as the state hash,
+on worker threads, about 20 ms) and sends the hash once every input up to that boundary is confirmed (no rollback can
+change it). A difference is logged (`[netplay] desync at frame N`) and the host resyncs: it stops running ahead of the
+joiner's input, keeps the first boundary up to which every input is in, and sends the game there as a live join's
+image; the joiner becomes it at its next boundary and runs the frames since again at once (`[netplay] resync`), about
+a second after the check on a fast link; the image is about 70 MB and shares the connection with the inputs, so
+on a slow upload both PCs wait while it is sent (tens of seconds at 10 Mbit/s). Lockstep sessions log a desync but do not resync: use rollback
+or live join.
+
+The host's own work at a boundary (snapshots, the session, hashes) runs on the game's stack and leaves this PC's own
+values below it; the game's uninitialized temporaries (a struct's padding, copied whole) would carry them into its
+memory, a difference the checks see though the game never reads it. So each boundary ends with every game stack's
+dead part zeroed (`nebula_clear_dead_stack`, only nonzero words written), the game's heaps hand out blocks zeroed
+(what a freed block held is this PC's history), and `JMapInfoIter` (a pointer and an index, copied by value
+everywhere) has its x64 padding as a member every constructor sets.
+
 ## Tests
 
 - `GALAXY_NET_TEST_LAG=<ms>`: the other PC's inputs count only that long after they came (a slow link on one PC).
 - `GALAXY_SNAPSHOT_TEST=<save>,<restore>`: keeps boundary `<save>` and goes back to it at `<restore>`;
   `<save>,<restore>,1` becomes `<save>`'s live-join image at `<restore>` instead. A run with it must match one without.
 - `GALAXY_SNAPSHOT_TIMING=1`: each save's and restore's time, logged.
+- `GALAXY_NET_TEST_DESYNC=<frame>` (joiner, rollback): that frame runs with the host's A button flipped on this PC only,
+  a desync for the checks to find and the resync to repair.
+- `GALAXY_NET_DESYNC_DUMP=<folder>`: on a desync each PC writes its memory at the failing check, to compare.
+- `GALAXY_MUTE=1`: silent output for test copies (the game's audio runs as ever).
 
 ## Limits
 
 - Input over TCP; the game image is sent uncompressed (zero pages skipped).
 - Each PC renders its own split screen; both show the same picture.
-- Achievements and stats are each PC's own.
+- Achievements and stats are each PC's own (no pop-ups online).
+- Either PC leaving ends the session.

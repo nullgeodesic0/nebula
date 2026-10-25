@@ -463,7 +463,7 @@ void nebula_snapshot_touch(void* addr, uint32_t size) {
     }
 }
 
-void nebula_snapshot_boundary(uint32_t frame) {
+static void boundary(uint32_t frame) {
     for (;;) {
         uint32_t arg = 0;
         const uint32_t action = nebula_host()->det_boundary(nebula_host()->user, frame, &arg);
@@ -481,6 +481,13 @@ void nebula_snapshot_boundary(uint32_t frame) {
         }
         return;
     }
+}
+
+void nebula_snapshot_boundary(uint32_t frame) {
+    boundary(frame);
+    /* The host's work left this PC's own values on the stack; the game goes on with none (online checks compare the
+       game's memory, which its uninitialized temporaries would carry them into). */
+    nebula_clear_dead_stack();
 }
 #else
 NEBULA_GAME_API int nebula_game_snapshot_export(uint32_t frame, void (*write)(void* context, const void* data,

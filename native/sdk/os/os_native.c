@@ -965,6 +965,42 @@ void* __NebulaBootStackEnd(void) {
     return nebula_arena_base() + kBootStackTop - kBootStackSize;
 }
 
+/* [from, to) zeroed, only its nonzero words written (zero pages stay clean for the snapshots' write watch). Inlined:
+   it runs on the stack it may clear up to. */
+static inline __attribute__((always_inline)) void clear_words(uint8_t* from, uint8_t* to) {
+    for (volatile uint64_t* p = (volatile uint64_t*)(((uintptr_t)from + 7u) & ~(uintptr_t)7u); (uint8_t*)(p + 1) <= to;
+         p++) {
+        if (*p != 0) *p = 0;
+    }
+}
+
+/* Every game stack's dead part zeroed: code that ran on it and is gone (the host's at a retrace boundary: snapshots,
+   netplay, hashes; or calls the PCs made differently) left values of this PC's own there, which the game's
+   uninitialized temporaries would carry into its memory (a struct's padding copied whole), where online checks see a
+   difference. The stack running this is dead below here; another thread's below where it was switched out (an idle
+   wait runs on the blocked thread's stack, below its last switch: so the running stack is told by address); a free
+   slot whole. A stack's first word is the OS's overflow mark. */
+__attribute__((noinline)) void nebula_clear_dead_stack(void) {
+    /* This frame covers the band just below the caller (zeroed here); below the stack pointer nothing is live (no red
+       zone on Windows x64, and nothing here calls). */
+    volatile uint64_t band[128];
+    for (int i = 0; i < 128; i++) band[i] = 0;
+    uint8_t* sp;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(sp));
+    for (OSThread* t = __OSActiveThreadQueue.head; t != NULL; t = t->linkActive.next) {
+        uint8_t* const low = (uint8_t*)t->stackEnd + 8;
+        uint8_t* const high = (uint8_t*)t->stackBase;
+        uint8_t* const live = sp > low && sp <= high ? sp : (uint8_t*)t->context.nativeSp;
+        if (t->stackEnd != NULL && live > low && live <= high) clear_words(low, live);
+    }
+    for (int i = 0; i < sStackSlotCount; i++) {
+        uint8_t* const end = sStackSlots[i].end;
+        if (sStackSlots[i].owner == NULL && !(sp > end && sp <= end + sStackSlots[i].size)) {
+            clear_words(end, end + sStackSlots[i].size);
+        }
+    }
+}
+
 OSErrorHandler __OSErrorTable[17];
 u32 __OSFpscrEnableBits = 0xF8;
 

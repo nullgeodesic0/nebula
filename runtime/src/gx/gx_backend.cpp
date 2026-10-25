@@ -2041,12 +2041,22 @@ bool GxBackend::initialize(int w, int h) {
     (void)ensure_resident_vertex_buffer();
     renderer_.create_first_use_resources();
 
+    // GALAXY_SHADER_CACHE_DIR: a cache of this copy's own (two copies running at once never share one).
     std::filesystem::path cache_dir;
 #if defined(_WIN32)
     {
+        wchar_t* override_dir = nullptr;
+        std::size_t override_len = 0;
+        if (_wdupenv_s(&override_dir, &override_len, L"GALAXY_SHADER_CACHE_DIR") == 0 && override_dir != nullptr &&
+            override_dir[0] != L'\0') {
+            cache_dir = std::filesystem::path(override_dir);
+        }
+        std::free(override_dir);
         wchar_t* local_app = nullptr;
         std::size_t local_app_len = 0;
-        if (_wdupenv_s(&local_app, &local_app_len, L"LOCALAPPDATA") == 0 && local_app != nullptr) {
+        if (!cache_dir.empty()) {
+            // the override's
+        } else if (_wdupenv_s(&local_app, &local_app_len, L"LOCALAPPDATA") == 0 && local_app != nullptr) {
             cache_dir = std::filesystem::path(local_app)
                 / L"Nebula" / L"shadercache" / L"RMGE01";
             std::free(local_app);

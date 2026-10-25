@@ -572,6 +572,12 @@ std::FILE* open_file(const fs::path& path, uint32_t mode) {
 std::atomic<bool> gNetLive{false};
 galaxy::net::SessionSettings gLiveSettings;
 
+// Online, each PC's own menus (Nebula's settings, the HOME Menu) stay out of the game: they would freeze or change
+// one PC's game and not the other's. Settings change between sessions; the HOME button is no one's input.
+bool netplay_ui_locked() {
+    return gNetLive.load() || galaxy::net::session().active() || galaxy::net::session().connected();
+}
+
 // Rollback (netplay's rollback, GALAXY_SNAPSHOT_TEST): the NAND in memory, kept and restored with the game at each
 // boundary (svc_det_boundary), so a NAND operation of frames a restore undid is undone too; written to the host's files
 // once no rollback can undo it (nand_flush). Files are shared between the kept states until one is written. The NAND
@@ -1062,6 +1068,23 @@ struct RollbackStats {
 };
 RollbackStats gRollbackStats;
 
+// Rollback sessions' checks: every kNetCheckEvery boundaries each PC hashes the game (game_state_hash) and sends the
+// hash once every input up to that boundary is confirmed (no rollback can change it); a difference is a desync. The
+// host then resyncs: it stops running ahead of the joiner's input, keeps the first boundary every input up to which
+// is in, and sends the game there (the live join's image); the joiner becomes it at its next boundary and runs the
+// frames since again at once. GALAXY_NET_TEST_DESYNC=<frame> (joiner): that frame runs with the host's A button
+// pressed the other way, on this PC only (a desync to recover from).
+constexpr uint32_t kNetCheckEvery = 300;
+std::map<uint32_t, uint64_t> gPendingChecks;  // boundary -> hash, not yet confirmed
+uint32_t gCheckedFrame = 0;                   // the latest boundary hashed (a save calls the boundary again)
+std::atomic<bool> gResyncWait{false};         // host: no running ahead until the resync's boundary
+bool gResyncPending = false;
+uint32_t gResyncs = 0;
+// GALAXY_NET_DESYNC_DUMP=<folder> (tests): the game's memory at the latest checks kept, and the one a desync names
+// written there (desync-<frame>-<host|join>.bin: MEM1, then MEM2) to compare with the other PC's.
+std::map<uint32_t, std::vector<std::byte>> gCheckCopies;
+std::vector<std::byte> copy_guest_memory(bool hashed_only = false);
+
 // Deterministic mode's frame clock (vi_thread) needs these, defined below.
 bool deterministic();
 void send_wpad_reports(uint32_t frame);
@@ -1142,7 +1165,8 @@ void vi_thread() {
                 }
                 gRollbackStats.wait_game_ms += std::chrono::duration<double, std::milli>(Clock::now() - wait_start).count();
                 const auto ahead_start = Clock::now();
-                while (frame > net.remote_confirmed() + kRollbackAhead) {
+                const uint32_t ahead = gResyncWait.load(std::memory_order_acquire) ? 0u : kRollbackAhead;
+                while (frame > net.remote_confirmed() + ahead) {
                     if (net.ended()) {
                         if (nand_in_memory()) nand_flush(gMemNand.entries);
                         std::fprintf(stderr, "[netplay] the session ended: closing\n");
@@ -1171,6 +1195,14 @@ void vi_thread() {
                 const unsigned local_channel = net.local_channel();
                 net_inputs[local_channel] = net.local_input(frame).snapshot;
                 net_inputs[1 - local_channel] = remote.snapshot;
+                static const uint32_t test_desync = [] {
+                    const char* value = std::getenv("GALAXY_NET_TEST_DESYNC");
+                    return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+                }();
+                if (test_desync != 0 && frame == test_desync && net.role() == galaxy::net::Role::Join) {
+                    net_inputs[1 - local_channel].buttons.a = !net_inputs[1 - local_channel].buttons.a;
+                    std::fprintf(stderr, "[netplay] test: frame %u runs with the host's A flipped here\n", frame);
+                }
                 gNetInputs = net_inputs;
             } else if (galaxy::net::session().active()) {
                 galaxy::net::Session& net = galaxy::net::session();
@@ -1782,6 +1814,8 @@ void svc_object_name(void*, uint32_t id, const char* name) {
 
 float svc_light_reach(void*, const char* model, float radius) {
 #if defined(NEBULA_HOST_RENDERER)
+    // Online the game clips actors as without the ray tracer, each PC's own choice (netplay_ui_locked).
+    if (netplay_ui_locked()) return 0.0f;
     return galaxy::gx::rt_light_reach(model, radius);
 #else
     (void)model;
@@ -1792,6 +1826,7 @@ float svc_light_reach(void*, const char* model, float radius) {
 
 int svc_traced_sun(void*, float* direction) {
 #if defined(NEBULA_HOST_RENDERER)
+    if (netplay_ui_locked()) return 0;
     std::array<float, 3> sun{};
     if (direction == nullptr || !galaxy::gx::traced_sun(sun, 500u)) {
         return 0;
@@ -1881,6 +1916,8 @@ int svc_achievement(void*, const char* id, uint16_t* name, uint32_t capacity) {
 #else
     const galaxy::achievements::Info* info = id != nullptr ? galaxy::achievements::find(id) : nullptr;
     if (info == nullptr || !galaxy::achievements::unlock(id)) return 0;
+    // Online each PC keeps its own, but the game shows no pop-up (one PC's would not be the other's).
+    if (netplay_ui_locked()) return 0;
     uint32_t i = 0;
     for (; name != nullptr && i + 1u < capacity && info->name[i] != '\0'; ++i) {
         name[i] = static_cast<unsigned char>(info->name[i]);
@@ -1896,7 +1933,7 @@ int32_t svc_achievement_date(void*, const char* id) {
     (void)id;
     return 0;
 #else
-    return id != nullptr ? galaxy::achievements::unlocked_date(id) : 0;
+    return id != nullptr && !netplay_ui_locked() ? galaxy::achievements::unlocked_date(id) : 0;
 #endif
 }
 
@@ -1911,7 +1948,7 @@ void svc_stat_add(void*, const char* name, uint64_t delta) {
 
 uint64_t svc_stat_get(void*, const char* name) {
 #if defined(NEBULA_HOST_RENDERER)
-    return name != nullptr ? galaxy::stats::get(name) : 0u;
+    return name != nullptr && !netplay_ui_locked() ? galaxy::stats::get(name) : 0u;
 #else
     (void)name;
     return 0u;
@@ -1946,6 +1983,7 @@ static_assert(static_cast<uint32_t>(galaxy::gx::NativeSettingsInput::Open) == NE
 // The headless host has no settings menu: always closed.
 void svc_settings_view(void*, NebulaSettingsView* view) {
     std::memset(view, 0, sizeof(*view));
+    if (netplay_ui_locked()) return;
 #if defined(NEBULA_HOST_RENDERER)
     const galaxy::gx::NativeSettingsView source = galaxy::gx::native_settings_view();
     view->open = source.open ? 1u : 0u;
@@ -1996,6 +2034,7 @@ void svc_settings_view(void*, NebulaSettingsView* view) {
 // The pointer's input to the settings menu: NEBULA_SETTINGS_* are galaxy::gx::NativeSettingsInput's values.
 void svc_settings_input(void*, uint32_t action, int32_t arg) {
 #if defined(NEBULA_HOST_RENDERER)
+    if (netplay_ui_locked()) return;
     if (action >= NEBULA_SETTINGS_OPEN && action <= NEBULA_SETTINGS_MOVE_MOD) {
         galaxy::gx::native_settings_input(static_cast<galaxy::gx::NativeSettingsInput>(action), arg);
     }
@@ -2535,6 +2574,11 @@ void svc_fs_request(void*, const NebulaFsRequest* request, uint32_t slot) {
 uint32_t svc_sc_get(void*, uint32_t item) {
     switch (item) {
     case NEBULA_SC_LANGUAGE:
+        // Online, the host's (its text's timing is the game's).
+        if (galaxy::net::session().active() || galaxy::net::session().connected()) {
+            return galaxy::net::session().settings().language;
+        }
+        if (gNetLive.load()) return gLiveSettings.language;
 #if defined(NEBULA_HOST_RENDERER)
         return static_cast<uint32_t>(galaxy::game_language_for_boot());  // the language setting, fixed at boot
 #else
@@ -2669,10 +2713,11 @@ void send_wpad_reports(uint32_t frame) {
         return;
 #else
         const int32_t mode = gStarPointerMode.load(std::memory_order_relaxed);
-        const auto snapshot = gNetInputs != nullptr
+        auto snapshot = gNetInputs != nullptr
             ? gNetInputs[0]
             : galaxy::host::native_game_wiimote_snapshot(frame, gWpadDpd.load(std::memory_order_relaxed) != 0, mode,
                                                          static_cast<uint8_t>(gTiltSection.load(std::memory_order_relaxed)));
+        if (gNetInputs != nullptr) snapshot.buttons.home = false;  // online: no HOME Menu (netplay_ui_locked)
         // Every report renews the motor's state (a stale one stops), as the console's remote keeps its motor bit.
         galaxy::host::native_game_rumble(gMotor.load(std::memory_order_relaxed), mode);
         uint8_t report[galaxy::input::kMaxWiimoteInputReportBytes];
@@ -2690,6 +2735,7 @@ void send_wpad_reports(uint32_t frame) {
                                                       : galaxy::host::native_game_partner_snapshot(frame, mode, partner);
         if (gNetInputs != nullptr) {
             partner = gNetInputs[1];
+            partner.buttons.home = false;
         }
         if (partner_in != partner_connected) {
             partner_connected = partner_in;
@@ -2859,6 +2905,35 @@ std::atomic<bool> gTourDone{false};
 // Scene frames so far (the state hash's and the test actions' count; a rollback takes it back with the game).
 uint64_t gSceneFrame = 0;
 
+uint64_t game_state_hash(std::string* chunk_text);
+
+// The readable memory regions, raw (zeros where unreadable), by runs of pages alike (a query per page takes seconds
+// over the watched memory). `hashed_only`: MEM1 and MEM2 once each (not their mirrors or the rest).
+std::vector<std::byte> copy_guest_memory(bool hashed_only) {
+    ensure_guest_memory();
+    std::vector<std::byte> memory;
+    for (const galaxy::GuestMemoryRegion& region : gRegions) {
+        if (hashed_only && region.guest_base != 0x00000000u && region.guest_base != 0x10000000u) continue;
+        for (size_t at = 0; at < region.size;) {
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(region.host_base + at, &info, sizeof(info)) == 0) break;
+            const size_t run = std::min<size_t>(
+                static_cast<size_t>(static_cast<const std::byte*>(info.BaseAddress) + info.RegionSize -
+                                    (region.host_base + at)),
+                region.size - at);
+            const bool ok = info.State == MEM_COMMIT && (info.Protect & PAGE_GUARD) == 0 &&
+                            (info.Protect & (PAGE_READONLY | PAGE_READWRITE)) != 0;
+            if (ok) {
+                memory.insert(memory.end(), region.host_base + at, region.host_base + at + run);
+            } else {
+                memory.resize(memory.size() + run);
+            }
+            at += run;
+        }
+    }
+    return memory;
+}
+
 void write_state_hash(uint64_t scene_frame) {
     static FILE* file = [] {
         const char* path = std::getenv("GALAXY_STATE_HASH");
@@ -2881,7 +2956,14 @@ void write_state_hash(uint64_t scene_frame) {
     }();
     if (scene_frame % every != 0 && !net_due) return;
     ensure_guest_memory();
+    // A read in flight may wait on this thread (it runs the game's frame): a second at most, then hashed anyway.
+    const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     while (gDiscInFlight.load(std::memory_order_acquire) > 0) {
+        if (std::chrono::steady_clock::now() > give_up) {
+            std::fprintf(stderr, "[state-hash] scene frame %llu: a disc read still in flight after 1 s, hashed anyway\n",
+                         static_cast<unsigned long long>(scene_frame));
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
     // GALAXY_STATE_DUMP=<scene frame>:<file>: the readable memory regions at that hash, raw (to diff two runs).
@@ -2889,40 +2971,42 @@ void write_state_hash(uint64_t scene_frame) {
     if (dump != nullptr && std::strtoull(dump, nullptr, 10) == scene_frame && std::strchr(dump, ':') != nullptr) {
         FILE* out = nullptr;
         if (fopen_s(&out, std::strchr(dump, ':') + 1, "wb") == 0 && out != nullptr) {
-            // By runs of pages alike (a query per page takes seconds over the watched memory).
-            static const std::byte zeros[1 << 16]{};
-            for (const galaxy::GuestMemoryRegion& region : gRegions) {
-                for (size_t at = 0; at < region.size;) {
-                    MEMORY_BASIC_INFORMATION info{};
-                    if (VirtualQuery(region.host_base + at, &info, sizeof(info)) == 0) break;
-                    const size_t run = std::min<size_t>(
-                        static_cast<size_t>(static_cast<const std::byte*>(info.BaseAddress) + info.RegionSize -
-                                            (region.host_base + at)),
-                        region.size - at);
-                    const bool ok = info.State == MEM_COMMIT && (info.Protect & PAGE_GUARD) == 0 &&
-                                    (info.Protect & (PAGE_READONLY | PAGE_READWRITE)) != 0;
-                    if (ok) {
-                        std::fwrite(region.host_base + at, 1, run, out);
-                    } else {
-                        for (size_t done = 0; done < run; done += sizeof(zeros)) {
-                            std::fwrite(zeros, 1, std::min(sizeof(zeros), run - done), out);
-                        }
-                    }
-                    at += run;
-                }
-            }
+            const std::vector<std::byte> memory = copy_guest_memory();
+            std::fwrite(memory.data(), 1, memory.size(), out);
             std::fclose(out);
         }
     }
-    // MEM1 and MEM2 once each (not their mirrors), without what is this process's alone: the native stacks (the boot
-    // stack below MEM1's arena, the stack pool at MEM2's top: dead frames hold the host runtime's values) and words that
-    // look like host addresses outside the game's fixed memory and module (host buffers some game objects point to).
+    std::string chunk_text;
+    const uint64_t total = game_state_hash(chunks ? &chunk_text : nullptr);
+    if (net_due) {
+        galaxy::net::session().report_hash(static_cast<uint32_t>(scene_frame), total);
+    }
+    if (file != nullptr && scene_frame % every == 0) {
+        std::fprintf(file, "%llu %016llx%s\n", static_cast<unsigned long long>(scene_frame),
+                     static_cast<unsigned long long>(total), chunk_text.c_str());
+        std::fflush(file);
+    }
+}
+
+// The game's memory as one number: MEM1 and MEM2 once each (not their mirrors), without what is this process's alone:
+// the native stacks (the boot stack below MEM1's arena, the stack pool at MEM2's top: dead frames hold the host
+// runtime's values) and words that look like host addresses outside the game's fixed memory and module (host buffers
+// some game objects point to). `chunk_text`: also a hash per megabyte.
+uint64_t game_state_hash(std::string* chunk_text) {
+    ensure_guest_memory();
+    const bool chunks = chunk_text != nullptr;
     auto host_address = [](uint64_t word) {
         return word >= 0x0000010000000000ull && word < 0x00007FF000000000ull &&
                !(word >= 0x00007D0000000000ull && word < 0x00007E0100000000ull);
     };
-    uint64_t total = 1469598103934665603ull;
-    std::string chunk_text;
+    // Each megabyte on its own (the work shared out over a few threads: a whole hash on one took over 100 ms), then
+    // the megabytes' hashes in order.
+    struct Chunk {
+        const uint64_t* words;
+        size_t start, end, skip_from, skip_to;
+        uint64_t hash;
+    };
+    std::vector<Chunk> work;
     for (const galaxy::GuestMemoryRegion& region : gRegions) {
         if (region.guest_base != 0x00000000u && region.guest_base != 0x10000000u) continue;
         const auto* words = reinterpret_cast<const uint64_t*>(region.host_base);
@@ -2938,9 +3022,15 @@ void write_state_hash(uint64_t scene_frame) {
         }
         constexpr size_t kChunkWords = (1u << 20) / sizeof(uint64_t);
         for (size_t start = 0; start < count; start += kChunkWords) {
+            work.push_back({words, start, std::min(count, start + kChunkWords), skip_from, skip_to, 0});
+        }
+    }
+    const auto hash_chunk = [&](Chunk& c) {
+        const uint64_t* words = c.words;
+        const size_t end = c.end, skip_from = c.skip_from, skip_to = c.skip_to;
+        {
             uint64_t hash = 1469598103934665603ull;
-            const size_t end = std::min(count, start + kChunkWords);
-            size_t i = start;
+            size_t i = c.start;
             while (i < end) {
                 MEMORY_BASIC_INFORMATION info{};
                 if (VirtualQuery(words + i, &info, sizeof(info)) == 0) break;
@@ -2956,22 +3046,28 @@ void write_state_hash(uint64_t scene_frame) {
                     hash = (hash ^ word) * 1099511628211ull;
                 }
             }
-            total = (total ^ hash) * 1099511628211ull;
-            if (chunks) {
-                char text[24];
-                std::snprintf(text, sizeof(text), " %08llx", static_cast<unsigned long long>(hash & 0xFFFFFFFFull));
-                chunk_text += text;
-            }
+            c.hash = hash;
+        }
+    };
+    const size_t threads = std::clamp<size_t>(std::thread::hardware_concurrency() / 2, 1u, 8u);
+    std::atomic<size_t> next{0};
+    const auto worker = [&] {
+        for (size_t k = next.fetch_add(1); k < work.size(); k = next.fetch_add(1)) hash_chunk(work[k]);
+    };
+    std::vector<std::thread> pool;
+    for (size_t t = 1; t < threads; ++t) pool.emplace_back(worker);
+    worker();
+    for (std::thread& t : pool) t.join();
+    uint64_t total = 1469598103934665603ull;
+    for (const Chunk& c : work) {
+        total = (total ^ c.hash) * 1099511628211ull;
+        if (chunks) {
+            char text[24];
+            std::snprintf(text, sizeof(text), " %08llx", static_cast<unsigned long long>(c.hash & 0xFFFFFFFFull));
+            *chunk_text += text;
         }
     }
-    if (net_due) {
-        galaxy::net::session().report_hash(static_cast<uint32_t>(scene_frame), total);
-    }
-    if (file != nullptr && scene_frame % every == 0) {
-        std::fprintf(file, "%llu %016llx%s\n", static_cast<unsigned long long>(scene_frame),
-                     static_cast<unsigned long long>(total), chunk_text.c_str());
-        std::fflush(file);
-    }
+    return total;
 }
 
 // Deterministic mode, at each retrace boundary: keep it, or go back to one kept (sdk/os/snapshot.c). The host's own part
@@ -2983,6 +3079,9 @@ std::map<uint32_t, uint64_t> gSavedSceneFrames;
 struct TestRunState;
 void keep_test_run(uint32_t frame);
 void restore_test_run(uint32_t frame);
+// The test scripts' progress kept at a boundary, as bytes (a live join's image: the joiner runs the same scripts).
+std::vector<uint8_t> test_run_bytes(uint32_t frame);
+void adopt_test_run(const uint8_t* data, size_t size);
 
 // What the game told the host about its remotes and pointer (services), which the next frames' reports follow: kept
 // and restored with the game, as the console's remotes would have been told again.
@@ -3097,6 +3196,8 @@ std::vector<uint8_t> build_live_image(uint32_t frame) {
     w.u32(frame);
     const auto scene = gSavedSceneFrames.find(frame);
     w.u64(scene != gSavedSceneFrames.end() ? scene->second : gSceneFrame);
+    const std::vector<uint8_t> test_run = test_run_bytes(frame);
+    w.blob(test_run.data(), test_run.size());
     const auto kept_input = gSavedInputState.find(frame);
     const HostInputState input = kept_input != gSavedInputState.end() ? kept_input->second : HostInputState::take();
     w.raw(&input, sizeof(input));
@@ -3182,6 +3283,8 @@ bool adopt_live_image(const std::vector<uint8_t>& image, uint32_t& frame) {
     if (r.u32() != kLiveMagic) return false;
     frame = r.u32();
     gSceneFrame = r.u64();
+    const auto [test_run, test_run_size] = r.blob();
+    adopt_test_run(test_run, test_run_size);
     HostInputState input{};
     r.raw(&input, sizeof(input));
     {
@@ -3299,6 +3402,8 @@ uint32_t svc_det_boundary(void*, uint32_t frame, uint32_t* arg) {
             gMemNand = nand->second;
         }
         gMemNandSaved.erase(gMemNandSaved.upper_bound(to), gMemNandSaved.end());
+        gPendingChecks.erase(gPendingChecks.upper_bound(to), gPendingChecks.end());
+        if (gCheckedFrame > to) gCheckedFrame = 0;
         last_saved = to;
         // The game took grant `to` (and has not shown its retrace yet); the clock grants from to + 1, at once up to
         // where it was.
@@ -3344,6 +3449,33 @@ uint32_t svc_det_boundary(void*, uint32_t frame, uint32_t* arg) {
         if (gExportFrame != 0 && gExportFrame != frame) {
             send_live_image(gExportFrame);
             gExportFrame = 0;
+            gResyncWait.store(false, std::memory_order_release);
+        }
+        // Joiner: the host's game after a desync: this game becomes it, and runs the frames since again at once.
+        if (galaxy::net::session().role() == galaxy::net::Role::Join) {
+            std::vector<uint8_t> image;
+            if (galaxy::net::session().poll_state(image)) {
+                gLiveImage = std::move(image);
+                uint32_t to = 0;
+                if (!adopt_live_image(gLiveImage, to) || to == 0 || to > frame) {
+                    die("online: the host's game (a resync) does not fit");
+                }
+                gSavedSceneFrames.clear();
+                gSavedInputState.clear();
+                gPendingChecks.clear();
+                {
+                    std::lock_guard<std::mutex> lock(gRollbackLock);
+                    gUsedRemote.erase(gUsedRemote.upper_bound(to), gUsedRemote.end());
+                }
+                last_saved = to;
+                gCatchUpTo.store(std::max(gCatchUpTo.load(), frame), std::memory_order_release);
+                gRetraces.store(to - 1, std::memory_order_release);
+                gRewindFrame.store(to, std::memory_order_release);
+                gRewindPending.store(true, std::memory_order_release);
+                std::fprintf(stderr, "[netplay] resync: the host's game at frame %u (this game was at %u)\n", to, frame);
+                *arg = to;
+                return NEBULA_DET_LOAD;
+            }
         }
         if (const uint32_t granted = gGranted.load(); granted != frame) {
             static uint32_t reported = 0;
@@ -3367,17 +3499,77 @@ uint32_t svc_det_boundary(void*, uint32_t frame, uint32_t* arg) {
                 gUsedRemote.erase(gUsedRemote.lower_bound(mismatch), gUsedRemote.end());
             }
         }
-        if (mismatch == 0 && nand_in_memory()) {
-            uint32_t safe = frame;
-            {
-                std::lock_guard<std::mutex> lock(gRollbackLock);
-                for (const auto& [used_frame, used] : gUsedRemote) {
-                    if (!used.confirmed && used_frame <= frame) {
-                        safe = used_frame - 1;
-                        break;
+        // The boundary every input up to which is in (no rollback can change the game up to it).
+        uint32_t safe = frame;
+        {
+            std::lock_guard<std::mutex> lock(gRollbackLock);
+            for (const auto& [used_frame, used] : gUsedRemote) {
+                if (!used.confirmed && used_frame <= frame) {
+                    safe = used_frame - 1;
+                    break;
+                }
+            }
+        }
+        if (mismatch == 0) {
+            // Checks: this boundary's hash, and those now confirmed sent.
+            if (frame % kNetCheckEvery == 0 && frame != gCheckedFrame) {
+                gCheckedFrame = frame;
+                const auto started = Clock::now();
+                gPendingChecks[frame] = game_state_hash(nullptr);
+                static const char* const desync_dump = std::getenv("GALAXY_NET_DESYNC_DUMP");
+                if (desync_dump != nullptr && desync_dump[0] != 0) {
+                    gCheckCopies[frame] = copy_guest_memory(true);
+                    while (gCheckCopies.size() > 2) gCheckCopies.erase(gCheckCopies.begin());
+                }
+                static uint32_t timed = 0;
+                if (timed++ < 3) {
+                    std::fprintf(stderr, "[netplay] check at frame %u: %.1f ms\n", frame,
+                                 std::chrono::duration<double, std::milli>(Clock::now() - started).count());
+                }
+            }
+            while (!gPendingChecks.empty() && gPendingChecks.begin()->first <= safe) {
+                galaxy::net::session().report_hash(gPendingChecks.begin()->first, gPendingChecks.begin()->second);
+                gPendingChecks.erase(gPendingChecks.begin());
+            }
+            static uint32_t dumped_desyncs = 0;
+            if (const uint32_t desyncs = galaxy::net::session().desyncs(); desyncs != dumped_desyncs) {
+                dumped_desyncs = desyncs;
+                const auto copy = gCheckCopies.find(galaxy::net::session().last_desync_frame());
+                if (copy != gCheckCopies.end()) {
+                    const std::string path = std::string(std::getenv("GALAXY_NET_DESYNC_DUMP")) + "/desync-" +
+                                             std::to_string(copy->first) +
+                                             (galaxy::net::session().role() == galaxy::net::Role::Host ? "-host.bin"
+                                                                                                       : "-join.bin");
+                    FILE* out = nullptr;
+                    if (fopen_s(&out, path.c_str(), "wb") == 0 && out != nullptr) {
+                        std::fwrite(copy->second.data(), 1, copy->second.size(), out);
+                        std::fclose(out);
+                        std::fprintf(stderr, "[netplay] the game at the desync's check: %s\n", path.c_str());
                     }
                 }
             }
+            // Host: a desync (either PC's check) starts a resync.
+            static uint32_t seen_desyncs = 0;
+            if (galaxy::net::session().role() == galaxy::net::Role::Host) {
+                const uint32_t desyncs = galaxy::net::session().desyncs();
+                if (desyncs != seen_desyncs) {
+                    seen_desyncs = desyncs;
+                    if (!gResyncPending && gExportFrame == 0) {
+                        gResyncPending = true;
+                        gResyncWait.store(true, std::memory_order_release);
+                        std::fprintf(stderr, "[netplay] resync %u: sending the game to the other PC\n", ++gResyncs);
+                    }
+                }
+                if (gResyncPending && safe >= frame) {
+                    gResyncPending = false;
+                    gExportFrame = frame;
+                    gPendingChecks.clear();
+                    std::fprintf(stderr, "[netplay] resync %u: the game at frame %u\n", gResyncs, frame);
+                    return save();
+                }
+            }
+        }
+        if (mismatch == 0 && nand_in_memory()) {
             static uint32_t flushed = 0;
             auto kept = gMemNandSaved.upper_bound(safe);
             if (kept != gMemNandSaved.begin() && (--kept)->first != flushed) {
@@ -3436,6 +3628,20 @@ std::map<uint32_t, TestRunState> gSavedTestRun;
 void keep_test_run(uint32_t frame) {
     gSavedTestRun[frame] = gTestRun;
     while (gSavedTestRun.size() > 32) gSavedTestRun.erase(gSavedTestRun.begin());
+}
+
+std::vector<uint8_t> test_run_bytes(uint32_t frame) {
+    const auto kept = gSavedTestRun.find(frame);
+    const TestRunState& state = kept != gSavedTestRun.end() ? kept->second : gTestRun;
+    std::vector<uint8_t> out(sizeof(TestRunState));
+    std::memcpy(out.data(), &state, sizeof(TestRunState));
+    return out;
+}
+
+void adopt_test_run(const uint8_t* data, size_t size) {
+    if (data == nullptr || size != sizeof(TestRunState)) return;
+    std::memcpy(&gTestRun, data, sizeof(TestRunState));
+    gSavedTestRun.clear();
 }
 
 void restore_test_run(uint32_t frame) {
@@ -4023,7 +4229,7 @@ void start_netplay(const fs::path& module) {
         gLiveJoinWaiting = true;
     }
     if (settings.language != static_cast<uint32_t>(galaxy::game_language_for_boot())) {
-        std::fprintf(stderr, "[netplay] the host plays in another language: the game may not stay in step\n");
+        std::fprintf(stderr, "[netplay] the host plays in another language: this PC plays in the host's\n");
     }
     // The host's save, apart from this PC's own.
     std::string folder_name = join_address;

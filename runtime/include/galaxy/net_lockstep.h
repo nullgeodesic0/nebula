@@ -80,6 +80,8 @@ public:
     // Live join: the game image, sent by the host; the joiner's waits for it (false when the session ended first).
     void send_state(const std::vector<std::uint8_t>& image);
     bool take_state(std::vector<std::uint8_t>& image);
+    // The game image when one has come (a resync's), at once; false when none waits.
+    bool poll_state(std::vector<std::uint8_t>& image);
     [[nodiscard]] const SessionSettings& settings() const noexcept { return settings_; }
     // This PC's player's remote channel: 0 hosting, 1 joined.
     [[nodiscard]] unsigned local_channel() const noexcept {
@@ -101,6 +103,8 @@ public:
     // The game memory's hash at a scene frame: sent, and compared with the other PC's.
     void report_hash(std::uint32_t scene_frame, std::uint64_t hash);
     [[nodiscard]] std::uint32_t desyncs() const noexcept;
+    // The check frame of the latest desync (0: none yet).
+    [[nodiscard]] std::uint32_t last_desync_frame() const noexcept;
     void close();
 
 private:

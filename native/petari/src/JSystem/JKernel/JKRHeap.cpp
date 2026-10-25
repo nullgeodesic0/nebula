@@ -164,16 +164,37 @@ static inline int nativeAlignment(int align) {
     return align > -16 ? -16 : align;
 }
 
+// A block starts zeroed natively: what a freed block held before is the history of this PC's run, and padding the
+// game never writes (x64 layouts have more of it) would otherwise keep it, where netplay's checks compare memory. Only
+// nonzero words are written, so untouched pages stay clean for the snapshots' write watch.
+static inline void zeroBlock(void* p, u32 size) {
+    u64* word = static_cast< u64* >(p);  // nativeAlignment: at least 16-byte aligned
+    for (u32 i = 0; i < size / 8; i++) {
+        if (word[i] != 0) {
+            word[i] = 0;
+        }
+    }
+    u8* tail = static_cast< u8* >(p) + (size & ~7u);
+    for (u32 i = 0; i < (size & 7u); i++) {
+        tail[i] = 0;
+    }
+}
+
 void* JKRHeap::alloc(u32 size, int align) {
 #ifdef NEBULA_ASAN_HEAPS
     void* p = do_alloc(size, nativeAlignment(align));
     if (p != nullptr) {
         const s32 block = do_getSize(p);
         heapUnpoison(p, block > 0 ? block : (s32)size);
+        zeroBlock(p, size);
     }
     return p;
 #else
-    return do_alloc(size, nativeAlignment(align));
+    void* p = do_alloc(size, nativeAlignment(align));
+    if (p != nullptr) {
+        zeroBlock(p, size);
+    }
+    return p;
 #endif
 }
 #else
