@@ -147,20 +147,32 @@ Nebula Plus version and the same mods (the handshake compares the game module an
 - The **branch channel** trusts GitHub's archive of a commit id over HTTPS (no signature).
 - **Python packages** come from PyPI over HTTPS through pip, unpinned, and only after the player agrees.
 
-## Publishing a release (maintainer)
+## Publishing an update (maintainer)
 
-```
-installer\plus\new-plus-release-key.cmd      once: the key pair (commit the public key)
-git push fork nebula2                         the commit must be on GitHub first
-installer\plus\publish-plus-release.cmd       build, sign and create the plus2-v<version> release
-```
+Once, on the PC that publishes:
 
-`publish-plus-release` builds from `fork/nebula2` (`-Revision`), names the version `2.<date>.<time>` unless
-`-Version` is given, and uploads `NebulaPlus-Setup-<version>.zip` (the friend's one download: NebulaPlus.exe, NebulaPlusCli.exe,
-the package and its signature, a launcher and a read-me), the package `NebulaPlus-<version>.zip` and its `.sig` (for
-the updater) and `plus-release.json` with the GitHub CLI. `installer\plus\build-plus-package.cmd -Zip` builds a package without publishing it
-(`dist\plus-<version>`); `NebulaPlusCli.exe install --package <zip or folder>` installs it.
-`installer\plus\tests\run-plus-tests.ps1` runs the installer's checks.
+1. Install Git, Rust (rustup), Visual Studio 2022 Build Tools with the C++ workload and Windows SDK, LLVM (clang 19
+   or newer, `C:\Program Files\LLVM`), and the GitHub CLI; run `gh auth login`.
+2. `installer\plus\new-plus-release-key.cmd` makes the signing key: the private half goes to
+   `%USERPROFILE%\.nebula-plus\plus-release-key.xml` (keep it private and backed up; a release signed with another key
+   does not install over this one), the public half to `installer/plus/plus-release-public-key.xml` (commit it: every
+   NebulaPlus.exe built from then on trusts it). This PC's key already exists; do not make a new one.
+
+For each update:
+
+1. Commit the change on `nebula2` and push it: `git push fork nebula2`.
+2. Run `installer\plus\publish-plus-release.cmd`. It fetches `fork/nebula2`, builds the package from that exact commit
+   (nebula-import, NebulaNative.exe, smg_game.dll, NebulaPlus.exe), signs `NebulaPlus-<version>.zip` with the private
+   key (RSA-SHA256 over the zip, base64 in `.sig`), and creates the GitHub release `plus2-v<version>` with the setup
+   zip, the package, its signature and `plus-release.json`. The version is `2.<UTC date>.<UTC time>` unless
+   `-Version` is given; it must be higher than the last release's. `-Prerelease` lists it as a pre-release (for a
+   test build), `-Draft` makes a draft (invisible to the updater until published), `-Notes` sets the text players
+   see in the update prompt.
+3. Players get it from Check for updates. Nothing else is uploaded: no game files, no built mods.
+
+`installer\plus\build-plus-package.cmd -Zip` builds a package without publishing it (`dist\plus-<version>`);
+`NebulaPlusCli.exe install --package <zip or folder>` installs it. `installer\plus\tests\run-plus-tests.ps1` runs the
+installer's checks.
 
 ## Content
 
