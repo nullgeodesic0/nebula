@@ -3,29 +3,28 @@
 Nebula Plus installs this fork's Nebula 2 (the native game, built from the Petari decompilation) with its
 additions: Mario and Luigi co-op on one PC with split screen, online co-op (lockstep, rollback and drop-in live
 join), the Odyssey moveset and motion style, the HD button prompts and controls, Dolphin texture packs, the scene
-effects and the custom voice support, plus, built from the player's own files, the Odyssey Mario and Luigi models,
-animations and voice. It sits in its own folder, never changes an official Nebula install, and keeps its own saves
+effects and the custom voice support. It sits in its own folder, never changes an official Nebula install, and keeps its own saves
 and settings.
 
-`NebulaPlus.exe` installs, updates, rolls back and rebuilds the Odyssey mod; `NebulaPlusCli.exe` is the same
+`NebulaPlus.exe` installs, updates, rolls back and builds custom mods; `NebulaPlusCli.exe` is the same
 program for terminals. The README's "For friends" section is the short version of this page.
 
 ## What a friend needs
 
 - Windows 10 or 11, 64-bit; a GPU with Direct3D 12; a CPU with AVX2; about 8 GB free on an NTFS drive.
-- Their own dump of the Super Mario Galaxy USA disc (RMGE01, revision 0) as ISO, WBFS, RVZ or an extracted folder. Nothing else: no official Nebula, no compiler, no Python (only for the optional Odyssey mod).
+- Their own dump of the Super Mario Galaxy USA disc (RMGE01, revision 0) as ISO, WBFS, RVZ or an extracted folder. Nothing else: no official Nebula, no compiler, no Python (only to build optional custom mods).
 
 ## Installing
 
-Run `NebulaPlus.exe` (from the release page). Choose the Nebula Plus folder (default `C:\NebulaPlus`) and the disc
-image, optionally the Odyssey mod's files and what to do with saves, and press Install. From a terminal:
+Download `NebulaPlus-Setup-<version>.zip` from the release page, unzip it and run `Install Nebula Plus.cmd` (or `NebulaPlus.exe`): it installs from the signed package in the zip, with no other download. Choose the Nebula Plus folder (default `C:\NebulaPlus`) and the disc
+image, optionally files for custom mods and what to do with saves, and press Install. From a terminal:
 
 ```
 NebulaPlusCli.exe install --root C:\NebulaPlus --disc D:\Games\RMGE01.wbfs
 NebulaPlusCli.exe install --root C:\NebulaPlus --disc D:\Games\RMGE01.wbfs --detect-mods --import-saves --import-settings
 ```
 
-Without `--package` the install downloads the newest release package (see Updates). What it does:
+Without `--package` the install uses the signed package beside the program (the setup zip), else downloads the newest release package (see Updates). What it does:
 
 1. **The game files.** `nebula-import` checks that the image is RMGE01 revision 0 and packs its files into
    `content\game.pak` (about 3 GB, a minute or two). When an official Nebula 2 install with a packed game is found it
@@ -34,7 +33,7 @@ Without `--package` the install downloads the newest release package (see Update
 2. **The game.** `NebulaNative.exe` and `smg_game.dll` come prebuilt in the package, built only from this
    repository's source (`docs/CONTENT_POLICY.md`); every Plus install runs the same `smg_game.dll`, which online
    play needs.
-3. **The Odyssey mod** (optional; see below) into `data\Nebula\mods\Odyssey Mario`.
+3. **Custom mods** (optional; see below) from files you choose.
 4. **The switch.** The new version goes to `versions\<version>`; `current.json` and `current.cmd` are written last,
    then the launchers. Saves and settings are copied from an official install only when asked.
 
@@ -80,32 +79,27 @@ nothing is written to the PC's own `%LOCALAPPDATA%\Nebula`.
   (`data\Nebula\mods\Odyssey Mario`, marked by `plus-mod.json`) is rebuilt when its inputs change. `mods.ini` (the
   mods' order and on/off) is the game's and is never written.
 
-## The Odyssey mod
+## Custom mods
 
-The Odyssey Mario model, the Odyssey Luigi model, the converted Odyssey animations and the Odyssey voice clips are
-Nintendo-derived. They are not in the repository, not in any release, and never downloaded. Plus converts them on
-the player's PC from files the player supplies, with the repository's builders (`tools/animations`,
-`docs/CUSTOM_ANIMATIONS.md`), and packs them into one mod of Nebula's mods system (`tools/animations/nebula_mod.py`:
-the archives as `files\ObjectData\*.arc`, the voice clips, Luigi's animation table). Settings > Mods turns it on and
-off. **Never share or upload the built mod.**
+Custom models, animations and voices can be added as mods (Nebula's mods folder, `data\Nebula\mods`; Settings >
+Mods turns each on or off and sets their order). Nebula Plus can also build one from files you have, with the
+repository's builders (`tools/animations`, `docs/CUSTOM_ANIMATIONS.md`): choose the files in the window (Browse, or
+"Find my mod files") or pass `--mod key=path` / `--detect-mods`, and it writes the mod
+`data\Nebula\mods\Odyssey Mario` on this PC. Parts without files are simply not built. Built mods stay on your PC:
+they are never uploaded, and Nebula Plus downloads none.
 
-| Key | File (the player's own) | Builds |
+| Key | File | Builds |
 | --- | --- | --- |
-| `marioModelBlend` | `mario-model-FK.blend` | the Odyssey Mario model, with `marioTextures` and `animationBlend` |
-| `marioTextures` | folder with `MarioBody_alb.png` ... | the model's textures |
-| `animationBlend` | the Odyssey rig's actions (`64  24.blend`, about 2 GB) | the animations |
-| `faceAnimations`, `faceSkeleton` | `PlayerAnimationFace.szs`, `Custom Bone vis Armature.fbx` | face animation on the model |
-| `luigiGltf` | `Luigi.gltf` (its `textures` folder beside it) | Odyssey Luigi for co-op, after the Mario model |
-| `voiceClips` | folder with `(Mario) Jump 1.ogg` ... | Mario's voice |
-| `marioModelDae` | `mario.dae` | another Mario model, used when there is no Odyssey model |
+| `marioModelBlend`, `marioTextures` | a model `.blend` on the Odyssey rig, and its textures folder | a Mario model (also needs `animationBlend` for the rig's rest frames) |
+| `marioModelDae` | a `mario.dae` | a Mario model from COLLADA, when there is no `.blend` model |
+| `animationBlend` | an animation `.blend` on the Odyssey rig | animations |
+| `faceAnimations`, `faceSkeleton` | `PlayerAnimationFace.szs`, the face skeleton `.fbx` | face animation on the model |
+| `luigiGltf` | a `Luigi.gltf` (its `textures` folder beside it) | a Luigi model for co-op, after the Mario model |
+| `voiceClips` | a folder of clips named like `(Mario) Jump 1.ogg` | voice lines |
 
-In the window: "Find my mod files" looks in Downloads, Documents and Desktop by these names, or Browse picks each.
-In a terminal: `--detect-mods` or `--mod key=path`. Each part whose files are missing is skipped with the reason;
-with none of them the game runs with Galaxy's own Mario. One part that fails does not stop the others or the
-install. "Rebuild mods" (`NebulaPlusCli.exe build-mods`) builds again; an update rebuilds when the builders, the
-input files (path, size and time of every file) or the packed game change. The previous build is kept in
-`mod-previous\` (outside the mods folder, where it would load too). A mod folder named "Odyssey Mario" that Plus did
-not build is left alone; Plus then uses "Odyssey Mario (Nebula Plus)".
+"Rebuild mods" (`NebulaPlusCli.exe build-mods`) builds again; an update rebuilds when the builders, the files
+(path, size and time of every file) or the packed game change. The previous build is kept in `mod-previous\`. A mod
+folder named "Odyssey Mario" that Plus did not build is left alone; Plus then uses "Odyssey Mario (Nebula Plus)".
 
 The builders need Python 3.9 or newer with numpy, Pillow and soundfile. Plus looks for an installed `python.exe`
 (Python.org installs, the Python install manager's runtimes, PATH); it never runs the `py` launcher, which can
@@ -127,8 +121,8 @@ installed build with GitHub (`plus.json`: `repository`, default `nullgeodesic0/n
   then Check for updates.
 
 An update installs the new version beside the current one and switches only when it is complete; the game must be
-closed for the switch (Plus asks and waits, and never closes it). The packed game is kept; the Odyssey mod is rebuilt
-only when needed; saves and settings are not touched. The previous version stays in `versions\` for **Roll back**
+closed for the switch (Plus asks and waits, and never closes it). The packed game is kept; a custom mod is rebuilt only
+when needed; saves and settings are not touched. The previous version stays in `versions\` for **Roll back**
 (`NebulaPlusCli.exe rollback`).
 
 ## Online play
@@ -162,20 +156,20 @@ installer\plus\publish-plus-release.cmd       build, sign and create the plus2-v
 ```
 
 `publish-plus-release` builds from `fork/nebula2` (`-Revision`), names the version `2.<date>.<time>` unless
-`-Version` is given, and uploads `NebulaPlus-<version>.zip`, `.sig`, `plus-release.json` and `NebulaPlus.exe` with
-the GitHub CLI. `installer\plus\build-plus-package.cmd -Zip` builds a package without publishing it
+`-Version` is given, and uploads `NebulaPlus-Setup-<version>.zip` (the friend's one download: NebulaPlus.exe, NebulaPlusCli.exe,
+the package and its signature, a launcher and a read-me), the package `NebulaPlus-<version>.zip` and its `.sig` (for
+the updater) and `plus-release.json` with the GitHub CLI. `installer\plus\build-plus-package.cmd -Zip` builds a package without publishing it
 (`dist\plus-<version>`); `NebulaPlusCli.exe install --package <zip or folder>` installs it.
 `installer\plus\tests\run-plus-tests.ps1` runs the installer's checks.
 
 ## Content
 
 The repository and the releases hold only source, scripts, tests, docs and what that source builds
-(`docs/CONTENT_POLICY.md`, `tools/audit_repo.ps1`). `game.pak` and the Odyssey mod are made on each player's PC
+(`docs/CONTENT_POLICY.md`, `tools/audit_repo.ps1`). `game.pak` and any custom mods are made on each player's PC
 from their own disc and files, and never uploaded.
 
 ## When something goes wrong
 
 - Install and update logs: `logs\install-<time>.log`. The game's: `data\logs\<launcher>-<time>.log`.
-- `NebulaPlusCli.exe status` shows the version, the commit, the Odyssey mod's parts built and skipped, and the
-  update source.
+- `NebulaPlusCli.exe status` shows the version, the commit, the custom mod's parts and the update source.
 - An install that stops leaves the previous version as it was: nothing switches until the new one is complete.

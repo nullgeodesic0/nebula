@@ -177,7 +177,33 @@ namespace Nebula
             [IO.File]::WriteAllText("$zipPath.sig", [Convert]::ToBase64String($signature))
             Write-Host "Signed $zipPath."
         }
-        $release = [ordered]@{ version = $Version; tag = "plus2-v$Version"; game = 'native'; commit = $resolved; repository = $Repository; branch = $Branch
+        # The one download for a friend: Nebula Plus, its console form, the signed package beside them, a one-click
+        # launcher and a short read-me. NebulaPlus.exe installs from the package next to it, with no other download.
+        $setupDir = Join-Path $work 'setup'
+        New-Item -ItemType Directory -Force $setupDir | Out-Null
+        Copy-Item $exe, (Join-Path $package 'NebulaPlusCli.exe'), $zipPath $setupDir
+        if (Test-Path "$zipPath.sig") { Copy-Item "$zipPath.sig" $setupDir }
+        [IO.File]::WriteAllText((Join-Path $setupDir 'Install Nebula Plus.cmd'),
+            "@echo off`r`nrem Opens Nebula Plus: choose a folder and your Super Mario Galaxy (USA) disc image, then Install.`r`nstart `"`" `"%~dp0NebulaPlus.exe`"`r`n")
+        [IO.File]::WriteAllText((Join-Path $setupDir 'READ ME FIRST.txt'), (@(
+            "Nebula Plus $($Version): Super Mario Galaxy on PC with local co-op and online co-op.",
+            '',
+            'You need: Windows 10 or 11 (64-bit), a graphics card with Direct3D 12, and your own dump of the',
+            'Super Mario Galaxy USA disc (RMGE01) as ISO, WBFS, RVZ or an extracted folder.',
+            '',
+            '1. Unzip this folder anywhere and run "Install Nebula Plus.cmd" (or NebulaPlus.exe).',
+            '   If Windows SmartScreen warns about an unknown app: More info > Run anyway.',
+            '2. Choose where to install (default C:\NebulaPlus) and your disc image, then press Install.',
+            '3. In the install folder: "Play Nebula Plus.cmd" (one player), "Play co-op.cmd" (two players on one PC;',
+            '   the second controller presses + to join), "Host online game.cmd" and "Join online game.cmd" (online;',
+            '   the host forwards TCP port 7777), "Check for updates.cmd".',
+            '',
+            'Updates never touch your saves or settings. More: docs/NEBULA_PLUS.md on the GitHub page.'
+        ) -join "`r`n") + "`r`n")
+        $setupZip = Join-Path $OutputDirectory "NebulaPlus-Setup-$Version.zip"
+        [IO.Compression.ZipFile]::CreateFromDirectory($setupDir, $setupZip, [IO.Compression.CompressionLevel]::Optimal, $false)
+        Write-Host "Setup zip: $setupZip"
+        $release = [ordered]@{ version = $Version; tag = "plus2-v$Version";  game = 'native'; commit = $resolved; repository = $Repository; branch = $Branch
             zipSha256 = (Get-Sha256 $zipPath); smgGameSha256 = $packageFiles['smg_game.dll']; modToolsKey = $modToolsKey }
         [IO.File]::WriteAllText((Join-Path $OutputDirectory 'plus-release.json'), ($release | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
         Write-Host "Release zip: $zipPath $($release.zipSha256)"

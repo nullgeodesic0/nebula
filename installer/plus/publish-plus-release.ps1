@@ -35,9 +35,9 @@ $out = Join-Path $repo "dist\plus-release-$Version"
     -OutputDirectory $out -SigningKey $SigningKey -Zip -WorkRoot $WorkRoot
 $zip = Join-Path $out "NebulaPlus-$Version.zip"
 if (-not $Notes) { $Notes = (& git -C $repo log -1 --format=%s $commit) }
-$body = "Nebula Plus $Version for Nebula 2 (the native game), built from $commit.`n`n$Notes`n`nInstall: download NebulaPlus.exe, run it and choose your own Super Mario Galaxy (USA) disc image. Update: Check for updates.cmd in the Nebula Plus folder. Saves and settings are never touched by updates. The Odyssey models, animations and voice are not included: Nebula Plus builds them only from your own files."
+$body = "Nebula Plus $Version for Nebula 2 (the native game), built from $commit.`n`n$Notes`n`nInstall: download NebulaPlus-Setup-$Version.zip, unzip it, run Install Nebula Plus.cmd and choose your own Super Mario Galaxy (USA) disc image. Update: Check for updates.cmd in the Nebula Plus folder. Saves and settings are never touched by updates. Custom models, animations and voices can be added as mods."
 $ghArgs = @('release', 'create', "plus2-v$Version", '--repo', $Repository, '--target', $commit, '--title', "Nebula Plus $Version", '--notes', $body,
-    $zip, "$zip.sig", (Join-Path $out 'plus-release.json'), (Join-Path $out 'NebulaPlus.exe'))
+    (Join-Path $out "NebulaPlus-Setup-$Version.zip"), $zip, "$zip.sig", (Join-Path $out 'plus-release.json'))
 if ($Draft) { $ghArgs += '--draft' }
 & gh @ghArgs
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }

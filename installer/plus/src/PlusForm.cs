@@ -63,9 +63,8 @@ namespace Nebula.Plus
 
             var modsTitle = new Label
             {
-                Text = "Optional Odyssey mod (Mario and Luigi models, animations, voice). These come from Nintendo games, so Nebula Plus never " +
-                    "downloads or shares them: choose your own copies of the files below, or leave them empty and play with Galaxy's own Mario. " +
-                    "Each part whose files are missing is skipped.",
+                Text = "Optional custom mods: models, animations and voices can be added as mods. If you have the files for one, choose them " +
+                    "here and Nebula Plus builds the mod on this PC (Settings > Mods turns it on or off).",
                 AutoSize = true, MaximumSize = new Size(860, 0), Padding = new Padding(0, 8, 0, 0)
             };
             AddWide(layout, modsTitle);
@@ -244,6 +243,7 @@ namespace Nebula.Plus
                     var installed = PlusInstalled.Read(layout);
                     if (installed != null && Directory.Exists(Path.Combine(installed.Directory, "package")))
                         request.Package = Path.Combine(installed.Directory, "package");
+                    else if (installed == null && (request.Package = PlusUpdater.BundledPackage(Log)) != null) { }
                     else
                     {
                         var available = PlusUpdater.FindNewer(config, null);

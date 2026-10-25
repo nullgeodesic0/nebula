@@ -191,7 +191,7 @@ namespace Nebula.Plus
             else if (modCurrent && !request.ForceMods) Log("Mods: the builders and your input files did not change; the installed mod is kept.");
             else
             {
-                Stage(0.45, 0.45, "Building the Odyssey mod from your files");
+                Stage(0.45, 0.45, "Building your custom mod");
                 mods = BuildMods(config, src, content, out newMod);
                 if (mods == null) modsKey = keptModsKey;
             }
@@ -253,10 +253,9 @@ namespace Nebula.Plus
             summary.Add("Play: \"Play Nebula Plus.cmd\" (one player), \"Play co-op.cmd\", \"Host online game.cmd\", \"Join online game.cmd\".");
             if (mods != null)
             {
-                if (mods.Built.Count != 0) summary.Add("Odyssey mod built from your files: " + string.Join(", ", mods.Built) + ".");
-                foreach (var skipped in mods.Skipped) summary.Add("Skipped: " + skipped + ".");
+                if (mods.Built.Count != 0) summary.Add("Custom mod built from your files (Settings > Mods): " + string.Join(", ", mods.Built) + ".");
+                if (mods.Skipped.Count != 0) summary.Add("Could not build: " + string.Join(", ", mods.Skipped) + ".");
             }
-            else if (!request.SkipMods && !modCurrent) summary.Add("The Odyssey mod was not built (see the log).");
             Summary = string.Join("\r\n", summary);
             Log(Summary);
             Log(string.Format("Completed in {0:mm\\:ss}.", clock.Elapsed));
@@ -351,11 +350,8 @@ namespace Nebula.Plus
             newMod = null;
             if (!AnyInput(config))
             {
-                Log("Mods: no mod input files are set. The Odyssey Mario model, Luigi model, animations and voice are made only from " +
-                    "your own copies of those files (they are Nintendo's and are never downloaded); the game runs with Galaxy's own.");
-                var none = new ModBuilder.Result();
-                none.Skipped.Add("Odyssey model, Luigi, animations and voice: no input files of your own were chosen");
-                return none;
+                Log("Custom mods: none chosen.");
+                return new ModBuilder.Result();
             }
             foreach (var pair in config.ModInputs)
             {
@@ -365,7 +361,7 @@ namespace Nebula.Plus
             var python = PythonEnv.Find(layout, Log);
             if (python == null)
             {
-                Log("Mods: no Python 3.9+ found. Install Python from https://www.python.org (the \"py\" launcher) and run Nebula Plus again (Rebuild mods).");
+                Log("Custom mods: they are built with Python 3.9+, which is not installed. Install it from https://www.python.org, then use Rebuild mods.");
                 return null;
             }
             Log("Mods: " + python.Description + (python.HasPackages ? "" : ", missing " + python.Missing));
@@ -407,7 +403,7 @@ namespace Nebula.Plus
                 if (Directory.Exists(layout.PreviousMod) && !Directory.Exists(target)) FileUtil.MoveDirectoryInPlace(layout.PreviousMod, target);
                 throw;
             }
-            Log("The Odyssey mod is in " + target + " (Settings > Mods turns it on or off).");
+            Log("The custom mod is in " + target + " (Settings > Mods turns it on or off).");
         }
 
         private void Swap(string fresh, string destination, string aside)

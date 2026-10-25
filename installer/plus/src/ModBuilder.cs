@@ -16,13 +16,13 @@ namespace Nebula.Plus
 
         public static readonly ModInput[] All =
         {
-            new ModInput { Key = "marioModelBlend", Label = "Odyssey Mario model (.blend)", Hint = "mario-model-FK.blend" },
-            new ModInput { Key = "marioTextures", Label = "Odyssey Mario textures (folder)", Hint = "the folder with MarioBody_alb.png", Folder = true },
+            new ModInput { Key = "marioModelBlend", Label = "Mario model (.blend)", Hint = "mario-model-FK.blend" },
+            new ModInput { Key = "marioTextures", Label = "Mario model textures (folder)", Hint = "the folder with MarioBody_alb.png", Folder = true },
             new ModInput { Key = "animationBlend", Label = "Animations (.blend)", Hint = "the Odyssey rig's action file, e.g. \"64  24.blend\"" },
             new ModInput { Key = "faceAnimations", Label = "Face animations (.szs)", Hint = "PlayerAnimationFace.szs" },
             new ModInput { Key = "faceSkeleton", Label = "Face skeleton (.fbx)", Hint = "Custom Bone vis Armature.fbx" },
-            new ModInput { Key = "luigiGltf", Label = "Odyssey Luigi model (.gltf)", Hint = "Luigi.gltf, with its textures folder beside it" },
-            new ModInput { Key = "voiceClips", Label = "Mario voice clips (folder)", Hint = "the folder with \"(Mario) Jump 1.ogg\"", Folder = true },
+            new ModInput { Key = "luigiGltf", Label = "Luigi model (.gltf)", Hint = "Luigi.gltf, with its textures folder beside it" },
+            new ModInput { Key = "voiceClips", Label = "Voice clips (folder)", Hint = "the folder with \"(Mario) Jump 1.ogg\"", Folder = true },
             new ModInput { Key = "marioModelDae", Label = "Other Mario model (.dae, instead of the Odyssey one)", Hint = "a Smash Ultimate style mario.dae" }
         };
 
@@ -228,7 +228,7 @@ namespace Nebula.Plus
 
     /// <summary>
     /// Builds the model, Luigi, animation and voice mods with tools/animations from the user's own files, into a
-    /// work folder beside the content. Each mod whose inputs are missing is skipped with the reason.
+    /// work folder beside the content. A part whose input files were not chosen is simply not built.
     /// </summary>
     internal sealed class ModBuilder
     {
@@ -306,20 +306,20 @@ namespace Nebula.Plus
 
             progress("Building the Mario model", 0.0);
             if (modelBlend != null && textures != null && animBlend != null)
-                Step(result, "Odyssey Mario model", "build_odyssey_model_mod.py",
+                Step(result, "Mario model", "build_odyssey_model_mod.py",
                     new[] { "--blend", modelBlend, "--textures", textures, "--anim-blend", animBlend, "--content", work });
             else if (dae != null)
                 Step(result, "Mario model (" + Path.GetFileName(dae) + ")", "build_model_mod.py", new[] { "--dae", dae, "--content", work });
-            else
-                result.Skipped.Add("Odyssey Mario model: needs the model .blend, its textures folder and the animations .blend" +
-                    Missing(new[] { "marioModelBlend", "marioTextures", "animationBlend" }, input));
+            else if (modelBlend != null || textures != null)
+                log("Mario model: not built; it needs the model .blend, its textures folder and the animations .blend" +
+                    Missing(new[] { "marioModelBlend", "marioTextures", "animationBlend" }, input) + ".");
             bool haveModel = File.Exists(Path.Combine(model, "manifest.txt"));
 
             progress("Building the Luigi model", 0.25);
             if (luigi != null && haveModel)
-                Step(result, "Odyssey Luigi model (co-op)", "build_odyssey_luigi_mod.py", new[] { "--gltf", luigi, "--content", work });
-            else
-                result.Skipped.Add("Odyssey Luigi model: " + (luigi == null ? "no Luigi.gltf" : "needs the Mario model built first"));
+                Step(result, "Luigi model", "build_odyssey_luigi_mod.py", new[] { "--gltf", luigi, "--content", work });
+            else if (luigi != null)
+                log("Luigi model: not built; it needs the Mario model built first.");
 
             progress("Converting the animations", 0.45);
             if (animBlend != null)
@@ -332,15 +332,15 @@ namespace Nebula.Plus
                 }
                 else if (haveModel)
                     log("Face animations skipped: needs PlayerAnimationFace.szs and the face skeleton .fbx.");
-                Step(result, "Odyssey animations" + (haveModel && face != null && faceSkeleton != null ? " with face animation" : ""),
+                Step(result, "animations" + (haveModel && face != null && faceSkeleton != null ? " (with face animation)" : ""),
                     "build_animation_mod.py", args);
             }
-            else result.Skipped.Add("Odyssey animations: no animations .blend");
+            else if (face != null || faceSkeleton != null) log("Animations: not built; they need the animations .blend.");
 
             progress("Converting the voice clips", 0.85);
             if (voice != null)
-                Step(result, "Mario voice", "build_voice_mod.py", new[] { "--clips", voice, "--content", work });
-            else result.Skipped.Add("Mario voice: no voice clips folder");
+                Step(result, "voice", "build_voice_mod.py", new[] { "--clips", voice, "--content", work });
+
             progress("Mods built", 1.0);
             return result;
         }
@@ -386,7 +386,7 @@ namespace Nebula.Plus
             log("== " + name + ": " + script + " " + ProcessRunner.JoinArguments(arguments));
             int code = python.RunScript(Path.Combine(tools, script), arguments, tools, log, cancel);
             // One failed mod does not stop the others or the install; the game runs without it.
-            if (code != 0) { result.Skipped.Add(name + ": FAILED (" + script + " exit " + code + "; see the log)"); return; }
+            if (code != 0) { result.Skipped.Add(name + " (" + script + " exit " + code + "; see the log)"); return; }
             result.Built.Add(name);
         }
 

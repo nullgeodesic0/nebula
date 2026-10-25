@@ -134,6 +134,11 @@ namespace Nebula.Plus
                 request.Channel = installed.Channel ?? "release";
                 request.ForceMods = true;
             }
+            else if (command == "install" && request.Package == null && PlusInstalled.Read(layout) == null &&
+                (request.Package = PlusUpdater.BundledPackage(Console.WriteLine)) != null)
+            {
+                // A first install from the setup zip: its own signed package, no download.
+            }
             else if (command == "update" || request.Package == null)
             {
                 var config = PlusConfig.Load(layout);
@@ -221,11 +226,8 @@ namespace Nebula.Plus
                 {
                     var mod = Json.Load(marker);
                     var built = Json.List(mod, "built");
-                    lines.Add("Odyssey mod (" + Path.GetDirectoryName(marker) + "): " + (built != null && built.Count != 0 ? string.Join(", ", built.Cast<object>()) : "none"));
-                    var skipped = Json.List(mod, "skipped");
-                    if (skipped != null) foreach (var s in skipped) lines.Add("  skipped: " + s);
+                    lines.Add("Custom mod (" + Path.GetDirectoryName(marker) + "): " + (built != null && built.Count != 0 ? string.Join(", ", built.Cast<object>()) : "none"));
                 }
-                else lines.Add("Odyssey mod: not built (it needs your own model, animation and voice files)");
             }
             lines.Add("Updates: " + config.Repository + " " + (config.Channel == "branch" ? "branch " + config.Branch : "releases (" + PlusUpdater.TagPrefix + "*)"));
             lines.Add("Saves: " + (config.SavesMode == "shared" ? OfficialNebula.Saves + " (shared with the official Nebula)" : layout.Saves));

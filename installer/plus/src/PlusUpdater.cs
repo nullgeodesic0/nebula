@@ -109,6 +109,26 @@ namespace Nebula.Plus
             return suffix >= 0 ? version.Substring(0, suffix) : version;
         }
 
+        /// <summary>
+        /// The signed package beside this program (the setup zip from the release page holds NebulaPlus.exe, the package
+        /// zip and its .sig), so a first install needs no other download; null when there is none or it does not verify.
+        /// </summary>
+        public static string BundledPackage(Action<string> log)
+        {
+            string here = Path.GetDirectoryName(Path.GetFullPath(System.Reflection.Assembly.GetExecutingAssembly().Location));
+            foreach (var zip in Directory.GetFiles(here, "NebulaPlus-*.zip").OrderByDescending(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                if (Path.GetFileName(zip).StartsWith("NebulaPlus-Setup", StringComparison.OrdinalIgnoreCase)) continue;
+                if (File.Exists(zip + ".sig") && PlusPackage.VerifySignature(zip, zip + ".sig"))
+                {
+                    log("Using the signed package that came with Nebula Plus: " + zip);
+                    return zip;
+                }
+                log("Ignored " + zip + ": its signature does not verify against the Nebula Plus release key.");
+            }
+            return null;
+        }
+
         /// <summary>Downloads a release package and authenticates it; returns the zip's path.</summary>
         public static string DownloadRelease(PlusUpdate update, string directory, bool allowUnsigned, Action<string> log,
             Action<long> onBytes, CancellationToken cancel)
