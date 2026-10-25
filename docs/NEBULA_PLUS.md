@@ -1,8 +1,7 @@
 # Nebula Plus
 
 Nebula Plus installs this fork's Nebula 2 (the native game, built from the Petari decompilation) with its
-additions: Mario and Luigi co-op on one PC with split screen, online co-op (lockstep, rollback and drop-in live
-join), the Odyssey moveset and motion style, the HD button prompts and controls, Dolphin texture packs, the scene
+additions: Mario and Luigi co-op on one PC with split screen, online co-op (rollback and drop-in live join, with automatic desync repair), the Odyssey moveset and motion style, the HD button prompts and controls, Dolphin texture packs, the scene
 effects and the custom voice support. It sits in its own folder, never changes an official Nebula install, and keeps its own saves
 and settings.
 
@@ -43,7 +42,7 @@ Without `--package` the install uses the signed package beside the program (the 
 C:\NebulaPlus\
   Play Nebula Plus.cmd       one player
   Play co-op.cmd             two players on one PC (the second controller presses + to join as Luigi)
-  Host online game.cmd       online co-op host (Mario): [port, default 7777 TCP] [input delay] [live | rollback | lockstep]
+  Host online game.cmd       online co-op host (Mario): [port, default 7777 TCP] [input delay] [live | rollback]
   Join online game.cmd       online co-op join (Luigi): <host address>[:port]
   Check for updates.cmd      the updater
   Nebula Plus.cmd            the Nebula Plus window
@@ -129,8 +128,10 @@ when needed; saves and settings are not touched. The previous version stays in `
 
 `Host online game.cmd` listens on TCP port 7777 (an argument changes it); a host outside the friend's network
 forwards that port on their router (or both use a virtual LAN such as Tailscale or ZeroTier). Modes: `live` (the
-default: the host plays at once, the friend can join at any time and drops in as Luigi), `rollback` (both start
-together; each PC runs ahead and corrects itself) and `lockstep`. `Join online game.cmd <address>` joins; the joiner
+default: the host plays at once, the friend can join at any time and drops in as Luigi) and `rollback` (both start
+together; each PC runs ahead and corrects itself). In both, the two PCs compare checksums of the game and the host
+repairs any difference by itself. Change settings and mods before hosting or joining: during an online session the
+settings menu and the HOME Menu are locked, since changing them on one PC would make the two games differ. `Join online game.cmd <address>` joins; the joiner
 plays the host's save, which is kept in `data-join\Nebula\netplay`, never in its own saves. Both PCs must run the same
 Nebula Plus version and the same mods (the handshake compares the game module and the mods and refuses a mismatch).
 `docs/NETPLAY.md` has the details.

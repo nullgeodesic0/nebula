@@ -31,11 +31,13 @@ namespace Nebula.Plus
             Write(layout, "Host online game.cmd", "Online co-op, host (you play Mario, in your save). Your friend runs \"Join online game.cmd\"\r\n" +
                 "rem with this PC's address. TCP port 7777 by default: forward it on your router for a friend outside your network.\r\n" +
                 "rem Both PCs need the same Nebula Plus version and the same mods on.\r\n" +
-                "rem Usage: \"Host online game.cmd\" [port] [input delay in frames] [live | rollback | lockstep]\r\n" +
-                "rem   live (default): the game starts at once and your friend can join at any time (Luigi drops in).",
+                "rem Change settings and mods before hosting: in an online session the settings and HOME menus are locked.\r\n" +
+                "rem Usage: \"Host online game.cmd\" [port] [input delay in frames] [live | rollback]\r\n" +
+                "rem   live (default): the game starts at once and your friend can join at any time (Luigi drops in).\r\n" +
+                "rem   rollback: the game waits at the start for your friend. Both find and repair any desync by themselves.",
                 saves,
                 "set \"PORT=%~1\"\r\nif \"%PORT%\"==\"\" set \"PORT=7777\"\r\nset \"MODE=%~3\"\r\nif \"%MODE%\"==\"\" set \"MODE=live\"\r\n" +
-                "set \"DELAY=%~2\"\r\nif \"%DELAY%\"==\"\" if /i \"%MODE%\"==\"lockstep\" (set \"DELAY=3\") else (set \"DELAY=2\")\r\n" +
+                "if /i not \"%MODE%\"==\"rollback\" set \"MODE=live\"\r\nset \"DELAY=%~2\"\r\nif \"%DELAY%\"==\"\" set \"DELAY=2\"\r\n" +
                 "set \"GALAXY_NET_HOST=%PORT%\"\r\nset \"GALAXY_NET_DELAY=%DELAY%\"\r\n" +
                 "if /i \"%MODE%\"==\"live\" set \"GALAXY_NET_LIVE=1\"\r\nif /i \"%MODE%\"==\"rollback\" set \"GALAXY_NET_ROLLBACK=1\"\r\n" +
                 "echo Hosting on TCP port %PORT% (%MODE%). Give your friend this PC's address: on the same network one of these,\r\n" +
@@ -43,6 +45,7 @@ namespace Nebula.Plus
                 "for /f \"tokens=2 delims=:\" %%a in ('ipconfig ^| findstr /c:\"IPv4\"') do echo    %%a\r\n", "host", false);
             Write(layout, "Join online game.cmd", "Online co-op, join (you play Luigi, in the host's save: it comes from the host at the start\r\n" +
                 "rem and is kept in data-join\\Nebula\\netplay; your own saves are not touched).\r\n" +
+                "rem Change settings and mods before joining: in an online session the settings and HOME menus are locked.\r\n" +
                 "rem Usage: \"Join online game.cmd\" <host address>[:port]", null,
                 "set \"HOST=%~1\"\r\nif \"%HOST%\"==\"\" set /p \"HOST=Host address (name or IP, optionally :port): \"\r\n" +
                 "if \"%HOST%\"==\"\" exit /b 1\r\necho %HOST% | find \":\" >nul || set \"HOST=%HOST%:7777\"\r\n" +

@@ -37,7 +37,8 @@ as ISO, WBFS, RVZ or an extracted folder. Nebula Plus contains no Nintendo code 
 **Online co-op:** the host runs **Host online game.cmd** and gives the friend their PC's address; the friend runs
 **Join online game.cmd** and types it. The host must forward **TCP port 7777** on their router to their PC (or
 both use a virtual LAN such as Tailscale or ZeroTier). The friend can join while the host is already playing and
-drops in as Luigi. Both of you need the same Nebula Plus version and the same mods turned on.
+drops in as Luigi. Both of you need the same Nebula Plus version and the same mods turned on; change settings and mods before
+starting (they are locked during an online session).
 
 **Updates:** **Check for updates.cmd** installs the newest release. Updates never touch your saves or settings
 (both live in the folder's `data\`), and the previous version is kept for **Roll back**.
