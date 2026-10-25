@@ -168,6 +168,9 @@ public:
     // frames, and back to a kept frame (its later ones dropped). Call on the simulation thread.
     void save_dsp(std::uint32_t frame);
     bool restore_dsp(std::uint32_t frame);
+    // Netplay's live join: the DSP state kept at `frame` as bytes (empty when not kept), and another PC's taken.
+    [[nodiscard]] std::vector<std::byte> saved_dsp(std::uint32_t frame) const;
+    bool adopt_dsp(const std::byte* data, std::size_t size);
 
 private:
     struct State;

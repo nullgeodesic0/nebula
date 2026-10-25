@@ -209,6 +209,14 @@ public:
     // Netplay's rollback (gx_d3d12.h): the register state kept and set back in stream order.
     void stream_checkpoint(std::uint32_t id);
     void stream_rewind(std::uint32_t id);
+    bool stream_state(std::uint32_t id, std::vector<std::byte>& out);
+    void stream_adopt(std::uint32_t id, const std::byte* data, std::size_t size);
+    // One of the ops above, for the render thread: 0 checkpoint, 1 rewind, 2 adopt `state`.
+    struct StreamOp {
+        std::uint8_t kind = 0;
+        std::uint32_t id = 0;
+        std::shared_ptr<const GxState> state;
+    };
     [[nodiscard]] bool wait_for_frame_pe_completion_for(
         FramePeCompletionToken token,
         std::uint32_t timeout_ms);
@@ -602,7 +610,7 @@ private:
         bool dependency_cache_hit = false;
         MemorySnapshot memory_snapshot;
         // Rollback's register checkpoints and rewinds due before this chunk's commands, in order.
-        std::vector<std::pair<bool, std::uint32_t>> stream_ops;  // (rewind, id)
+        std::vector<StreamOp> stream_ops;
     };
 
     struct PendingFrameEffects {
@@ -1325,14 +1333,14 @@ private:
     std::vector<std::byte> pending_fifo_;
     // Rollback (stream_checkpoint/stream_rewind): the ops for the next chunk (simulation thread), and the kept
     // states of the simulation thread's parsers and of the render thread's.
-    std::vector<std::pair<bool, std::uint32_t>> pending_stream_ops_;
+    std::vector<StreamOp> pending_stream_ops_;
     struct ProducerStreamState {
         GxState event_state;
         GxState dependency_state;
     };
     std::map<std::uint32_t, ProducerStreamState> producer_stream_states_;
     std::map<std::uint32_t, GxState> render_stream_states_;
-    void apply_stream_ops(const std::vector<std::pair<bool, std::uint32_t>>& ops);
+    void apply_stream_ops(const std::vector<StreamOp>& ops);
     GxState event_state_;
     std::vector<std::byte> event_pending_fifo_;
     GxState dependency_state_;

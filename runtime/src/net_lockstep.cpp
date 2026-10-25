@@ -42,6 +42,7 @@ enum MessageType : std::uint8_t {
     kInput = 3,    // frame, snapshot
     kHash = 4,     // scene frame, hash
     kBye = 5,
+    kState = 6,  // live join: total size, offset, a piece of the game image
 };
 
 constexpr std::uint32_t kMagic = 0x324E424Eu;  // "NBN2"
@@ -148,7 +149,7 @@ void start_sockets() {
 std::vector<std::uint8_t> encode_settings(const SessionSettings& s) {
     std::vector<std::uint8_t> out;
     for (const std::uint32_t v :
-         {s.calendar, s.coop, s.moveset, s.motion_style, s.text_speed, s.language, s.delay, s.rollback}) {
+         {s.calendar, s.coop, s.moveset, s.motion_style, s.text_speed, s.language, s.delay, s.rollback, s.live}) {
         put32(out, v);
     }
     return out;
@@ -164,6 +165,7 @@ SessionSettings decode_settings(Reader& r) {
     s.language = r.u32();
     s.delay = r.u32();
     s.rollback = r.u32();
+    s.live = r.u32();
     return s;
 }
 
@@ -182,6 +184,9 @@ struct Session::Impl {
     bool ended = false;
     unsigned remote_channel = 1;
     std::uint32_t remote_confirmed = 0;  // every remote input up to here has come
+    std::vector<std::uint8_t> state;     // live join: the game image as it comes
+    std::size_t state_received = 0;
+    bool state_ready = false;
     // GALAXY_NET_TEST_LAG=<ms>: the other PC's inputs count only that long after they came (a slow link, on one PC).
     std::chrono::milliseconds test_lag{0};
     std::deque<std::pair<std::chrono::steady_clock::time_point, std::pair<std::uint32_t, FrameInput>>> lagged;
@@ -241,6 +246,20 @@ struct Session::Impl {
                 std::lock_guard<std::mutex> guard(lock);
                 remote_hashes[frame] = hash;
                 check_hash(frame);
+            } else if (type == kState) {
+                const std::uint32_t total = r.u32();
+                const std::uint32_t offset = r.u32();
+                const std::size_t size = payload.size() - 8;
+                std::lock_guard<std::mutex> guard(lock);
+                if (r.ok && offset <= total && size <= total - offset) {
+                    state.resize(total);
+                    std::memcpy(state.data() + offset, payload.data() + 8, size);
+                    state_received += size;
+                    if (state_received == total) {
+                        state_ready = true;
+                        changed.notify_all();
+                    }
+                }
             } else if (type == kBye) {
                 break;
             }
@@ -345,7 +364,11 @@ bool Session::host(unsigned port, const std::string& build_id, const std::string
         impl_->remote_channel = 1;
         impl_->remote_confirmed = settings.delay;
         settings_ = settings;
-        role_ = Role::Host;
+        if (settings.live != 0) {
+            pending_role_ = Role::Host;
+        } else {
+            role_ = Role::Host;
+        }
         impl_->receiver = std::thread([this] { impl_->receive_loop(); });
         std::fprintf(stderr, "[netplay] the other player joined (input delay %u frames)\n", settings.delay);
         return true;
@@ -421,7 +444,11 @@ bool Session::join(const std::string& where, const std::string& build_id, const 
     impl_->remote_channel = 0;
     impl_->remote_confirmed = settings.delay;
     settings_ = settings;
-    role_ = Role::Join;
+    if (settings.live != 0) {
+        pending_role_ = Role::Join;
+    } else {
+        role_ = Role::Join;
+    }
     impl_->receiver = std::thread([this] { impl_->receive_loop(); });
     std::fprintf(stderr, "[netplay] joined %s (input delay %u frames, %u save files)\n", where.c_str(), settings.delay,
                  files);
@@ -440,8 +467,44 @@ void Session::send_input(std::uint32_t frame, const FrameInput& input) {
     send_message(impl_->socket, impl_->send_lock, kInput, payload);
 }
 
+void Session::activate(std::uint32_t base) {
+    {
+        std::lock_guard<std::mutex> guard(impl_->lock);
+        base_ = base;
+        impl_->remote_confirmed = (std::max)(impl_->remote_confirmed, base + settings_.delay);
+        while (impl_->inputs[impl_->remote_channel].count(impl_->remote_confirmed + 1) != 0) ++impl_->remote_confirmed;
+    }
+    role_ = pending_role_;
+    std::fprintf(stderr, "[netplay] the session starts at frame %u\n", base);
+}
+
+void Session::send_state(const std::vector<std::uint8_t>& image) {
+    constexpr std::size_t kPiece = 8u << 20;
+    for (std::size_t at = 0; at < image.size(); at += kPiece) {
+        const std::size_t size = (std::min)(kPiece, image.size() - at);
+        std::vector<std::uint8_t> payload;
+        payload.reserve(size + 8);
+        put32(payload, static_cast<std::uint32_t>(image.size()));
+        put32(payload, static_cast<std::uint32_t>(at));
+        payload.insert(payload.end(), image.begin() + static_cast<std::ptrdiff_t>(at),
+                       image.begin() + static_cast<std::ptrdiff_t>(at + size));
+        if (!send_message(impl_->socket, impl_->send_lock, kState, payload)) return;
+    }
+}
+
+bool Session::take_state(std::vector<std::uint8_t>& image) {
+    std::unique_lock<std::mutex> guard(impl_->lock);
+    impl_->changed.wait(guard, [&] { return impl_->state_ready || impl_->ended; });
+    if (!impl_->state_ready) return false;
+    image = std::move(impl_->state);
+    impl_->state = {};
+    impl_->state_ready = false;
+    impl_->state_received = 0;
+    return true;
+}
+
 bool Session::frame_inputs(std::uint32_t frame, FrameInput (&inputs)[2]) {
-    if (frame <= settings_.delay) {
+    if (frame <= base_ + settings_.delay) {
         inputs[0] = {};
         inputs[1] = {};
         return true;
@@ -462,7 +525,7 @@ bool Session::frame_inputs(std::uint32_t frame, FrameInput (&inputs)[2]) {
 }
 
 bool Session::remote_input(std::uint32_t frame, FrameInput& input) {
-    if (frame <= settings_.delay) {
+    if (frame <= base_ + settings_.delay) {
         input = {};
         return true;
     }
@@ -484,11 +547,11 @@ bool Session::remote_input(std::uint32_t frame, FrameInput& input) {
 std::uint32_t Session::remote_confirmed() const {
     std::lock_guard<std::mutex> guard(impl_->lock);
     impl_->take_lagged();
-    return (std::max)(impl_->remote_confirmed, settings_.delay);
+    return (std::max)(impl_->remote_confirmed, base_ + settings_.delay);
 }
 
 FrameInput Session::local_input(std::uint32_t frame) {
-    if (frame <= settings_.delay) return {};
+    if (frame <= base_ + settings_.delay) return {};
     std::lock_guard<std::mutex> guard(impl_->lock);
     const auto& by_frame = impl_->inputs[local_channel()];
     const auto it = by_frame.find(frame);

@@ -511,9 +511,17 @@ size_t nebula_gx_pending(const uint8_t** bytes, uint8_t** ptr, uint8_t** end) {
     return (size_t)(__NebulaGXWriter.ptr - sSpanStart);
 }
 
-/* After a restore (the GX state is the save's, the renderer idle): the writer as it was at the save. */
+/* After a restore or a live join's load (the GX state is the save's, the renderer idle): the writer as it was at the
+   save, at the same place in the ring (the game keeps pointers into it; the ring is at one address in every process). */
 void nebula_gx_restore_pending(const uint8_t* bytes, size_t size, uint8_t* ptr, uint8_t* end) {
     if (sLinked) {
+        uint8_t* start = ptr - size;
+        if (sRing != NULL && start >= sRing + kRingSize) {
+            start -= kRingSize;
+        }
+        if (sRing != NULL && start >= sRing && start < sRing + kRingSize) {
+            sSpanStart = start;
+        }
         if (size != 0) {
             memcpy(sSpanStart, bytes, size); /* the ring is mapped twice: contiguous past its end */
         }

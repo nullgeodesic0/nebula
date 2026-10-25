@@ -108,6 +108,14 @@ public:
     using OwnerResolver = std::uint32_t (*)(std::uint32_t channel, std::uint32_t* route);
     void set_owner_resolver(OwnerResolver resolver) noexcept { owner_resolver_ = resolver; }
     void set_voice_override(const JAudioVoiceOverride& voice_override) noexcept { voice_override_ = voice_override; }
+    // Netplay's live join: `other`'s state (another process's bytes), with this one's resolver and voice override.
+    void adopt_state(const JAudioHostMixer& other) noexcept {
+        const OwnerResolver resolver = owner_resolver_;
+        const JAudioVoiceOverride voice = voice_override_;
+        *this = other;
+        owner_resolver_ = resolver;
+        voice_override_ = voice;
+    }
     [[nodiscard]] const JAudioChannelCategory& channel_category(std::uint32_t channel) const noexcept {
         return categories_[channel < categories_.size() ? channel : 0u];
     }

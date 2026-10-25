@@ -3502,7 +3502,7 @@ void GxBackend::stream_checkpoint(std::uint32_t id) {
     while (producer_stream_states_.size() > kStreamStatesKept) {
         producer_stream_states_.erase(producer_stream_states_.begin());
     }
-    pending_stream_ops_.emplace_back(false, id);
+    pending_stream_ops_.push_back({0, id, nullptr});
 }
 
 void GxBackend::stream_rewind(std::uint32_t id) {
@@ -3513,13 +3513,45 @@ void GxBackend::stream_rewind(std::uint32_t id) {
         producer_stream_states_.erase(std::next(kept), producer_stream_states_.end());
     }
     event_pending_fifo_.clear();
-    pending_stream_ops_.emplace_back(true, id);
+    pending_stream_ops_.push_back({1, id, nullptr});
+}
+
+static_assert(std::is_trivially_copyable_v<GxState>, "live join sends the registers as bytes");
+
+bool GxBackend::stream_state(std::uint32_t id, std::vector<std::byte>& out) {
+    wait_for_render_idle();
+    const auto kept = render_stream_states_.find(id);
+    if (kept == render_stream_states_.end()) return false;
+    out.resize(sizeof(GxState));
+    std::memcpy(out.data(), &kept->second, sizeof(GxState));
+    return true;
+}
+
+void GxBackend::stream_adopt(std::uint32_t id, const std::byte* data, std::size_t size) {
+    if (size != sizeof(GxState)) return;
+    auto state = std::make_shared<GxState>();
+    std::memcpy(static_cast<void*>(state.get()), data, sizeof(GxState));
+    state->mark_all_dirty();
+    event_state_ = *state;
+    dependency_state_ = *state;
+    event_pending_fifo_.clear();
+    producer_stream_states_.clear();
+    producer_stream_states_[id] = {*state, *state};
+    pending_stream_ops_.push_back({2, id, std::move(state)});
 }
 
 // Render thread, before a chunk's commands.
-void GxBackend::apply_stream_ops(const std::vector<std::pair<bool, std::uint32_t>>& ops) {
-    for (const auto& [rewind, id] : ops) {
-        if (!rewind) {
+void GxBackend::apply_stream_ops(const std::vector<StreamOp>& ops) {
+    for (const StreamOp& op : ops) {
+        const std::uint32_t id = op.id;
+        if (op.kind == 2) {
+            state_ = *op.state;
+            render_stream_states_.clear();
+            render_stream_states_[id] = state_;
+            pending_fifo_.clear();
+            continue;
+        }
+        if (op.kind == 0) {
             render_stream_states_[id] = state_;
             while (render_stream_states_.size() > kStreamStatesKept) {
                 render_stream_states_.erase(render_stream_states_.begin());

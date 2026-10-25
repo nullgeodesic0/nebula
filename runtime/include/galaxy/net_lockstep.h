@@ -10,9 +10,14 @@
 // calendar, the input delay and its save (the joiner plays the host's save, kept apart from its own).
 //
 // Every kHashEvery scene frames both PCs send a hash of the game's memory; a difference is a desync, logged.
+//
+// Live join (settings.live): the host plays from boot and a joiner may come at any time. The session then starts at a
+// boundary the host chooses (activate(base): inputs up to base + delay are neutral on both PCs), and the host sends
+// the game as it was there (send_state); the joiner becomes it (take_state) and both go on from that frame.
 
 #include "galaxy/native_input.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <map>
@@ -37,6 +42,7 @@ struct SessionSettings {
     std::uint32_t language = 0;
     std::uint32_t delay = 3;          // input delay in frames
     std::uint32_t rollback = 0;       // 1: rollback (each PC runs ahead on the other's predicted input)
+    std::uint32_t live = 0;           // 1: live join (the host plays on until a joiner comes; implies rollback)
 };
 
 struct SaveFile {
@@ -66,11 +72,19 @@ public:
     bool join(const std::string& address, const std::string& build_id, const std::string& mods,
               SessionSettings& settings, std::vector<SaveFile>& save, std::string& error);
 
-    [[nodiscard]] Role role() const noexcept { return role_; }
-    [[nodiscard]] bool active() const noexcept { return role_ != Role::None; }
+    [[nodiscard]] Role role() const noexcept { return role_.load(); }
+    [[nodiscard]] bool active() const noexcept { return role_.load() != Role::None; }
+    // Live join: the other PC shook hands (the session starts at activate).
+    [[nodiscard]] bool connected() const noexcept { return pending_role_ != Role::None || active(); }
+    void activate(std::uint32_t base);
+    // Live join: the game image, sent by the host; the joiner's waits for it (false when the session ended first).
+    void send_state(const std::vector<std::uint8_t>& image);
+    bool take_state(std::vector<std::uint8_t>& image);
     [[nodiscard]] const SessionSettings& settings() const noexcept { return settings_; }
     // This PC's player's remote channel: 0 hosting, 1 joined.
-    [[nodiscard]] unsigned local_channel() const noexcept { return role_ == Role::Join ? 1u : 0u; }
+    [[nodiscard]] unsigned local_channel() const noexcept {
+        return role_.load() == Role::Join || pending_role_ == Role::Join ? 1u : 0u;
+    }
     [[nodiscard]] unsigned port() const noexcept { return port_; }
 
     // This PC's player's input for `frame` (sent at once; kept for this PC's own use).
@@ -92,7 +106,9 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
-    Role role_ = Role::None;
+    std::atomic<Role> role_{Role::None};
+    Role pending_role_ = Role::None;  // live join: the role once activated
+    std::uint32_t base_ = 0;          // inputs up to base_ + delay are neutral
     SessionSettings settings_{};
     unsigned port_ = 0;
 };

@@ -279,6 +279,8 @@ struct Module {
     decltype(&nebula_game_wpad_connect) wpad_connect;
     decltype(&nebula_game_wpad_report) wpad_report;
     decltype(&nebula_game_wpad_shake) wpad_shake;
+    decltype(&nebula_game_snapshot_export) snapshot_export;
+    decltype(&nebula_game_snapshot_import) snapshot_import;
     void (*debug_dump)();  // optional: the module's thread report
 };
 Module gModule;
@@ -337,6 +339,10 @@ void load_module(const fs::path& path) {
     gModule.wpad_connect = reinterpret_cast<decltype(gModule.wpad_connect)>(find_symbol(module, "nebula_game_wpad_connect"));
     gModule.wpad_report = reinterpret_cast<decltype(gModule.wpad_report)>(find_symbol(module, "nebula_game_wpad_report"));
     gModule.wpad_shake = reinterpret_cast<decltype(gModule.wpad_shake)>(find_symbol(module, "nebula_game_wpad_shake"));
+    gModule.snapshot_export =
+        reinterpret_cast<decltype(gModule.snapshot_export)>(find_symbol(module, "nebula_game_snapshot_export"));
+    gModule.snapshot_import =
+        reinterpret_cast<decltype(gModule.snapshot_import)>(find_symbol(module, "nebula_game_snapshot_import"));
 #if defined(_WIN32)
     gModule.debug_dump = reinterpret_cast<void (*)()>(GetProcAddress(static_cast<HMODULE>(module), "nebula_game_debug_dump"));
 #else
@@ -561,6 +567,11 @@ std::FILE* open_file(const fs::path& path, uint32_t mode) {
 #endif
 }
 
+// Netplay's live join (GALAXY_NET_LIVE; start_netplay): deterministic from boot, before the session starts, and with
+// the session's settings (svc_option) from boot too: co-op on, so that the second player can drop in.
+std::atomic<bool> gNetLive{false};
+galaxy::net::SessionSettings gLiveSettings;
+
 // Rollback (netplay's rollback, GALAXY_SNAPSHOT_TEST): the NAND in memory, kept and restored with the game at each
 // boundary (svc_det_boundary), so a NAND operation of frames a restore undid is undone too; written to the host's files
 // once no rollback can undo it (nand_flush). Files are shared between the kept states until one is written. The NAND
@@ -588,7 +599,7 @@ std::map<std::string, std::optional<MemNand::Entry>> gMemNandOnDisk;  // as writ
 bool nand_in_memory() {
     static const bool in_memory = [] {
         if (!deterministic()) return false;
-        if (std::getenv("GALAXY_SNAPSHOT_TEST") != nullptr) return true;
+        if (std::getenv("GALAXY_SNAPSHOT_TEST") != nullptr || gNetLive.load()) return true;
         return galaxy::net::session().active() && galaxy::net::session().settings().rollback != 0;
     }();
     return in_memory;
@@ -2100,7 +2111,7 @@ bool deterministic() {
         const char* value = std::getenv("GALAXY_DETERMINISTIC");
         return value != nullptr && value[0] == '1';
     }();
-    return on || galaxy::net::session().active();
+    return on || gNetLive.load() || galaxy::net::session().active();
 }
 
 uint32_t svc_gx_peek_efb(void*, uint16_t x, uint16_t y, uint32_t type, uint16_t token) {
@@ -2396,8 +2407,9 @@ void svc_game_light(void*, uint32_t kind, uint32_t id, const float* v) {
 
 uint32_t svc_option(void*, uint32_t what) {
     // Online: what changes the game's computation is the session's (the host's), the same on both PCs.
-    if (galaxy::net::session().active()) {
-        const galaxy::net::SessionSettings& session = galaxy::net::session().settings();
+    if (galaxy::net::session().active() || gNetLive.load()) {
+        const galaxy::net::SessionSettings& session =
+            galaxy::net::session().active() ? galaxy::net::session().settings() : gLiveSettings;
         switch (what) {
         case NEBULA_OPTION_COOP: return session.coop;
         case NEBULA_OPTION_MOVESET: return session.moveset;
@@ -2621,17 +2633,22 @@ bool gWpadConnected = false;
 bool gPartnerConnected = false;
 
 void send_wpad_reports(uint32_t frame) {
-    static NebulaWiimoteConnection connection{};
+    // What a remote tells the game as it connects (also the second player's, which may connect after a live join
+    // took the first one's connection from the other PC).
+    static const NebulaWiimoteConnection connection = [] {
+        NebulaWiimoteConnection made{};
+#if defined(NEBULA_HOST_RENDERER)
+        galaxy::host::native_game_wiimote_calibration(made.eeprom, made.extension_calibration);
+#else
+        idle_wiimote_calibration(made.eeprom, made.extension_calibration);
+#endif
+        made.extension = 1;  // WPAD_DEV_FREESTYLE: the Nunchuk
+        made.battery = 0xC0;
+        return made;
+    }();
     bool& connected = gWpadConnected;
     bool& partner_connected = gPartnerConnected;
     if (!connected) {
-#if defined(NEBULA_HOST_RENDERER)
-        galaxy::host::native_game_wiimote_calibration(connection.eeprom, connection.extension_calibration);
-#else
-        idle_wiimote_calibration(connection.eeprom, connection.extension_calibration);
-#endif
-        connection.extension = 1;  // WPAD_DEV_FREESTYLE: the Nunchuk
-        connection.battery = 0xC0;
         gModule.wpad_connect(0, 1, &connection);
         connected = true;
     }
@@ -2980,11 +2997,235 @@ struct HostInputState {
 };
 std::map<uint32_t, HostInputState> gSavedInputState;
 
+// Live join (GALAXY_NET_LIVE=1 beside GALAXY_NET_HOST; net_lockstep.h). The host plays from boot; when a joiner has
+// shaken hands, the session starts at the next boundary, which is kept, and at the one after the host sends the image
+// of the game there: its own part first (the scene frame count, the remotes' state, the audio interface, the DSP,
+// the renderer's registers and the NAND, as kept at that boundary), then the module's (nebula_game_snapshot_export).
+// The joiner becomes it at its first boundary (NEBULA_DET_LOAD) and both go on from there.
+std::atomic<bool> gJoinPending{false};
+uint32_t gExportFrame = 0;
+bool gLiveJoinWaiting = false;
+std::vector<uint8_t> gLiveImage;  // the joiner's, kept until the load has read it
+constexpr uint32_t kLiveMagic = 0x484C424Eu;  // "NBLH"
+
+struct ImageWriter {
+    std::vector<uint8_t>& out;
+    void raw(const void* data, size_t size) {
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        if (size != 0) out.insert(out.end(), bytes, bytes + size);
+    }
+    void u32(uint32_t v) { raw(&v, 4); }
+    void u64(uint64_t v) { raw(&v, 8); }
+    void blob(const void* data, size_t size) {
+        u32(static_cast<uint32_t>(size));
+        raw(data, size);
+    }
+    void str(const std::string& s) { blob(s.data(), s.size()); }
+};
+
+struct ImageReader {
+    const uint8_t* at;
+    const uint8_t* end;
+    bool ok = true;
+    void raw(void* data, size_t size) {
+        if (static_cast<size_t>(end - at) < size) {
+            ok = false;
+            return;
+        }
+        std::memcpy(data, at, size);
+        at += size;
+    }
+    uint32_t u32() {
+        uint32_t v = 0;
+        raw(&v, 4);
+        return v;
+    }
+    uint64_t u64() {
+        uint64_t v = 0;
+        raw(&v, 8);
+        return v;
+    }
+    std::pair<const uint8_t*, size_t> blob() {
+        const uint32_t size = u32();
+        if (!ok || static_cast<size_t>(end - at) < size) {
+            ok = false;
+            return {nullptr, 0};
+        }
+        const uint8_t* data = at;
+        at += size;
+        return {data, size};
+    }
+    std::string str() {
+        const auto [data, size] = blob();
+        return data != nullptr ? std::string(reinterpret_cast<const char*>(data), size) : std::string();
+    }
+};
+
+// NAND paths go relative to the NAND's root (the other PC's is elsewhere); others (a mod's save folder) stay here.
+std::string nand_key_out(const std::string& key) {
+    const std::string root = gNandRoot.generic_string() + "/";
+    return key.compare(0, root.size(), root) == 0 ? key.substr(root.size()) : std::string();
+}
+
+std::string nand_key_in(const std::string& relative) {
+    return (gNandRoot / fs::path(relative)).generic_string();
+}
+
+std::vector<uint8_t> build_live_image(uint32_t frame) {
+    std::vector<uint8_t> image;
+    ImageWriter w{image};
+    w.u32(kLiveMagic);
+    w.u32(frame);
+    const auto scene = gSavedSceneFrames.find(frame);
+    w.u64(scene != gSavedSceneFrames.end() ? scene->second : gSceneFrame);
+    const auto kept_input = gSavedInputState.find(frame);
+    const HostInputState input = kept_input != gSavedInputState.end() ? kept_input->second : HostInputState::take();
+    w.raw(&input, sizeof(input));
+    {
+        std::lock_guard<std::mutex> lock(gAiLock);
+        w.u32(gAiRunning ? 1u : 0u);
+        w.u32(gAiRate);
+        w.u32(gAiLatchedStart);
+        w.u32(gAiLatchedSize);
+    }
+#if defined(NEBULA_HOST_RENDERER)
+    const std::vector<std::byte> dsp = gAudio->saved_dsp(frame);
+    w.blob(dsp.data(), dsp.size());
+    std::vector<std::byte> gx;
+    (void)galaxy::gx::stream_state(frame, gx);
+    w.blob(gx.data(), gx.size());
+#else
+    w.blob(nullptr, 0);
+    w.blob(nullptr, 0);
+#endif
+    const auto kept_nand = gMemNandSaved.find(frame);
+    const MemNand& nand = kept_nand != gMemNandSaved.end() ? kept_nand->second : gMemNand;
+    std::vector<std::pair<std::string, const std::optional<MemNand::Entry>*>> entries;
+    for (const auto& [key, entry] : nand.entries) {
+        std::string relative = nand_key_out(key);
+        if (!relative.empty()) entries.emplace_back(std::move(relative), &entry);
+    }
+    w.u32(static_cast<uint32_t>(entries.size()));
+    for (const auto& [relative, entry] : entries) {
+        w.str(relative);
+        const uint32_t kind = !entry->has_value() ? 0u : (*entry)->dir ? 1u : 2u;
+        w.u32(kind);
+        if (kind == 2) {
+            w.blob((*entry)->data->data(), (*entry)->data->size());
+        } else {
+            w.blob(nullptr, 0);
+        }
+    }
+    w.u32(static_cast<uint32_t>(nand.files.size()));
+    for (const MemNand::Open& f : nand.files) {
+        w.u32(f.used ? 1u : 0u);
+        w.str(f.used ? nand_key_out(f.key) : std::string());
+        w.u32(f.data ? 1u : 0u);
+        if (f.data) {
+            w.blob(f.data->data(), f.data->size());
+        } else {
+            w.blob(nullptr, 0);
+        }
+        w.u32(f.pos);
+        w.u32(f.mode);
+    }
+    // The game's part, after its size.
+    const size_t game_at = image.size();
+    w.u64(0);
+    const int exported = gModule.snapshot_export(
+        frame,
+        [](void* context, const void* data, size_t size) {
+            auto* out = static_cast<std::vector<uint8_t>*>(context);
+            const auto* bytes = static_cast<const uint8_t*>(data);
+            out->insert(out->end(), bytes, bytes + size);
+        },
+        &image);
+    if (exported == 0) {
+        std::fprintf(stderr, "[netplay] live join: frame %u is no longer kept\n", frame);
+        return {};
+    }
+    const uint64_t game_size = image.size() - game_at - 8;
+    std::memcpy(image.data() + game_at, &game_size, 8);
+    return image;
+}
+
+void send_live_image(uint32_t frame) {
+    std::vector<uint8_t> image = build_live_image(frame);
+    if (image.empty()) return;
+    std::fprintf(stderr, "[netplay] live join: sending the game at frame %u (%.1f MB)\n", frame,
+                 static_cast<double>(image.size()) / 1048576.0);
+    std::thread([image = std::move(image)] { galaxy::net::session().send_state(image); }).detach();
+}
+
+// Joiner: the host's part taken, the game's handed to the module (which becomes it at NEBULA_DET_LOAD).
+bool adopt_live_image(const std::vector<uint8_t>& image, uint32_t& frame) {
+    ImageReader r{image.data(), image.data() + image.size()};
+    if (r.u32() != kLiveMagic) return false;
+    frame = r.u32();
+    gSceneFrame = r.u64();
+    HostInputState input{};
+    r.raw(&input, sizeof(input));
+    {
+        std::lock_guard<std::mutex> lock(gAiLock);
+        gAiRunning = r.u32() != 0;
+        gAiRate = r.u32();
+        gAiLatchedStart = r.u32();
+        gAiLatchedSize = r.u32();
+        gAiWake.notify_one();
+    }
+    const auto [dsp, dsp_size] = r.blob();
+    const auto [gx, gx_size] = r.blob();
+    MemNand nand;
+    const uint32_t entries = r.u32();
+    for (uint32_t i = 0; i < entries && r.ok; ++i) {
+        const std::string key = nand_key_in(r.str());
+        const uint32_t kind = r.u32();
+        const auto [data, size] = r.blob();
+        if (kind == 0) {
+            nand.entries[key] = std::nullopt;
+        } else if (kind == 1) {
+            nand.entries[key] = MemNand::Entry{true, nullptr};
+        } else {
+            nand.entries[key] = MemNand::Entry{false, std::make_shared<std::vector<uint8_t>>(data, data + size)};
+        }
+    }
+    const uint32_t files = r.u32();
+    nand.files.assign(files, {});
+    for (uint32_t i = 0; i < files && r.ok; ++i) {
+        MemNand::Open& f = nand.files[i];
+        f.used = r.u32() != 0;
+        const std::string relative = r.str();
+        f.key = f.used ? nand_key_in(relative) : std::string();
+        const bool has_data = r.u32() != 0;
+        const auto [data, size] = r.blob();
+        if (has_data) f.data = std::make_shared<std::vector<uint8_t>>(data, data + size);
+        f.pos = r.u32();
+        f.mode = r.u32();
+    }
+    const uint64_t game_size = r.u64();
+    if (!r.ok || static_cast<uint64_t>(r.end - r.at) < game_size) return false;
+    input.put();
+#if defined(NEBULA_HOST_RENDERER)
+    if (dsp_size != 0 && !gAudio->adopt_dsp(reinterpret_cast<const std::byte*>(dsp), dsp_size)) return false;
+    if (gx_size != 0) galaxy::gx::stream_adopt(frame, reinterpret_cast<const std::byte*>(gx), gx_size);
+#endif
+    gMemNand = std::move(nand);
+    gMemNandOnDisk.clear();
+    gMemNandSaved.clear();
+    gModule.snapshot_import(r.at, static_cast<size_t>(game_size));
+    return true;
+}
+
 uint32_t svc_det_boundary(void*, uint32_t frame, uint32_t* arg) {
+    // GALAXY_SNAPSHOT_TEST="<save>,<restore>,1": the game becomes <save>'s live-join image (taken at the boundary
+    // after it) at <restore> instead of restoring <save>.
+    static unsigned test_load = 0;
     static const std::pair<uint32_t, uint32_t> test = [] {
         const char* value = std::getenv("GALAXY_SNAPSHOT_TEST");
         unsigned save = 0, restore = 0;
-        if (value == nullptr || sscanf_s(value, "%u,%u", &save, &restore) != 2 || restore <= save) return std::pair{0u, 0u};
+        if (value == nullptr || sscanf_s(value, "%u,%u,%u", &save, &restore, &test_load) < 2 || restore <= save + 1) {
+            return std::pair{0u, 0u};
+        }
         return std::pair{save, restore};
     }();
     static uint32_t last_saved = 0;
@@ -3050,9 +3291,41 @@ uint32_t svc_det_boundary(void*, uint32_t frame, uint32_t* arg) {
         std::fprintf(stderr, "[rollback] back from frame %u to %u\n", frame, to);
         return static_cast<uint32_t>(NEBULA_DET_RESTORE);
     };
+    // Live join, joiner: the host's game, at its first boundary.
+    if (gLiveJoinWaiting) {
+        gLiveJoinWaiting = false;
+        std::fprintf(stderr, "[netplay] live join: waiting for the host's game\n");
+        uint32_t to = 0;
+        if (!galaxy::net::session().take_state(gLiveImage)) {
+            die("online: the host left before sending its game");
+        }
+        if (!adopt_live_image(gLiveImage, to) || to == 0) {
+            die("online: the host's game does not fit this build");
+        }
+        gSavedSceneFrames.clear();
+        gSavedInputState.clear();
+        last_saved = to;
+        gRetraces.store(to - 1, std::memory_order_release);
+        gRewindFrame.store(to, std::memory_order_release);
+        gRewindPending.store(true, std::memory_order_release);
+        galaxy::net::session().activate(to);
+        std::fprintf(stderr, "[netplay] live join: playing on from frame %u\n", to);
+        *arg = to;
+        return NEBULA_DET_LOAD;
+    }
+    // Live join, host: a joiner shook hands: the session starts at this boundary, kept; its image goes at the next.
+    if (gJoinPending.exchange(false)) {
+        galaxy::net::session().activate(frame);
+        gExportFrame = frame;
+        return save();
+    }
     // Rollback netplay: a confirmed input that differs from the one its frame ran with sends the game back to the
     // boundary before that frame; else every boundary is kept.
     if (galaxy::net::session().active() && galaxy::net::session().settings().rollback != 0) {
+        if (gExportFrame != 0 && gExportFrame != frame) {
+            send_live_image(gExportFrame);
+            gExportFrame = 0;
+        }
         if (const uint32_t granted = gGranted.load(); granted != frame) {
             static uint32_t reported = 0;
             if (reported++ < 20) std::fprintf(stderr, "[rollback] boundary %u while %u granted\n", frame, granted);
@@ -3106,9 +3379,26 @@ uint32_t svc_det_boundary(void*, uint32_t frame, uint32_t* arg) {
     }
     if (test.first != 0) {
         if (frame == test.first && last_saved != frame) return save();
+        if (test_load != 0 && frame == test.first + 1 && gLiveImage.empty()) {
+            gLiveImage = build_live_image(test.first);
+            std::fprintf(stderr, "[rollback] test: the image of frame %u, %.1f MB\n", test.first,
+                         static_cast<double>(gLiveImage.size()) / 1048576.0);
+        }
         if (frame == test.second && !test_restored) {
             test_restored = true;
-            return restore(test.first);
+            if (test_load == 0) return restore(test.first);
+            uint32_t to = 0;
+            if (!adopt_live_image(gLiveImage, to)) die("test: the image does not load");
+            gSavedSceneFrames.clear();
+            gSavedInputState.clear();
+            last_saved = to;
+            gCatchUpTo.store(frame, std::memory_order_release);
+            gRetraces.store(to - 1, std::memory_order_release);
+            gRewindFrame.store(to, std::memory_order_release);
+            gRewindPending.store(true, std::memory_order_release);
+            std::fprintf(stderr, "[rollback] test: becoming frame %u's image at %u\n", to, frame);
+            *arg = to;
+            return NEBULA_DET_LOAD;
         }
     }
     return NEBULA_DET_NONE;
@@ -3665,6 +3955,12 @@ void start_netplay(const fs::path& module) {
         // GALAXY_NET_ROLLBACK=1: rollback (each PC runs ahead on the other's predicted input) instead of lockstep.
         const char* rollback = std::getenv("GALAXY_NET_ROLLBACK");
         settings.rollback = rollback != nullptr && rollback[0] == '1' ? 1u : 0u;
+        // GALAXY_NET_LIVE=1: the game starts at once and the other player may join at any time (with rollback).
+        const char* live = std::getenv("GALAXY_NET_LIVE");
+        if (live != nullptr && live[0] == '1') {
+            settings.live = 1;
+            settings.rollback = 1;
+        }
         // The save, and the Mii database the game reads at boot.
         std::vector<galaxy::net::SaveFile> save;
         for (const fs::path& part : {fs::path(gSaveDataPath.substr(1)), fs::path("shared2/menu/FaceLib")}) {
@@ -3678,8 +3974,21 @@ void start_netplay(const fs::path& module) {
                 save.push_back(std::move(file));
             }
         }
-        if (!galaxy::net::session().host(static_cast<unsigned>(std::strtoul(host_port, nullptr, 10)), build_id, mods,
-                                         settings, save, error)) {
+        const unsigned port = static_cast<unsigned>(std::strtoul(host_port, nullptr, 10));
+        if (settings.live != 0) {
+            gLiveSettings = settings;
+            gNetLive = true;
+            std::thread([port, build_id, mods, settings, save = std::move(save)] {
+                std::string failure;
+                if (galaxy::net::session().host(port, build_id, mods, settings, save, failure)) {
+                    gJoinPending = true;
+                } else {
+                    std::fprintf(stderr, "[netplay] %s\n", failure.c_str());
+                }
+            }).detach();
+            return;
+        }
+        if (!galaxy::net::session().host(port, build_id, mods, settings, save, error)) {
             die("online: %s", error.c_str());
         }
         return;
@@ -3688,6 +3997,11 @@ void start_netplay(const fs::path& module) {
     std::vector<galaxy::net::SaveFile> save;
     if (!galaxy::net::session().join(join_address, build_id, mods, settings, save, error)) {
         die("online: %s", error.c_str());
+    }
+    if (settings.live != 0) {
+        gLiveSettings = settings;
+        gNetLive = true;
+        gLiveJoinWaiting = true;
     }
     if (settings.language != static_cast<uint32_t>(galaxy::game_language_for_boot())) {
         std::fprintf(stderr, "[netplay] the host plays in another language: the game may not stay in step\n");

@@ -3,6 +3,10 @@
    the DOL's .rodata, at the address the RMGxxx symbol maps give, copied in the DOL's byte order. */
 #include <string.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #include <revolution/types.h>
 
 #include <nebula_endian.h>
@@ -183,7 +187,19 @@ void nebula_load_dol_data(void) {
     if (dol == NULL || size < kDolHeaderSize) {
         nebula_fatal("the disc's main.dol is missing or too short (%u bytes)", (unsigned)size);
     }
-    /* Kept (the host holds it for the session): tables read later take their strings from it. */
+    /* Kept (the host holds it for the session): tables read later take their strings from it. Deterministic mode: a
+       copy at one address in every process, as the game's objects keep those pointers (netplay's live join moves
+       the game's memory to the other PC). */
+#if defined(_WIN32)
+    if (nebula_host()->option(nebula_host()->user, NEBULA_OPTION_DETERMINISTIC) != 0) {
+        u8* fixed = (u8*)VirtualAlloc((void*)(uintptr_t)0x7C2000000000ull, size, MEM_RESERVE | MEM_COMMIT,
+                                      PAGE_READWRITE);
+        if (fixed != NULL) {
+            memcpy(fixed, dol, size);
+            dol = fixed;
+        }
+    }
+#endif
     sDol = dol;
     sDolSize = size;
     for (size_t t = 0; t < sizeof(kTables) / sizeof(kTables[0]); t++) {

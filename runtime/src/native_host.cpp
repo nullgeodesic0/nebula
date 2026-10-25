@@ -4604,6 +4604,28 @@ bool NativeGameAudio::restore_dsp(std::uint32_t frame) {
     return true;
 }
 
+static_assert(std::is_trivially_copyable_v<JAudioHostMixer>, "live join sends the DSP state as bytes");
+
+std::vector<std::byte> NativeGameAudio::saved_dsp(std::uint32_t frame) const {
+    for (const auto& [kept, mixer] : state_->saves) {
+        if (kept == frame) {
+            std::vector<std::byte> out(sizeof(JAudioHostMixer));
+            std::memcpy(out.data(), &mixer, sizeof(JAudioHostMixer));
+            return out;
+        }
+    }
+    return {};
+}
+
+bool NativeGameAudio::adopt_dsp(const std::byte* data, std::size_t size) {
+    if (size != sizeof(JAudioHostMixer)) return false;
+    JAudioHostMixer other;
+    std::memcpy(static_cast<void*>(&other), data, sizeof(JAudioHostMixer));
+    state_->mixer.adopt_state(other);
+    state_->saves.clear();
+    return true;
+}
+
 NativeGameAudio::NativeGameAudio() : state_(std::make_unique<State>()) {}
 NativeGameAudio::~NativeGameAudio() = default;
 

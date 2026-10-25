@@ -79,6 +79,9 @@ static NEBULA_HOST_STATE int sOp;            /* 1 save, 2 restore */
 static NEBULA_HOST_STATE uint32_t sOpFrame;
 static NEBULA_HOST_STATE int sResumed;
 static NEBULA_HOST_STATE PVOID sWatched[kMem2Size / kPage];
+static NEBULA_HOST_STATE const uint8_t* sImport; /* live join's image (nebula_game_snapshot_import) */
+static NEBULA_HOST_STATE size_t sImportSize;
+static void* do_load(void);
 
 /* The module's writable sections but the host-shared one. */
 static void find_ranges(void) {
@@ -260,6 +263,9 @@ static void helper_main(void* arg) {
     if (sOp == 1) {
         do_save();
         sResumed = 0;
+    } else if (sOp == 3) {
+        resume = do_load();
+        sResumed = 1;
     } else {
         Slot* target = find_slot(sOpFrame);
         do_restore(target);
@@ -305,6 +311,18 @@ int nebula_snapshot_kept(uint32_t frame) {
     return find_slot(frame) != NULL;
 }
 
+/* Live join: the imported image, from its save point on (does not return). */
+static void nebula_snapshot_load(void) {
+    if (sImport == NULL) {
+        nebula_fatal("live join: no game image");
+    }
+    nebula_det_clear_staged();
+    nebula_gx_drop_unsubmitted();
+    nebula_gx_wait_idle();
+    (void)run_on_helper(3, 0);
+    nebula_fatal("snapshot: the load returned");
+}
+
 void nebula_snapshot_restore(uint32_t frame) {
     if (find_slot(frame) == NULL) {
         nebula_fatal("snapshot: frame %u is no longer kept", frame);
@@ -318,6 +336,120 @@ void nebula_snapshot_restore(uint32_t frame) {
 
 /* At each retrace boundary (det_step): what the host wants done there. A restore resumes an earlier boundary's
    save, where the host is asked again. */
+/* Live join's image (nebula_game_snapshot_export): a header, the module's restorable data, the GX commands written
+   but not submitted, then each page of the game's memory that is not all zero (its shadow offset, its bytes). */
+typedef struct {
+    uint32_t magic;
+    uint32_t frame;
+    uint64_t sp;
+    uint64_t moduleBytes;
+    uint64_t gxPendingSize;
+    uint64_t gxPtr;
+    uint64_t gxEnd;
+    uint32_t pages;
+    uint32_t reserved;
+} ImageHeader;
+enum { kImageMagic = 0x4A4C424Eu }; /* "NBLJ" */
+
+
+static int page_is_zero(const uint8_t* page) {
+    const uint64_t* words = (const uint64_t*)page;
+    for (int i = 0; i < kPage / 8; i++) {
+        if (words[i] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+NEBULA_GAME_API int nebula_game_snapshot_export(uint32_t frame, void (*write)(void* context, const void* data,
+                                                                              size_t size), void* context) {
+    if (!sHaveSave || sSlots[sNewest].frame != frame) {
+        return 0;
+    }
+    const Slot* slot = &sSlots[sNewest];
+    ImageHeader header = {kImageMagic, frame, (uint64_t)(uintptr_t)slot->sp, sModuleBytes, slot->gxPendingSize,
+                          (uint64_t)(uintptr_t)slot->gxPtr, (uint64_t)(uintptr_t)slot->gxEnd, 0, 0};
+    for (size_t at = 0; at < kShadowSize; at += kPage) {
+        header.pages += !page_is_zero(sShadow + at);
+    }
+    write(context, &header, sizeof(header));
+    write(context, slot->module, sModuleBytes);
+    if (slot->gxPendingSize != 0) {
+        write(context, slot->gxPending, slot->gxPendingSize);
+    }
+    for (size_t at = 0; at < kShadowSize; at += kPage) {
+        if (!page_is_zero(sShadow + at)) {
+            const uint32_t offset = (uint32_t)at;
+            write(context, &offset, sizeof(offset));
+            write(context, sShadow + at, kPage);
+        }
+    }
+    return 1;
+}
+
+NEBULA_GAME_API void nebula_game_snapshot_import(const void* image, size_t size) {
+    sImport = (const uint8_t*)image;
+    sImportSize = size;
+}
+
+/* On the helper stack: the game's memory and data become the image's; then on from the image's save point. */
+static void* do_load(void) {
+    const ImageHeader* header = (const ImageHeader*)sImport;
+    if (sImportSize < sizeof(*header) || header->magic != kImageMagic || header->moduleBytes != sModuleBytes) {
+        nebula_fatal("live join: the game image does not fit this build");
+    }
+    const uint8_t* in = sImport + sizeof(*header);
+    for (int i = 0; i < sRangeCount; i++) {
+        memcpy(sRanges[i].base, in, sRanges[i].size);
+        in += sRanges[i].size;
+    }
+    const uint8_t* pending = in;
+    in += header->gxPendingSize;
+    /* Every readable page zero, then the image's pages. */
+    for (int region = 0; region < 2; region++) {
+        for (size_t at = 0; at < region_size(region);) {
+            uint8_t* page = region_base(region) + at;
+            MEMORY_BASIC_INFORMATION info;
+            if (VirtualQuery(page, &info, sizeof(info)) == 0) {
+                break;
+            }
+            size_t run = (size_t)((uint8_t*)info.BaseAddress + info.RegionSize - page);
+            if (run > region_size(region) - at) {
+                run = region_size(region) - at;
+            }
+            if (readable(page)) {
+                memset(page, 0, run);
+            }
+            at += run;
+        }
+    }
+    for (uint32_t i = 0; i < header->pages; i++) {
+        uint32_t offset;
+        memcpy(&offset, in, sizeof(offset));
+        in += sizeof(offset);
+        uint8_t* page = offset < kMem1Size ? region_base(0) + offset : region_base(1) + (offset - kMem1Size);
+        if (offset < kShadowSize && readable(page)) {
+            memcpy(page, in, kPage);
+        }
+        in += kPage;
+    }
+    if ((size_t)(in - sImport) > sImportSize) {
+        nebula_fatal("live join: the game image is cut short");
+    }
+    nebula_gx_restore_pending(pending, (size_t)header->gxPendingSize, (uint8_t*)(uintptr_t)header->gxPtr,
+                              (uint8_t*)(uintptr_t)header->gxEnd);
+    /* Nothing kept yet here: the next save takes the whole memory. */
+    for (int i = 0; i < kSlots; i++) {
+        sSlots[i].used = 0;
+    }
+    sHaveSave = 0;
+    for (int region = 0; region < 2; region++) {
+        (void)changed_pages(region);
+    }
+    return (void*)(uintptr_t)header->sp;
+}
+
 void nebula_snapshot_touch(void* addr, uint32_t size) {
     if (sShadow == NULL || addr == NULL || size == 0) {
         return;
@@ -344,10 +476,26 @@ void nebula_snapshot_boundary(uint32_t frame) {
         if (action == NEBULA_DET_RESTORE) {
             nebula_snapshot_restore(arg);
         }
+        if (action == NEBULA_DET_LOAD) {
+            nebula_snapshot_load();
+        }
         return;
     }
 }
 #else
+NEBULA_GAME_API int nebula_game_snapshot_export(uint32_t frame, void (*write)(void* context, const void* data,
+                                                                              size_t size), void* context) {
+    (void)frame;
+    (void)write;
+    (void)context;
+    return 0;
+}
+
+NEBULA_GAME_API void nebula_game_snapshot_import(const void* image, size_t size) {
+    (void)image;
+    (void)size;
+}
+
 void nebula_snapshot_touch(void* addr, uint32_t size) {
     (void)addr;
     (void)size;

@@ -51,6 +51,14 @@ void stream_rewind(std::uint32_t id) {
     backend().stream_rewind(id);
 }
 
+bool stream_state(std::uint32_t id, std::vector<std::byte>& out) {
+    return backend().stream_state(id, out);
+}
+
+void stream_adopt(std::uint32_t id, const std::byte* data, std::size_t size) {
+    backend().stream_adopt(id, data, size);
+}
+
 bool wait_for_frame_pe_completion_for(
     FramePeCompletionToken token,
     std::uint32_t timeout_ms) {

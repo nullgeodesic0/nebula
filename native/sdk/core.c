@@ -5,7 +5,7 @@
 
 void nebula_game_main(void); /* Game/System/GameSystem.cpp: the game's main */
 
-static const NebulaHostServices* sHost;
+static NEBULA_HOST_STATE const NebulaHostServices* sHost;
 
 const NebulaHostServices* nebula_host(void) {
     return sHost;

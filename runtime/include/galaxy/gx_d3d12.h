@@ -106,6 +106,10 @@ void wait_for_render_idle();
 // commands of the frames it undid never ran. Both apply in stream order, before the next frame's commands.
 void stream_checkpoint(std::uint32_t id);
 void stream_rewind(std::uint32_t id);
+// Netplay's live join: the registers kept under `id` as bytes (after the renderer is idle; false when not kept), and
+// another PC's taken as this one's, kept under `id`, before the next frame's commands.
+bool stream_state(std::uint32_t id, std::vector<std::byte>& out);
+void stream_adopt(std::uint32_t id, const std::byte* data, std::size_t size);
 
 // Waits up to `timeout_ms` for `token`. Returns true and consumes the token on completion, false without
 // consuming it on timeout; a zero timeout polls. A renderer failure, a stale token or a stopped render thread
