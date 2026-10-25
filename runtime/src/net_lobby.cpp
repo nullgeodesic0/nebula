@@ -1,4 +1,5 @@
 #include "galaxy/net_lobby.h"
+#include "galaxy/content_fingerprint.h"
 
 #include "galaxy/coop_guest.h"
 #include "galaxy/netplay.h"
@@ -37,7 +38,8 @@ using Clock = std::chrono::steady_clock;
 // Lobby datagrams: Header, then a text payload (Accept: the rejoin point; Decline: why). Not the session's
 // protocol (netplay_session.cpp), which starts once both PCs have restarted.
 constexpr std::uint32_t kLobbyMagic = 0x4C424E4Eu;  // "NNBL"
-constexpr std::uint8_t kLobbyVersion = 1u;
+// 2: the header carries the content fingerprint (content_fingerprint.h).
+constexpr std::uint8_t kLobbyVersion = 2u;
 enum class Message : std::uint8_t { Ask = 1, Wait = 2, Accept = 3, Decline = 4 };
 
 #pragma pack(push, 1)
@@ -47,6 +49,7 @@ struct Header {
     std::uint8_t version;
     std::uint16_t reserved;
     std::uint64_t build;
+    std::uint64_t content;  // content_fingerprint(): game.pak and the game mods in force
 };
 #pragma pack(pop)
 
@@ -161,7 +164,7 @@ void close_socket(SOCKET& s) {
 void send_message(SOCKET s, const sockaddr_in& to, Message type, std::uint64_t build, const std::string& text = {}) {
     if (s == INVALID_SOCKET) return;
     std::vector<char> packet(sizeof(Header) + std::min<std::size_t>(text.size(), 1024u));
-    const Header header{kLobbyMagic, static_cast<std::uint8_t>(type), kLobbyVersion, 0u, build};
+    const Header header{kLobbyMagic, static_cast<std::uint8_t>(type), kLobbyVersion, 0u, build, content_fingerprint()};
     std::memcpy(packet.data(), &header, sizeof(header));
     std::memcpy(packet.data() + sizeof(header), text.data(), packet.size() - sizeof(header));
     (void)sendto(s, packet.data(), static_cast<int>(packet.size()), 0, reinterpret_cast<const sockaddr*>(&to),
@@ -304,6 +307,17 @@ void step(Lobby& l, std::unique_lock<std::mutex>& lock) {
         if (static_cast<Message>(header.type) != Message::Ask) continue;
         if (header.build != l.build) {
             send_message(l.listen, from, Message::Decline, l.build, "A DIFFERENT BUILD OF NEBULA");
+            continue;
+        }
+        // Different game files or game mods (the custom model or animations) load different data into the game:
+        // the two would drift apart at once. Say which mods this PC plays with.
+        if (header.content != content_fingerprint()) {
+            std::string mods = content_mods();
+            for (char& c : mods) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            send_message(l.listen, from, Message::Decline, l.build,
+                         "DIFFERENT GAME FILES OR MODS: THE HOST PLAYS WITH " + (mods.empty() ? std::string("NO MODS") : mods));
+            std::fprintf(stderr, "[lobby] refused a join: different game files or mods (this PC: %s)\n",
+                         mods.empty() ? "no mods" : mods.c_str());
             continue;
         }
         if (l.asked && (from.sin_addr.s_addr != l.asker.sin_addr.s_addr || from.sin_port != l.asker.sin_port)) {

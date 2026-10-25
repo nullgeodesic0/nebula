@@ -2758,6 +2758,16 @@ void play(Sound sound, float volume) {
 #if defined(_WIN32)
     const auto index = static_cast<std::size_t>(sound);
     if (index >= kSoundNames.size()) return;
+    // Silent copies (test copies run with GALAXY_AUDIO_DISABLE, or GALAXY_MUTE): no sound out of the menus either.
+    static const bool s_muted = [] {
+        for (const char* name : {"GALAXY_AUDIO_DISABLE", "GALAXY_MUTE"}) {
+            char value[8]{};
+            std::size_t length = 0;
+            if (getenv_s(&length, value, sizeof(value), name) == 0 && length > 1u && value[0] != '0') return true;
+        }
+        return false;
+    }();
+    if (s_muted) return;
     const galaxy::RuntimeAudioSettings audio = galaxy::get_runtime_settings().audio;
     const float gain = std::clamp(volume, 0.0f, 4.0f) * std::max(audio.master, 0.0f) * std::max(audio.sfx, 0.0f);
     Player& p = player();

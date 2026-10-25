@@ -341,7 +341,8 @@ add_library(galaxy_runtime_settings STATIC
     runtime/src/input_bindings.cpp
     runtime/src/achievements.cpp
     runtime/src/player_devices.cpp
-    runtime/src/game_menu_probe.cpp)
+    runtime/src/game_menu_probe.cpp
+    runtime/src/content_fingerprint.cpp)
 target_link_libraries(
     galaxy_runtime_settings
     PUBLIC galaxy_runtime_abi galaxy_atomic_file)

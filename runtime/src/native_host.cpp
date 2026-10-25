@@ -12,6 +12,7 @@
 #include "galaxy/button_prompts.h"
 #include "galaxy/controller_hid.h"
 #include "galaxy/coop.h"
+#include "galaxy/content_fingerprint.h"
 #include "galaxy/coop_guest.h"
 #include "galaxy/player_devices.h"
 #include "galaxy/input_bindings.h"
@@ -12979,6 +12980,55 @@ void GuestAddressSpace::open_game_pak(const std::filesystem::path& path) {
                   << static_cast<const void*>(pak_view_) << '\n';
     }
     load_disc_mod_overrides_from_env(path.parent_path());
+    publish_content_fingerprint();
+}
+
+// The content this PC plays (content_fingerprint.h): game.pak's boot block and file table (which name every file's
+// place and size, so another disc revision or dump differs), and every disc mod override in force, byte for byte.
+void GuestAddressSpace::publish_content_fingerprint() {
+    std::uint64_t hash = 1469598103934665603ull;
+    const auto mix = [&hash](const std::byte* bytes, std::size_t size) {
+        for (std::size_t i = 0; i < size; ++i) {
+            hash = (hash ^ static_cast<std::uint8_t>(bytes[i])) * 1099511628211ull;
+        }
+    };
+    const auto mix_u64 = [&](std::uint64_t value) {
+        std::byte bytes[8];
+        std::memcpy(bytes, &value, sizeof(bytes));
+        mix(bytes, sizeof(bytes));
+    };
+    if (pak_view_ != nullptr && pak_size_ >= 0x440u) {
+        mix(pak_view_, 0x440u);
+        const auto be32 = [this](std::size_t at) {
+            return (static_cast<std::uint32_t>(pak_view_[at]) << 24u) |
+                   (static_cast<std::uint32_t>(pak_view_[at + 1u]) << 16u) |
+                   (static_cast<std::uint32_t>(pak_view_[at + 2u]) << 8u) | static_cast<std::uint32_t>(pak_view_[at + 3u]);
+        };
+        const std::uint64_t table = static_cast<std::uint64_t>(be32(0x424u)) << 2u;
+        const std::uint64_t table_size = static_cast<std::uint64_t>(be32(0x428u)) << 2u;
+        if (table + table_size <= pak_size_ && table_size < (64u << 20u)) {
+            mix(pak_view_ + table, static_cast<std::size_t>(table_size));
+        }
+        mix_u64(pak_size_);
+    }
+    std::string mods;
+    std::filesystem::path last_source;
+    for (const DiscOverride& entry : disc_overrides_) {
+        mix_u64(entry.disc_offset);
+        mix_u64(entry.bytes.size());
+        mix(entry.bytes.data(), entry.bytes.size());
+        // The mod's folder name (mods/<name>/manifest.txt, or mods/animation-packs).
+        const std::filesystem::path folder =
+            entry.source_path.has_extension() ? entry.source_path.parent_path() : entry.source_path;
+        if (folder != last_source) {
+            last_source = folder;
+            const std::string name = folder.filename().string();
+            if (mods.find(name) == std::string::npos) mods += (mods.empty() ? "" : ", ") + name;
+        }
+    }
+    galaxy::set_content_fingerprint(hash, mods);
+    std::cerr << "[mods] content fingerprint " << std::hex << hash << std::dec
+              << (mods.empty() ? std::string(" (no game mods)") : " (" + mods + ")") << '\n';
 }
 
 void GuestAddressSpace::apply_disc_overrides(

@@ -1448,6 +1448,8 @@ private:
         bool ioctlv{};
     };
     void load_disc_mod_overrides_from_env(const std::filesystem::path& content_root);
+    // The content this PC plays, for the online handshake (content_fingerprint.h).
+    void publish_content_fingerprint();
     // Adds one manifest's overrides; overrides from every manifest loaded must not overlap.
     void load_disc_mod_manifest(const std::filesystem::path& manifest_file);
     [[nodiscard]] bool disc_read_in_range(
