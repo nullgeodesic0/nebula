@@ -72,9 +72,10 @@ Both PCs must run the same build and content (a mismatched build is refused).
   span several VI frames, and audio must play at the rate it is made.
 - **Session start**: the host snapshots its save directory (every file and directory with its NAND metadata
   stream) and its game settings (co-op, moveset options, text speed, language, custom model/voice/animations,
-  audio gains) when it starts. The joiner downloads that bundle before its game reads its save and plays from
+  audio gains) when it starts, and its clock start (guest_clock.h: the time base counts from the PC's local date,
+  which dates the saves). The joiner downloads that bundle before its game reads its save and plays from
   `%LOCALAPPDATA%\Nebula\netplay\<host>\` (the rejoin cache; the joiner's own saves are never touched), with its
-  own controls.
+  own controls and the host's clock. A live joiner takes the clock with the snapshot's registers.
 - **Desync check**: MEM1 hashes every 120 frames; a mismatch is logged as `[net] DESYNC`.
 - The host's window size never reaches the game (the dynamic aspect is off in deterministic mode).
 

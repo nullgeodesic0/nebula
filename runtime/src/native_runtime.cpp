@@ -1,6 +1,7 @@
 #include "galaxy/native_api.h"
 #include "galaxy/crash_notes.h"
 #include "galaxy/output_relay.h"
+#include "galaxy/guest_clock.h"
 #include "galaxy/netplay.h"
 #include "galaxy/netplay_session.h"
 #include "nebula_build_identity.h"
@@ -36069,6 +36070,10 @@ int wmain(int argc, wchar_t** argv) {
               << (state.module_checkpoint_gate != nullptr ? 1 : 0) << '\n';
 
     galaxy::PpcContext context{};
+    // The time base starts at the PC's date (guest_clock.h); a joiner's is the host's, taken while the session
+    // starts.
+    (void)galaxy::net_session_requested();
+    context.time_base_offset = galaxy::guest_clock_start_ticks();
     const CrashGuestContextScope crash_guest_context(&context);
     try {
         // D3D12 window

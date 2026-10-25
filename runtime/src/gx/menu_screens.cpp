@@ -526,6 +526,10 @@ std::u16string sentence(std::u16string_view words) {
         out.push_back(d);
     }
     if (!out.empty() && out.back() != u'.' && out.back() != u'!' && out.back() != u'?') out.push_back(u'.');
+    // The name keeps its capital ("A different build of Nebula.").
+    for (std::size_t at = out.find(u"nebula"); at != std::u16string::npos; at = out.find(u"nebula", at + 1u)) {
+        out[at] = u'N';
+    }
     return out;
 }
 
@@ -742,7 +746,9 @@ void Screens::online_cards(const ScreensInput& in, const Assets& assets, const S
         // A live host's joiner left: it plays on alone, Joinable again.
         session_ended_until_ = in.seconds + 4.0;
     }
-    if (o.phase == OnlinePhase::Outcome && in.seconds < lobby_card_until_ && !online_open_) {
+    // An outcome shows over the Online window too: a joiner asks from it, and a refusal ("A different build of
+    // Nebula") must reach him.
+    if (o.phase == OnlinePhase::Outcome && in.seconds < lobby_card_until_) {
         show = OnlinePhase::Outcome;
         words[0] = sentence(o.outcome);
     } else if (in.seconds < session_ended_until_ && show == OnlinePhase::Unavailable) {
@@ -763,8 +769,14 @@ void Screens::online_cards(const ScreensInput& in, const Assets& assets, const S
     if (!lobby_card_anim_.visible()) return;
     const float alpha = lobby_card_anim_.alpha();
     const float x = lobby_card_anim_.slide_x();
-    const float y = 110.0f;
-    const TextStyle style = body_text(0.9f);
+    // Above the Online window (300 high, centred) when it is up.
+    const float y = online_anim_.visible() ? 188.0f : 110.0f;
+    TextStyle style = body_text(0.9f);
+    // A long refusal (the host's mods) narrows to fit the picture.
+    const float room = in.extent_x * 2.0f - 96.0f;
+    if (const float wide = text_width(assets, style, lobby_card_words_[0]); wide > room) {
+        style = body_text(0.9f * room / wide);
+    }
     const bool prompt = lobby_card_phase_ == OnlinePhase::AskedToJoin;
     const float width = text_width(assets, style, lobby_card_words_[0]) + 64.0f;
     const float height = prompt ? 96.0f : 64.0f;

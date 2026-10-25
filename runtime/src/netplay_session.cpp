@@ -2,6 +2,7 @@
 
 #include "galaxy/coop.h"
 #include "galaxy/coop_guest.h"
+#include "galaxy/guest_clock.h"
 #include "galaxy/gx_d3d12.h"
 #include "galaxy/net_lobby.h"
 #include "galaxy/netplay.h"
@@ -448,7 +449,8 @@ bool write_all(const std::filesystem::path& path, const std::uint8_t* data, std:
 
 // Bundle: u32 entry count, per entry (u32 kind: 0 directory, 1 file; u32 path length, path in UTF-8 relative to the
 // save directory, "" for the directory itself; a file: u32 size and its bytes; u32 metadata size and the entry's
-// NAND metadata stream), then u32 settings length and the host's game settings lines. Directories come before
+// NAND metadata stream), then u32 settings length and the host's game settings lines, then the host's clock start
+// (guest_clock.h) as two u32s, high first. Directories come before
 // what they hold. The emulated NAND keeps each entry's owner, permissions and a check in that stream; without it
 // the joiner's NAND layer would rebuild the save as damaged.
 std::vector<std::uint8_t> build_bundle() {
@@ -491,6 +493,9 @@ std::vector<std::uint8_t> build_bundle() {
     }
     put_u32(out, static_cast<std::uint32_t>(settings.size()));
     out.insert(out.end(), settings.begin(), settings.end());
+    const std::uint64_t clock = guest_clock_start_ticks();
+    put_u32(out, static_cast<std::uint32_t>(clock >> 32u));
+    put_u32(out, static_cast<std::uint32_t>(clock));
     std::fprintf(stderr, "[net] session bundle: %zu save files from %s, %zu bytes\n", files,
                  to_utf8(root).c_str(), out.size());
     return out;
@@ -1051,6 +1056,11 @@ void join_session(Session& s, const std::string& host_label) {
     const std::uint32_t settings_length = get_u32(s.bundle, at);
     if (at + settings_length > s.bundle.size()) throw std::runtime_error("truncated session bundle");
     const std::string host_settings(reinterpret_cast<const char*>(s.bundle.data() + at), settings_length);
+    at += settings_length;
+    if (at + 8u <= s.bundle.size()) {
+        const std::uint64_t high = get_u32(s.bundle, at);
+        set_guest_clock_start_ticks(high << 32u | get_u32(s.bundle, at));
+    }
     std::string merged;
     for (const std::string& line : read_lines(settings_file())) {
         if (!is_host_setting(line)) merged += line + "\n";
