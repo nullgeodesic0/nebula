@@ -12,6 +12,59 @@ Nebula contains no Nintendo code or assets; you need your own copy of the game.
 
 Not affiliated with or endorsed by Nintendo.
 
+## Setting up multiplayer (Nebula Plus)
+
+This fork's **Nebula Plus** adds Mario and Luigi co-op: on one PC with split screen, and online between two PCs.
+
+**1. Install.** You need Windows 10 or 11 (64-bit), a graphics card with Direct3D 12, about 16 GB free and **your
+own dump of the Super Mario Galaxy USA disc** (RMGE01, the original release) as ISO, WBFS, RVZ or an extracted
+folder. Nothing from Nintendo is included or downloaded.
+
+- Download `NebulaPlus.exe` from the [latest release](https://github.com/nullgeodesic0/nebula/releases/latest) and
+  run it (if Windows SmartScreen warns about an unknown app: More info > Run anyway).
+- Choose a folder (default `C:\NebulaPlus`) and your disc image and press **Install**. Nebula does not need to be
+  installed first. The first install downloads the compiler toolchain (about 400 MB; accept the Microsoft C++ Build
+  Tools license when asked) and builds the game from your disc: a few minutes on a fast PC, 10-20 on an older one.
+
+**2. The multiplayer build.** Nebula Plus *is* the multiplayer build: co-op and online play are always installed, and
+one player is the default. The install folder has `Play Nebula Plus.cmd` (the game), `Host online game.cmd`,
+`Join online game.cmd`, `Check for updates.cmd` and `Nebula Plus.cmd` (the Nebula Plus window).
+
+**3. Local co-op (one PC).** Start `Play Nebula Plus.cmd` and load a save. Plug in a second controller and press its
+**Start** (+ on the Wii layout, Menu on Xbox, Options on DualSense) to drop in as Luigi; the screen splits when the
+brothers part. Hold − for a second to drop out. To choose who plays with which device (keyboard and mouse or a
+controller; Mario, Luigi or off), open the pause menu: the **Players** panel beside it moves each device between the
+seats. On the save select, **Options > Two players** starts every level with both brothers.
+
+**4. Online, hosting.**
+- Run `Host online game.cmd` (or in the game: F1 > ONLINE > JOINABLE: ON, which lets a friend drop in while you play).
+- On your router, forward **UDP port 7777** to this PC, and allow `NebulaRuntime.exe` through Windows Firewall
+  (Windows asks the first time: allow it on private and public networks, or add a rule for UDP 7777).
+- Give your friend your **public IP address** (search "what is my IP" in a browser). On the same home network, use
+  this PC's local address instead.
+
+**5. Online, joining.** Run `Join online game.cmd` and type the host's address (`1.2.3.4`, or `1.2.3.4:port` if they
+use another port), or in the game: F1 > ONLINE, the Join row, type the address and press Enter. You play Luigi in the
+host's save; your own saves are not touched.
+
+**6. Same version, same mods.** Both PCs need the same Nebula Plus version and the same mods. Turn **CUSTOM MODEL**
+and **CUSTOM ANIMATIONS** (F1 > GENERAL) off unless both players built the identical packs, or the two games will
+drift apart. **CUSTOM VOICE** is only sound and is safe to leave on.
+
+**7. Updating.** `Check for updates.cmd` installs the newest release and keeps your saves and settings; the previous
+version stays for rollback. Update both PCs: an older and a newer version cannot play together.
+
+**8. Troubleshooting.**
+- The friend cannot connect: check the router forwards **UDP** 7777 (not TCP) to the host's current local address,
+  that Windows Firewall allows `NebulaRuntime.exe`, and that the joiner uses the host's public address (or local
+  address on the same network).
+- Wrong port: if the host starts `Host online game.cmd 7800`, the joiner types `address:7800`, and that port is the
+  one forwarded.
+- "Different build" or the join is refused: both PCs must run the same Nebula Plus version (both `Check for
+  updates.cmd`) with the same mods on.
+- The two games drift apart: turn off CUSTOM MODEL and CUSTOM ANIMATIONS on both, or build identical packs.
+- Logs for a bug report: `data\logs` in the Nebula Plus folder.
+
 ## Project status
 
 Nebula is a work in progress. The game is playable from the start, but some areas run below
