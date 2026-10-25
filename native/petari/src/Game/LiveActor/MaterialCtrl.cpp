@@ -3,6 +3,14 @@
 #include "Game/Util.hpp"
 #include <JSystem/J3DGraphBase/J3DMaterial.hpp>
 #include <JSystem/J3DGraphBase/J3DTexture.hpp>
+#ifdef TARGET_PC
+#include <cstring>
+
+namespace {
+    Mtx44 sLastEffectMtx;
+    bool sHasLastEffectMtx = false;
+}  // namespace
+#endif
 
 char MirrorReflectionMtxSetter::sMirrorTextureName[] = "MirrorTex";
 
@@ -110,7 +118,17 @@ void ViewProjmapEffectMtxSetter::update() {
     for (s32 i = 0; i < mNumMatricies; i++) {
         mMatricies[i]->setEffectMtx(projection);
     }
+#ifdef TARGET_PC
+    memcpy(sLastEffectMtx, &projection[0][0], sizeof(Mtx44));
+    sHasLastEffectMtx = true;
+#endif
 }
+
+#ifdef TARGET_PC
+const Mtx44* ViewProjmapEffectMtxSetter::getLastEffectMtx() {
+    return sHasLastEffectMtx ? &sLastEffectMtx : nullptr;
+}
+#endif
 
 ProjmapEffectMtxSetter::ProjmapEffectMtxSetter(J3DModel* pModel, const ResourceHolder* pResourceHolder)
     : MaterialCtrl(nullptr, nullptr), mUpdatingMtxInfo(), mNumUpdatingMtx(), mModel(pModel) {

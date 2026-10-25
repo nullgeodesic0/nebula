@@ -8,6 +8,7 @@
 #include "Game/NameObj/NameObjHolder.hpp"
 #include "Game/System/GameSystemSceneController.hpp"
 #include "Game/LiveActor/HitSensor.hpp"
+#include "Game/LiveActor/MaterialCtrl.hpp"
 #include "Game/Player/MarioHolder.hpp"
 #include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/Scene/GameSceneFunction.hpp"
@@ -275,6 +276,27 @@ namespace {
         const coop::Array< float, 3 > plane = sState.mLayout.plane(second, MR::getFrameBufferWidth(),
                                                                    MR::getFrameBufferHeight());
         __NebulaGXSplitClip(&plane[0], second ? 2 : 1, nullptr);
+    }
+
+    // A projection as a view projection map's effect matrix, as ViewProjmapEffectMtxSetter::update makes it.
+    void viewProjmap(const float* pProjection, Mtx44 out) {
+        memcpy(out, pProjection, sizeof(Mtx44));
+        out[2][0] = 0.0f;
+        out[2][1] = 0.0f;
+        out[2][2] = -1.0f;
+        out[2][3] = 0.0f;
+        out[3][0] = 0.0f;
+        out[3][1] = 0.0f;
+        out[3][2] = 0.0f;
+        out[3][3] = 1.0f;
+    }
+
+    // The texture matrices that map the screen (the screen capture's refraction: Honeyhive's waterfall) for the
+    // half about to draw: made with its projection (the game camera's in the material, J3DLoadSplitProjmap).
+    void sendSplitProjmap(const CameraContext* pContext) {
+        Mtx44 half;
+        viewProjmap(reinterpret_cast< const float* >(&pContext->mProjection), half);
+        J3DSetSplitProjmap(ViewProjmapEffectMtxSetter::getLastEffectMtx(), &half);
     }
 
     // The game's own fall (a miss): the player's game-over nerves, set when he runs out of life, falls into
@@ -791,6 +813,7 @@ namespace NebulaCoop {
             SceneFunction::executeCalcViewAndEntryList();
         }
         setHalfProjection(pContext, false);
+        sendSplitProjmap(pContext);
         sendSplitClip(false);
         return true;
     }
@@ -804,6 +827,7 @@ namespace NebulaCoop {
                                                   : coop::blend_cameras(sState.mGameCamera, sState.mFollowView,
                                                                         sState.mSplit.eased()));
         setHalfProjection(pContext, true);
+        sendSplitProjmap(pContext);
         MR::loadViewMtx();
         SceneFunction::executeCalcViewAndEntryList();
         sendSplitClip(true);
@@ -819,6 +843,7 @@ namespace NebulaCoop {
         __NebulaGXSplitClip(none, 0, separator);
         writeCamera(pContext, sState.mGameCamera);
         memcpy(&pContext->mProjection, &sState.mGameProjection[0], sizeof(float) * 16);
+        J3DSetSplitProjmap(nullptr, nullptr);
         MR::loadViewMtx();
         sState.mPass = 0;
         MR::setDefaultViewportAndScissor();

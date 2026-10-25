@@ -48,6 +48,12 @@ public:
 
     virtual void update() override;
 
+#ifdef TARGET_PC
+    // The effect matrix the setters last gave their matrices (the camera's), so Nebula's co-op split screen knows
+    // them (J3DSetSplitProjmap); null before any.
+    static const Mtx44* getLastEffectMtx();
+#endif
+
     /* 0x0C */ J3DTexMtxInfo** mMatricies;
     /* 0x10 */ s32 mNumMatricies;
 };

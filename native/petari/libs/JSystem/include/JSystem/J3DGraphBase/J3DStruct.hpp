@@ -176,6 +176,17 @@ struct J3DTexMtxInfo {
     /* 0x24 */ Mtx44 mEffectMtx;
 };
 
+#ifdef TARGET_PC
+// Nebula's co-op split screen (NebulaCoop.cpp): while a half is drawn with its own projection, a texture matrix whose
+// effect matrix is the camera's view projection map (ViewProjmapEffectMtxSetter: the screen capture's refraction and
+// the like) maps through the half's instead (`to`); null when no half is being drawn.
+void J3DSetSplitProjmap(const Mtx44* pFrom, const Mtx44* pTo);
+class J3DMaterial;
+class J3DModel;
+// While a half draws: the material's view projection maps loaded for the half, after the packet's display list.
+void J3DLoadSplitProjmap(J3DMaterial* pMaterial, J3DModel* pModel);
+#endif
+
 class J3DLightInfo {
 public:
     /* 0x00 */ Vec mLightPosition;

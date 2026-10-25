@@ -179,6 +179,9 @@ void J3DMatPacket::draw() {
         if (packet->getDisplayListObj() != NULL) {
             packet->getDisplayListObj()->callDL();
         }
+#ifdef TARGET_PC
+        J3DLoadSplitProjmap(mpMaterial, packet->getModel());
+#endif
 
         packet->drawFast();
         packet = (J3DShapePacket*)packet->getNextPacket();
@@ -334,6 +337,9 @@ void J3DShapePacket::draw() {
         if (mpDisplayListObj != NULL) {
             mpDisplayListObj->callDL();
         }
+#ifdef TARGET_PC
+        J3DLoadSplitProjmap(mpShape->getMaterial(), mpModel);
+#endif
 
         mpShape->draw();
     }

@@ -9,6 +9,79 @@
 static void J3DGDLoadTexMtxImm(f32 (*)[4], u32, GXTexMtxType);
 static void J3DGDLoadPostTexMtxImm(f32 (*)[4], u32);
 
+#ifdef TARGET_PC
+#include "JSystem/J3DGraphAnimator/J3DJoint.hpp"
+#include "JSystem/J3DGraphAnimator/J3DModel.hpp"
+#include "JSystem/J3DGraphBase/J3DMaterial.hpp"
+#include <cstring>
+
+namespace {
+    bool sSplitProjmap = false;
+    Mtx44 sSplitProjmapFrom;
+    Mtx44 sSplitProjmapTo;
+
+    bool isSplitProjmap(const J3DTexMtxInfo& rInfo) {
+        return sSplitProjmap && memcmp(rInfo.mEffectMtx, sSplitProjmapFrom, sizeof(Mtx44)) == 0;
+    }
+
+    // The effect matrix a texture matrix projects through: the split half's for the camera's view projection map.
+    f32 (*effectMtx(J3DTexMtxInfo& rInfo))[4] {
+        return isSplitProjmap(rInfo) ? sSplitProjmapTo : rInfo.mEffectMtx;
+    }
+}  // namespace
+
+void J3DSetSplitProjmap(const Mtx44* pFrom, const Mtx44* pTo) {
+    sSplitProjmap = pFrom != nullptr && pTo != nullptr;
+    if (sSplitProjmap) {
+        memcpy(sSplitProjmapFrom, *pFrom, sizeof(Mtx44));
+        memcpy(sSplitProjmapTo, *pTo, sizeof(Mtx44));
+    }
+}
+
+// The display list has a material's texture matrices once a frame (diff, at calcAnim), made with the game camera:
+// while a split half draws, its view projection maps are loaded again after it, made with the half's view and
+// projection. The material's own matrix is put back after (the game's memory as it was).
+void J3DLoadSplitProjmap(J3DMaterial* pMaterial, J3DModel* pModel) {
+    if (!sSplitProjmap || pMaterial == nullptr || pModel == nullptr) {
+        return;
+    }
+    J3DTexGenBlock* pBlock = pMaterial->getTexGenBlock();
+    const bool post = pModel->getModelData()->checkFlag(0x20);  // J3DModelData::syncJ3DSysFlags: post texture matrices
+    for (u32 i = 0; i < 8; i++) {
+        J3DTexMtx* pTexMtx = pBlock->getTexMtx(i);
+        if (pTexMtx == nullptr) {
+            continue;
+        }
+        const u32 mode = pTexMtx->getTexMtxInfo().mInfo & 0x3f;
+        if ((mode != J3DTexMtxMode_ViewProjmap && mode != J3DTexMtxMode_ViewProjmapBasic) ||
+            !isSplitProjmap(pTexMtx->getTexMtxInfo())) {
+            continue;
+        }
+        Mtx kept;
+        PSMTXCopy(pTexMtx->getMtx(), kept);
+        if (post) {
+            // The position matrix brings the view; the post matrix maps it to the screen.
+            pTexMtx->calcPostTexMtx(j3dDefaultMtx);
+            GXLoadTexMtxImm(pTexMtx->getMtx(), GX_PTTEXMTX0 + i * 3, GX_MTX3x4);
+        } else {
+            Mtx viewModel;
+            if (j3dSys.checkFlag(4) == 0) {
+                PSMTXConcat(j3dSys.getViewMtx(), pModel->getAnmMtx(pMaterial->getJoint()->getJntNo()), viewModel);
+            } else {
+                PSMTXCopy(j3dSys.getViewMtx(), viewModel);
+            }
+            pTexMtx->calc(viewModel);
+            GXLoadTexMtxImm(pTexMtx->getMtx(), GX_TEXMTX0 + i * 3,
+                            static_cast< GXTexMtxType >(pTexMtx->getTexMtxInfo().mProjection));
+        }
+        PSMTXCopy(kept, pTexMtx->getMtx());
+    }
+}
+#define J3D_EFFECT_MTX effectMtx(mTexMtxInfo)
+#else
+#define J3D_EFFECT_MTX mTexMtxInfo.mEffectMtx
+#endif
+
 void J3DLightObj::load(u32 lightIdx) const {
     GDOverflowCheck(0x48);
     J3DGDSetLightPos(GXLightID(1 << lightIdx), mInfo.mLightPosition.x, mInfo.mLightPosition.y, mInfo.mLightPosition.z);
@@ -81,7 +154,7 @@ void J3DTexMtx::calcTexMtx(const Mtx param_0) {
             J3DGetTextureMtxMaya(mTexMtxInfo.mSRT, mtx2);
         }
         PSMTXConcat(mtx2, qMtx, mtx2);
-        J3DMtxProjConcat(mtx2, mTexMtxInfo.mEffectMtx, mtx1);
+        J3DMtxProjConcat(mtx2, J3D_EFFECT_MTX, mtx1);
         PSMTXConcat(mtx1, param_0, mMtx);
         break;
     case 7:
@@ -100,7 +173,7 @@ void J3DTexMtx::calcTexMtx(const Mtx param_0) {
             J3DGetTextureMtxMayaOld(mTexMtxInfo.mSRT, mtx2);
         }
         PSMTXConcat(mtx2, qMtx2, mtx2);
-        J3DMtxProjConcat(mtx2, mTexMtxInfo.mEffectMtx, mtx1);
+        J3DMtxProjConcat(mtx2, J3D_EFFECT_MTX, mtx1);
         PSMTXConcat(mtx1, param_0, mMtx);
         break;
     case 6:
@@ -128,7 +201,7 @@ void J3DTexMtx::calcTexMtx(const Mtx param_0) {
         } else if (r30 == 1) {
             J3DGetTextureMtxMayaOld(mTexMtxInfo.mSRT, mtx2);
         }
-        J3DMtxProjConcat(mtx2, mTexMtxInfo.mEffectMtx, mtx1);
+        J3DMtxProjConcat(mtx2, J3D_EFFECT_MTX, mtx1);
         PSMTXConcat(mtx1, param_0, mMtx);
         break;
     case 4:
@@ -137,7 +210,7 @@ void J3DTexMtx::calcTexMtx(const Mtx param_0) {
         } else if (r30 == 1) {
             J3DGetTextureMtxMayaOld(mTexMtxInfo.mSRT, mtx2);
         }
-        J3DMtxProjConcat(mtx2, mTexMtxInfo.mEffectMtx, mMtx);
+        J3DMtxProjConcat(mtx2, J3D_EFFECT_MTX, mMtx);
         break;
     default:
         if (r30 == 0) {
@@ -171,7 +244,7 @@ void J3DTexMtx::calcPostTexMtx(const Mtx param_0) {
             J3DGetTextureMtxMaya(mTexMtxInfo.mSRT, mtx2);
         }
         PSMTXConcat(mtx2, qMtx, mtx2);
-        J3DMtxProjConcat(mtx2, mTexMtxInfo.mEffectMtx, mtx1);
+        J3DMtxProjConcat(mtx2, J3D_EFFECT_MTX, mtx1);
         PSMTXConcat(mtx1, param_0, mMtx);
         break;
     case 9:
@@ -181,7 +254,7 @@ void J3DTexMtx::calcPostTexMtx(const Mtx param_0) {
             J3DGetTextureMtxMaya(mTexMtxInfo.mSRT, mtx2);
         }
         PSMTXConcat(mtx2, qMtx, mtx2);
-        J3DMtxProjConcat(mtx2, mTexMtxInfo.mEffectMtx, mMtx);
+        J3DMtxProjConcat(mtx2, J3D_EFFECT_MTX, mMtx);
         break;
     case 7:
         if (r30 == 0) {
@@ -198,7 +271,7 @@ void J3DTexMtx::calcPostTexMtx(const Mtx param_0) {
             J3DGetTextureMtxMayaOld(mTexMtxInfo.mSRT, mtx2);
         }
         PSMTXConcat(mtx2, qMtx2, mtx2);
-        J3DMtxProjConcat(mtx2, mTexMtxInfo.mEffectMtx, mtx1);
+        J3DMtxProjConcat(mtx2, J3D_EFFECT_MTX, mtx1);
         PSMTXConcat(mtx1, param_0, mMtx);
         break;
     case 6:
@@ -223,7 +296,7 @@ void J3DTexMtx::calcPostTexMtx(const Mtx param_0) {
         } else if (r30 == 1) {
             J3DGetTextureMtxMayaOld(mTexMtxInfo.mSRT, mtx2);
         }
-        J3DMtxProjConcat(mtx2, mTexMtxInfo.mEffectMtx, mtx1);
+        J3DMtxProjConcat(mtx2, J3D_EFFECT_MTX, mtx1);
         PSMTXConcat(mtx1, param_0, mMtx);
         break;
     case 3:
@@ -232,7 +305,7 @@ void J3DTexMtx::calcPostTexMtx(const Mtx param_0) {
         } else if (r30 == 1) {
             J3DGetTextureMtxMayaOld(mTexMtxInfo.mSRT, mtx2);
         }
-        J3DMtxProjConcat(mtx2, mTexMtxInfo.mEffectMtx, mMtx);
+        J3DMtxProjConcat(mtx2, J3D_EFFECT_MTX, mMtx);
         break;
     case 4:
         if (r30 == 0) {
@@ -240,7 +313,7 @@ void J3DTexMtx::calcPostTexMtx(const Mtx param_0) {
         } else if (r30 == 1) {
             J3DGetTextureMtxMayaOld(mTexMtxInfo.mSRT, mtx2);
         }
-        J3DMtxProjConcat(mtx2, mTexMtxInfo.mEffectMtx, mMtx);
+        J3DMtxProjConcat(mtx2, J3D_EFFECT_MTX, mMtx);
         break;
     default:
         if (r30 == 0) {

@@ -58,6 +58,9 @@ void DrawBufferShapeDrawer::draw() const {
             if (packet->mpDisplayListObj != nullptr) {
                 packet->mpDisplayListObj->callDL();
             }
+#ifdef TARGET_PC
+            J3DLoadSplitProjmap(packet->mpShape->getMaterial(), packet->getModel());
+#endif
             packet->drawFast();
         }
     }
