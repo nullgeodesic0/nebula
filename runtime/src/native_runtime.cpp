@@ -24937,6 +24937,11 @@ void load_anim_neutral_joints(RuntimeState& state, const std::filesystem::path& 
     if (!galaxy::running_custom_model(model) || !model) {
         return;
     }
+    // The setting is on by default; only a custom model that is actually there brings its own face and hands.
+    std::error_code missing;
+    if (!std::filesystem::exists(content_root / L"mods" / L"model" / L"manifest.txt", missing)) {
+        return;
+    }
     state.hide_mario_parts_on_normal_body = true;
     std::ifstream file(content_root / L"mods" / L"model" / L"neutral_joints.txt");
     std::string line;
