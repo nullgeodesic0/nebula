@@ -25,8 +25,8 @@ table (`luigi_swap.txt`) is not read yet.
 
 ```
 py -3 -m pip install numpy matplotlib
-py -3 tools/animations/build_animation_mod.py --blend "C:\path\to\file.blend" --content C:\nb\build\content
-py -3 tools/animations/preview.py --blend "C:\path\to\file.blend" --content C:\nb\build\content --out sheet.png
+py -3 tools/animations/build_animation_mod.py --blend "C:\path\to\file.blend" --content C:\path\to\content
+py -3 tools/animations/preview.py --blend "C:\path\to\file.blend" --content C:\path\to\content --out sheet.png
 ```
 
 The build takes a few seconds and writes `<content>\mods\animations`:
@@ -63,7 +63,7 @@ The build takes a few seconds and writes `<content>\mods\animations`:
 ## Custom model
 
 ```
-py -3 tools/animations/build_model_mod.py --dae C:\path\to\mario.dae --content C:\nb\build\content
+py -3 tools/animations/build_model_mod.py --dae C:\path\to\mario.dae --content C:\path\to\content
 py -3 tools/animations/render_model.py <built mario.bdl> out.png
 ```
 

@@ -2,7 +2,7 @@
 player rig, with its textures), with real face and finger joints.
 
     py -3 tools/animations/build_odyssey_model_mod.py --blend C:/path/mario-model-FK.blend
-        --textures C:/path/textures --anim-blend "C:/path/64  24.blend" --content C:/nb/content-anim
+        --textures C:/path/textures --anim-blend "C:/path/64  24.blend" --content C:/path/to/content
 
 The model is scaled onto Galaxy Mario's rest skeleton (both are T-poses). Body bones fold onto Galaxy's 30
 joints as before; the face bones (brows, cheeks, eyelids, lips, jaw, mouth corners, mustache, nose, tongue,

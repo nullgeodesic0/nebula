@@ -109,12 +109,31 @@ namespace Nebula.Plus
             var candidates = new List<KeyValuePair<string, string[]>>();
             string venv = Path.Combine(layout.Python, "Scripts", "python.exe");
             if (File.Exists(venv)) candidates.Add(new KeyValuePair<string, string[]>(venv, new string[0]));
-            foreach (var py in new[] { Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "py.exe"),
-                Path.Combine(NebulaPaths.LocalAppData, "Programs", "Python", "Launcher", "py.exe"), Which("py.exe") })
-                if (py != null && File.Exists(py)) { candidates.Add(new KeyValuePair<string, string[]>(py, new[] { "-3" })); break; }
+            // Installed interpreters only, newest first. Never the py launcher or the Python install manager's aliases:
+            // the install manager downloads and installs a new Python when asked for one it lacks.
+            var installed = new List<string>();
+            string local = NebulaPaths.LocalAppData;
+            foreach (var pattern in new[]
+            {
+                Path.Combine(local, "Python"), Path.Combine(local, "Programs", "Python"),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)
+            })
+            {
+                if (!Directory.Exists(pattern)) continue;
+                foreach (var dir in Directory.GetDirectories(pattern))
+                {
+                    string name = Path.GetFileName(dir);
+                    if (!name.StartsWith("python", StringComparison.OrdinalIgnoreCase)) continue;
+                    string exe = Path.Combine(dir, "python.exe");
+                    if (File.Exists(exe)) installed.Add(exe);
+                }
+            }
+            installed.Sort((a, b) => -VersionOf(a).CompareTo(VersionOf(b)));
+            foreach (var exe in installed) candidates.Add(new KeyValuePair<string, string[]>(exe, new string[0]));
             string python = Which("python.exe");
-            // The Microsoft Store alias opens the Store instead of running anything.
-            if (python != null && python.IndexOf("WindowsApps", StringComparison.OrdinalIgnoreCase) < 0)
+            // The Microsoft Store alias opens the Store; the install manager's bin\python.exe may install a Python.
+            if (python != null && python.IndexOf("WindowsApps", StringComparison.OrdinalIgnoreCase) < 0 &&
+                !File.Exists(python + ".__target__") && !installed.Contains(python, StringComparer.OrdinalIgnoreCase))
                 candidates.Add(new KeyValuePair<string, string[]>(python, new string[0]));
             PythonEnv first = null;
             foreach (var candidate in candidates)
@@ -125,6 +144,13 @@ namespace Nebula.Plus
                 if (first == null) first = env;
             }
             return first;
+        }
+
+        /// <summary>"Python314", "pythoncore-3.14-64": 314, for ordering the installed interpreters.</summary>
+        private static int VersionOf(string exe)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(Path.GetFileName(Path.GetDirectoryName(exe)), @"(\d)\.?(\d{1,2})");
+            return match.Success ? int.Parse(match.Groups[1].Value) * 100 + int.Parse(match.Groups[2].Value) : 0;
         }
 
         private static PythonEnv Probe(string exe, string[] prefix, Action<string> log)

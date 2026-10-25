@@ -13,6 +13,40 @@ own copy of the game.
 
 Not affiliated with or endorsed by Nintendo.
 
+## For friends: Nebula Plus (co-op, online, Odyssey moves)
+
+This fork adds Mario and Luigi co-op on one PC with split screen, online co-op (with drop-in live join), the
+Odyssey moveset and the other additions listed in [docs/NEBULA_PLUS.md](docs/NEBULA_PLUS.md). Nebula Plus installs
+it all in one folder.
+
+**You need:** Windows 10 or 11 (64-bit), a graphics card with Direct3D 12, a CPU with AVX2 (most from 2013 on), about
+8 GB free on an NTFS drive, and **your own dump of the Super Mario Galaxy USA disc** (RMGE01, the original release),
+as ISO, WBFS, RVZ or an extracted folder. Nebula Plus contains no Nintendo code or files and downloads none.
+
+**Steps:**
+
+1. Download `NebulaPlus.exe` from the newest [Nebula Plus release](https://github.com/nullgeodesic0/nebula/releases)
+   (tags `plus2-v...`) and run it. Windows may warn that it is an unknown app: More info > Run anyway.
+2. Choose a folder for the game (default `C:\NebulaPlus`) and your disc image, then press **Install**. It packs the
+   game from your disc (a few minutes) and installs the one-player game together with co-op and online play. An
+   official Nebula install is not needed; if you have one, its saves can be copied over (copied, never moved).
+3. Play with **Play Nebula Plus.cmd** in that folder (one player) or **Play co-op.cmd** (two players on one PC:
+   the second controller presses + to join as Luigi).
+
+**Online co-op:** the host runs **Host online game.cmd** and gives the friend their PC's address; the friend runs
+**Join online game.cmd** and types it. The host must forward **TCP port 7777** on their router to their PC (or
+both use a virtual LAN such as Tailscale or ZeroTier). The friend can join while the host is already playing and
+drops in as Luigi. Both of you need the same Nebula Plus version and the same mods turned on.
+
+**Updates:** **Check for updates.cmd** installs the newest release. Updates never touch your saves or settings
+(both live in the folder's `data\`), and the previous version is kept for **Roll back**.
+
+**The Odyssey Mario and Luigi models, animations and voice** come from Nintendo games, so Nebula Plus never
+includes or downloads them. If you have your own copies of the source files (see
+[docs/NEBULA_PLUS.md](docs/NEBULA_PLUS.md#the-odyssey-mod)), choose them in the Nebula Plus window and it builds
+the mod on your PC; without them that part is skipped and you play with Galaxy's own Mario. Never share the built
+mod.
+
 ## Project status
 
 The game is playable from start to finish. Bugs remain; see [Known issues](#known-issues).
