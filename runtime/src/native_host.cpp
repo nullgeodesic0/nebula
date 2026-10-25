@@ -2,6 +2,7 @@
 #include "galaxy/wii_device_data.h"
 
 #include "galaxy/ai_dma_timing.h"
+#include "galaxy/animation_packs.h"
 #include "galaxy/native_audio_anomaly.h"
 #include "galaxy/netplay.h"
 #include "galaxy/netplay_session.h"
@@ -13016,8 +13017,10 @@ void GuestAddressSpace::load_disc_mod_overrides_from_env(
         return std::filesystem::is_regular_file(path, error);
     };
     const bool model = custom_model_for_boot() && exists(manifest_in(L"model"));
+    // Animation packs (mods/animation-packs, animation_packs.h) take the place of a built animations mod.
+    const bool packs = custom_animations_for_boot() && animation_packs::present(content_root);
     std::vector<std::filesystem::path> manifests;
-    if (custom_animations_for_boot()) {
+    if (custom_animations_for_boot() && !packs) {
         const std::filesystem::path with_faces = manifest_in(L"animations-model");
         manifests.push_back(model && exists(with_faces) ? with_faces : manifest_in(L"animations"));
     }
@@ -13029,6 +13032,21 @@ void GuestAddressSpace::load_disc_mod_overrides_from_env(
             std::cerr << "[mods] " << manifest.string() << '\n';
             load_disc_mod_manifest(manifest);
         }
+    }
+    if (packs) {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> taken;
+        for (const DiscOverride& entry : disc_overrides_) {
+            taken.emplace_back(entry.disc_offset, entry.bytes.size());
+        }
+        animation_packs::Result built = animation_packs::build(
+            content_root, std::span<const std::byte>(pak_view_, static_cast<std::size_t>(pak_size_)), taken, model);
+        std::cerr << "[mods] animation packs: " << built.note << '\n';
+        for (animation_packs::Override& o : built.overrides) {
+            disc_overrides_.push_back(DiscOverride{o.disc_offset, std::move(o.bytes),
+                                                   content_root / L"mods" / L"animation-packs"});
+        }
+        std::sort(disc_overrides_.begin(), disc_overrides_.end(),
+                  [](const DiscOverride& a, const DiscOverride& b) { return a.disc_offset < b.disc_offset; });
     }
 }
 
