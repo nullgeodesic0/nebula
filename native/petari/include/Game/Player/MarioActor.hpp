@@ -247,6 +247,11 @@ public:
 
     HitSensor* getLookTargetSensor() const;
     J3DModelX* getJ3DModel() const;
+#ifdef TARGET_PC
+    // A custom player model (more joints than Galaxy's 30: its own face and fingers) on the normal body: Galaxy's
+    // face and hand part models are not drawn over it (the power-up suits still use them).
+    bool isCustomBodyWithOwnParts() const;
+#endif
     J3DModelData* getModelData() const;
     J3DModelX* getSimpleModel() const;
     void createTextureDL(DLholder*, u16, u16);
