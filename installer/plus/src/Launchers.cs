@@ -39,6 +39,8 @@ namespace Nebula.Plus
                 "set \"PORT=%~1\"\r\nif \"%PORT%\"==\"\" set \"PORT=7777\"\r\nset \"MODE=%~3\"\r\nif \"%MODE%\"==\"\" set \"MODE=live\"\r\n" +
                 "if /i not \"%MODE%\"==\"rollback\" set \"MODE=live\"\r\nset \"DELAY=%~2\"\r\nif \"%DELAY%\"==\"\" set \"DELAY=2\"\r\n" +
                 "set \"GALAXY_NET_HOST=%PORT%\"\r\nset \"GALAXY_NET_DELAY=%DELAY%\"\r\n" +
+                // Its own shader cache: a host session and a normal game may run at once.
+                "set \"GALAXY_SHADER_CACHE_DIR=%PLUS_DATA%\\Nebula\\shadercache-host\"\r\n" +
                 "if /i \"%MODE%\"==\"live\" set \"GALAXY_NET_LIVE=1\"\r\nif /i \"%MODE%\"==\"rollback\" set \"GALAXY_NET_ROLLBACK=1\"\r\n" +
                 "echo Hosting on TCP port %PORT% (%MODE%). Give your friend this PC's address: on the same network one of these,\r\n" +
                 "echo from elsewhere your public address (the router forwards TCP port %PORT% to this PC).\r\n" +
