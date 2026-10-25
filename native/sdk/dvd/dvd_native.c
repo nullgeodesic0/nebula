@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #include <revolution/dvd.h>
 #include <revolution/os.h>
 
@@ -50,6 +54,9 @@ static Slot sSlots[kSlots];
 NEBULA_GAME_API void nebula_game_disc_complete(uint32_t slot, int32_t result) {
     if (slot < kSlots) {
         sSlots[slot].result = result;
+        if (result > 0 && sSlots[slot].block != NULL) {
+            nebula_snapshot_touch(sSlots[slot].block->addr, (uint32_t)result);
+        }
         atomic_store_explicit(&sSlots[slot].done, 1, memory_order_release);
         nebula_raise_interrupt(__OS_INTERRUPT_PI_DI);
         nebula_io_end();
@@ -126,7 +133,16 @@ void DVDInit(void) {
     if ((size_t)entries * 12 > size) {
         nebula_fatal("the disc's file table is truncated");
     }
-    sFst = (u32*)malloc(size);
+    /* Deterministic mode: at one address in every process (the game keeps pointers into its names). */
+    sFst = NULL;
+#if defined(_WIN32)
+    if (nebula_deterministic()) {
+        sFst = (u32*)VirtualAlloc((void*)(uintptr_t)0x7C1000000000ull, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    }
+#endif
+    if (sFst == NULL) {
+        sFst = (u32*)malloc(size);
+    }
     if (sFst == NULL) {
         nebula_fatal("out of memory for the disc's file table");
     }

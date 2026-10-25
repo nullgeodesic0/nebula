@@ -88,7 +88,15 @@ typedef struct {
     u32 shake;
 } Staged;
 
-static Staged sStaged[kChannels];
+static NEBULA_HOST_STATE Staged sStaged[kChannels];
+
+void nebula_det_clear_staged(void) {
+    for (uint32_t chan = 0; chan < kChannels; chan++) {
+        atomic_store(&sStaged[chan].connect, 0);
+        atomic_store(&sStaged[chan].hasReport, 0);
+        atomic_store(&sStaged[chan].hasShake, 0);
+    }
+}
 
 static void apply_connect(uint32_t chan, int connected, const NebulaWiimoteConnection* connection);
 static void apply_report(uint32_t chan, const uint8_t* report, size_t size, const NebulaWpadPointer* pointer);

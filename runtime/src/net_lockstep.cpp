@@ -1,9 +1,12 @@
 #include "galaxy/net_lockstep.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <type_traits>
 
 #if defined(_WIN32)
@@ -144,7 +147,8 @@ void start_sockets() {
 
 std::vector<std::uint8_t> encode_settings(const SessionSettings& s) {
     std::vector<std::uint8_t> out;
-    for (const std::uint32_t v : {s.calendar, s.coop, s.moveset, s.motion_style, s.text_speed, s.language, s.delay}) {
+    for (const std::uint32_t v :
+         {s.calendar, s.coop, s.moveset, s.motion_style, s.text_speed, s.language, s.delay, s.rollback}) {
         put32(out, v);
     }
     return out;
@@ -159,6 +163,7 @@ SessionSettings decode_settings(Reader& r) {
     s.text_speed = r.u32();
     s.language = r.u32();
     s.delay = r.u32();
+    s.rollback = r.u32();
     return s;
 }
 
@@ -176,6 +181,25 @@ struct Session::Impl {
     std::atomic<std::uint32_t> desyncs{0};
     bool ended = false;
     unsigned remote_channel = 1;
+    std::uint32_t remote_confirmed = 0;  // every remote input up to here has come
+    // GALAXY_NET_TEST_LAG=<ms>: the other PC's inputs count only that long after they came (a slow link, on one PC).
+    std::chrono::milliseconds test_lag{0};
+    std::deque<std::pair<std::chrono::steady_clock::time_point, std::pair<std::uint32_t, FrameInput>>> lagged;
+
+    // With `lock` held: a remote input counts.
+    void take_input(std::uint32_t frame, const FrameInput& input) {
+        inputs[remote_channel][frame] = input;
+        while (inputs[remote_channel].count(remote_confirmed + 1) != 0) ++remote_confirmed;
+        changed.notify_all();
+    }
+    // With `lock` held: the lagged inputs whose time has come count.
+    void take_lagged() {
+        const auto now = std::chrono::steady_clock::now();
+        while (!lagged.empty() && lagged.front().first <= now) {
+            take_input(lagged.front().second.first, lagged.front().second.second);
+            lagged.pop_front();
+        }
+    }
 
     void check_hash(std::uint32_t frame) {
         const auto local = local_hashes.find(frame);
@@ -205,8 +229,11 @@ struct Session::Impl {
                 if (payload.size() == 4 + sizeof(input.snapshot)) {
                     std::memcpy(&input.snapshot, payload.data() + 4, sizeof(input.snapshot));
                     std::lock_guard<std::mutex> guard(lock);
-                    inputs[remote_channel][frame] = input;
-                    changed.notify_all();
+                    if (test_lag.count() > 0) {
+                        lagged.push_back({std::chrono::steady_clock::now() + test_lag, {frame, input}});
+                    } else {
+                        take_input(frame, input);
+                    }
                 }
             } else if (type == kHash) {
                 const std::uint32_t frame = r.u32();
@@ -225,7 +252,17 @@ struct Session::Impl {
     }
 };
 
-Session::Session() : impl_(std::make_unique<Impl>()) {}
+Session::Session() : impl_(std::make_unique<Impl>()) {
+#if defined(_WIN32)
+    char lag[16] = {};
+    std::size_t length = 0;
+    if (getenv_s(&length, lag, sizeof(lag), "GALAXY_NET_TEST_LAG") == 0 && length > 1) {
+#else
+    if (const char* lag = std::getenv("GALAXY_NET_TEST_LAG"); lag != nullptr) {
+#endif
+        impl_->test_lag = std::chrono::milliseconds(std::strtoul(lag, nullptr, 10));
+    }
+}
 
 Session::~Session() {
     close();
@@ -306,6 +343,7 @@ bool Session::host(unsigned port, const std::string& build_id, const std::string
         close_socket(listener);
         impl_->socket = s;
         impl_->remote_channel = 1;
+        impl_->remote_confirmed = settings.delay;
         settings_ = settings;
         role_ = Role::Host;
         impl_->receiver = std::thread([this] { impl_->receive_loop(); });
@@ -381,6 +419,7 @@ bool Session::join(const std::string& where, const std::string& build_id, const 
     }
     impl_->socket = s;
     impl_->remote_channel = 0;
+    impl_->remote_confirmed = settings.delay;
     settings_ = settings;
     role_ = Role::Join;
     impl_->receiver = std::thread([this] { impl_->receive_loop(); });
@@ -408,9 +447,11 @@ bool Session::frame_inputs(std::uint32_t frame, FrameInput (&inputs)[2]) {
         return true;
     }
     std::unique_lock<std::mutex> guard(impl_->lock);
-    impl_->changed.wait(guard, [&] {
-        return impl_->ended || (impl_->inputs[0].count(frame) != 0 && impl_->inputs[1].count(frame) != 0);
-    });
+    for (;;) {
+        impl_->take_lagged();
+        if (impl_->ended || (impl_->inputs[0].count(frame) != 0 && impl_->inputs[1].count(frame) != 0)) break;
+        impl_->changed.wait_for(guard, std::chrono::milliseconds(impl_->lagged.empty() ? 50 : 1));
+    }
     if (impl_->inputs[0].count(frame) == 0 || impl_->inputs[1].count(frame) == 0) return false;
     for (unsigned channel = 0; channel < 2; ++channel) {
         auto& by_frame = impl_->inputs[channel];
@@ -418,6 +459,45 @@ bool Session::frame_inputs(std::uint32_t frame, FrameInput (&inputs)[2]) {
         by_frame.erase(by_frame.begin(), by_frame.find(frame));
     }
     return true;
+}
+
+bool Session::remote_input(std::uint32_t frame, FrameInput& input) {
+    if (frame <= settings_.delay) {
+        input = {};
+        return true;
+    }
+    std::lock_guard<std::mutex> guard(impl_->lock);
+    impl_->take_lagged();
+    // Long-confirmed frames are not asked for again (a rollback goes back at most a few frames).
+    if (frame > 128) {
+        for (auto& by_frame : impl_->inputs) {
+            by_frame.erase(by_frame.begin(), by_frame.lower_bound(frame - 128));
+        }
+    }
+    const auto& by_frame = impl_->inputs[impl_->remote_channel];
+    const auto it = by_frame.find(frame);
+    if (it == by_frame.end()) return false;
+    input = it->second;
+    return true;
+}
+
+std::uint32_t Session::remote_confirmed() const {
+    std::lock_guard<std::mutex> guard(impl_->lock);
+    impl_->take_lagged();
+    return (std::max)(impl_->remote_confirmed, settings_.delay);
+}
+
+FrameInput Session::local_input(std::uint32_t frame) {
+    if (frame <= settings_.delay) return {};
+    std::lock_guard<std::mutex> guard(impl_->lock);
+    const auto& by_frame = impl_->inputs[local_channel()];
+    const auto it = by_frame.find(frame);
+    return it != by_frame.end() ? it->second : FrameInput{};
+}
+
+bool Session::ended() const {
+    std::lock_guard<std::mutex> guard(impl_->lock);
+    return impl_->ended;
 }
 
 void Session::report_hash(std::uint32_t scene_frame, std::uint64_t hash) {

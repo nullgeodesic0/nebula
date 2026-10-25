@@ -43,6 +43,14 @@ void wait_for_render_idle() {
     backend().wait_for_render_idle();
 }
 
+void stream_checkpoint(std::uint32_t id) {
+    backend().stream_checkpoint(id);
+}
+
+void stream_rewind(std::uint32_t id) {
+    backend().stream_rewind(id);
+}
+
 bool wait_for_frame_pe_completion_for(
     FramePeCompletionToken token,
     std::uint32_t timeout_ms) {

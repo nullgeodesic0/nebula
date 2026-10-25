@@ -4586,7 +4586,23 @@ std::vector<std::byte> native_game_empty_mii_database() {
 struct NativeGameAudio::State {
     JAudioHostMixer mixer;
     NativeAudioSink sink;
+    std::deque<std::pair<std::uint32_t, JAudioHostMixer>> saves;  // rollback's, oldest first
 };
+
+void NativeGameAudio::save_dsp(std::uint32_t frame) {
+    auto& saves = state_->saves;
+    while (!saves.empty() && saves.back().first >= frame) saves.pop_back();
+    saves.emplace_back(frame, state_->mixer);
+    while (saves.size() > 32) saves.pop_front();
+}
+
+bool NativeGameAudio::restore_dsp(std::uint32_t frame) {
+    auto& saves = state_->saves;
+    while (!saves.empty() && saves.back().first > frame) saves.pop_back();
+    if (saves.empty() || saves.back().first != frame) return false;
+    state_->mixer = saves.back().second;
+    return true;
+}
 
 NativeGameAudio::NativeGameAudio() : state_(std::make_unique<State>()) {}
 NativeGameAudio::~NativeGameAudio() = default;

@@ -101,6 +101,12 @@ void set_native_settings_content_root(const std::string& utf8_path);
 // Blocks until the render queue and every in-flight render chunk are idle.
 void wait_for_render_idle();
 
+// Netplay's rollback: the GPU registers as the command stream has set them so far, kept under `id`
+// (stream_checkpoint), and later set back to a kept one (stream_rewind), as a restored game expects them: the
+// commands of the frames it undid never ran. Both apply in stream order, before the next frame's commands.
+void stream_checkpoint(std::uint32_t id);
+void stream_rewind(std::uint32_t id);
+
 // Waits up to `timeout_ms` for `token`. Returns true and consumes the token on completion, false without
 // consuming it on timeout; a zero timeout polls. A renderer failure, a stale token or a stopped render thread
 // throws.

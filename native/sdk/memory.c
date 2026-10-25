@@ -83,8 +83,9 @@ int nebula_memory_init(void) {
        its memory there (so two PCs' memories match byte for byte, and a snapshot loads into another process). */
     uint8_t* base = NULL;
     if (nebula_deterministic()) {
-        base = (uint8_t*)VirtualAlloc((void*)(uintptr_t)0x7D0000000000ull, 2 * (SIZE_T)kReserveSize, MEM_RESERVE,
-                                      PAGE_NOACCESS);
+        /* Watched for writes: netplay's snapshots copy only the pages that changed (os/snapshot.c). */
+        base = (uint8_t*)VirtualAlloc((void*)(uintptr_t)0x7D0000000000ull, 2 * (SIZE_T)kReserveSize,
+                                      MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS);
         if (base == NULL) {
             nebula_log("Nebula: the game's memory could not take its fixed address; netplay may desync\n");
         }

@@ -3492,6 +3492,50 @@ void GxBackend::scan_pe_events_on_sim_thread(
 
 // Producer (simulation thread): copies the frame and hands it to the render thread. Blocks only
 // while the queue is full.
+// Kept for this many boundaries: past the deepest rollback (host_main keeps 32 snapshots).
+constexpr std::size_t kStreamStatesKept = 40;
+
+void GxBackend::stream_checkpoint(std::uint32_t id) {
+    // The simulation thread's parsers have read every submitted command: theirs now, the render thread's in order.
+    // Commands submitted end at command boundaries, so neither parser holds a partial one.
+    producer_stream_states_[id] = {event_state_, dependency_state_};
+    while (producer_stream_states_.size() > kStreamStatesKept) {
+        producer_stream_states_.erase(producer_stream_states_.begin());
+    }
+    pending_stream_ops_.emplace_back(false, id);
+}
+
+void GxBackend::stream_rewind(std::uint32_t id) {
+    if (const auto kept = producer_stream_states_.find(id); kept != producer_stream_states_.end()) {
+        event_state_ = kept->second.event_state;
+        dependency_state_ = kept->second.dependency_state;
+        dependency_state_.mark_all_dirty();
+        producer_stream_states_.erase(std::next(kept), producer_stream_states_.end());
+    }
+    event_pending_fifo_.clear();
+    pending_stream_ops_.emplace_back(true, id);
+}
+
+// Render thread, before a chunk's commands.
+void GxBackend::apply_stream_ops(const std::vector<std::pair<bool, std::uint32_t>>& ops) {
+    for (const auto& [rewind, id] : ops) {
+        if (!rewind) {
+            render_stream_states_[id] = state_;
+            while (render_stream_states_.size() > kStreamStatesKept) {
+                render_stream_states_.erase(render_stream_states_.begin());
+            }
+            continue;
+        }
+        if (const auto kept = render_stream_states_.find(id); kept != render_stream_states_.end()) {
+            state_ = kept->second;
+            // What the GPU was given follows the dirty marks: all of it again.
+            state_.mark_all_dirty();
+            render_stream_states_.erase(std::next(kept), render_stream_states_.end());
+        }
+        pending_fifo_.clear();
+    }
+}
+
 FramePeCompletionToken GxBackend::render_frame(
     const std::byte* fifo_data,
     std::size_t fifo_size,
@@ -3542,6 +3586,7 @@ FramePeCompletionToken GxBackend::render_frame(
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
     FrameChunk chunk;
+    chunk.stream_ops.swap(pending_stream_ops_);
     chunk.pointer_response=producer_pointer_response_;
     take_attached_pointer_depth_capture(chunk, fifo_size);
     take_attached_fifo_markers(chunk, fifo_size);
@@ -8898,6 +8943,9 @@ void GxBackend::present_cached_xfb_on_thread(
 }
 
 void GxBackend::render_frame_on_thread(FrameChunk& chunk) {
+    if (!chunk.stream_ops.empty()) {
+        apply_stream_ops(chunk.stream_ops);
+    }
     render_pointer_response_=chunk.pointer_response;
     render_movie_content_=chunk.prerecorded_movie;
     render_safety_surround_=chunk.safety_surround;

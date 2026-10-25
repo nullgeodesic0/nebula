@@ -56,9 +56,9 @@ void OSSetMEM2ArenaLo(void*);
 
 /* The host's log takes whole lines (stderr before the host attaches): a report without its newline waits for the rest
    of its line. */
-static char sLogLine[1024];
-static size_t sLogLength;
-static atomic_flag sLogLock = ATOMIC_FLAG_INIT;
+static NEBULA_HOST_STATE char sLogLine[1024];
+static NEBULA_HOST_STATE size_t sLogLength;
+static NEBULA_HOST_STATE atomic_flag sLogLock = ATOMIC_FLAG_INIT;
 
 static void log_emit(void) {
     const NebulaHostServices* host = nebula_host();
@@ -161,7 +161,7 @@ static void time_init(void) {
 }
 
 /* Deterministic mode (below): its virtual clock. */
-static int sDeterministic;
+static NEBULA_HOST_STATE int sDeterministic;
 static int64_t sVirtualTime;
 
 int64_t nebula_time_base(void) {
@@ -217,7 +217,7 @@ enum { kDecrementerShift = 32 };
 #define DECREMENTER_PENDING (1ull << kDecrementerShift)
 
 static _Atomic uint64_t sPending;
-static atomic_int sIdle;
+static NEBULA_HOST_STATE atomic_int sIdle;
 
 /* Deterministic mode (NEBULA_OPTION_DETERMINISTIC), for netplay: two PCs given the same input compute the same game.
    The host's threads then decide nothing the game sees by their timing:
@@ -233,13 +233,14 @@ static atomic_int sIdle;
    - The renderer's draw-sync and draw-done events complete at once on the simulation thread (gx_fifo.c).
    - The calendar is the host's NEBULA_OPTION_CALENDAR (the session's) rather than this PC's clock. */
 static int64_t sNextRetrace;
-static _Atomic uint64_t sDeferred;
-static atomic_int sRetraceGrants;
-static atomic_int sIoInFlight;
+static NEBULA_HOST_STATE _Atomic uint64_t sDeferred;
+static NEBULA_HOST_STATE atomic_int sRetraceGrants;
+static NEBULA_HOST_STATE atomic_int sIoInFlight;
+static uint32_t sDetFrame; /* retrace boundaries so far (the game's: restored with it) */
 static int64_t sAiNext = INT64_MAX;
 static int64_t sAiPeriod;
 #if defined(_WIN32)
-static DWORD sSimulationThread;
+static NEBULA_HOST_STATE DWORD sSimulationThread;
 #endif
 
 enum { kFieldTicks = OS_TIMER_CLOCK / 60 };
@@ -259,7 +260,7 @@ static int on_simulation_thread(void) {
 }
 
 #if defined(_WIN32)
-static HANDLE sWake;
+static NEBULA_HOST_STATE HANDLE sWake;
 #else
 static pthread_mutex_t sWakeLock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t sWakeCond = PTHREAD_COND_INITIALIZER;
@@ -314,7 +315,7 @@ static void sleep_for_work(void) {
    the game's alarms are timeouts, periodic speaker updates and sleeps, which that does not disturb. */
 
 static _Atomic int64_t sDecrementerDeadline = INT64_MAX;
-static _Atomic int64_t sClockArmed = INT64_MAX; /* the deadline the clock thread is sleeping toward */
+static NEBULA_HOST_STATE _Atomic int64_t sClockArmed = INT64_MAX; /* the deadline the clock thread is sleeping toward */
 
 /* The game's own clock reads (OSGetTime, OSGetTick; on the simulation thread) also catch a passed deadline, at no
    extra clock read: the alarm is then due at the next point interrupts are enabled instead of when the host timer
@@ -731,6 +732,8 @@ static void det_step(void) {
     }
     sNextRetrace += kFieldTicks;
     atomic_fetch_or(&sPending, (atomic_fetch_and(&sDeferred, ioBits) & ~ioBits) | OS_INTERRUPTMASK(__OS_INTERRUPT_PI_VI));
+    /* The boundary: the host may keep it (a snapshot) or take the game back to one kept before (os/snapshot.c). */
+    nebula_snapshot_boundary(++sDetFrame);
 }
 
 /* No thread can run (SelectThread, interrupts disabled): deliver interrupts and sleep until one can. */

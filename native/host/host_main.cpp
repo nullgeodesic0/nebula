@@ -71,6 +71,10 @@ inline int64_t perf_hint_retrace() noexcept { return 0; }
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <memory>
+#include <optional>
+#include <iterator>
 #include <functional>
 #include <mutex>
 #include <span>
@@ -557,7 +561,237 @@ std::FILE* open_file(const fs::path& path, uint32_t mode) {
 #endif
 }
 
+// Rollback (netplay's rollback, GALAXY_SNAPSHOT_TEST): the NAND in memory, kept and restored with the game at each
+// boundary (svc_det_boundary), so a NAND operation of frames a restore undid is undone too; written to the host's files
+// once no rollback can undo it (nand_flush). Files are shared between the kept states until one is written. The NAND
+// thread uses it only while the game waits for an operation, so never during a boundary.
+bool deterministic();
+struct MemNand {
+    struct Entry {
+        bool dir = false;
+        std::shared_ptr<std::vector<uint8_t>> data;  // a file's bytes
+    };
+    struct Open {
+        bool used = false;
+        std::string key;
+        std::shared_ptr<std::vector<uint8_t>> data;  // a safe open's copy, else null (the file's own)
+        uint32_t pos = 0;
+        uint32_t mode = 0;
+    };
+    std::map<std::string, std::optional<Entry>> entries;  // by host path; nullopt: not there (removed, or never was)
+    std::vector<Open> files = std::vector<Open>(16);
+};
+MemNand gMemNand;
+std::map<uint32_t, MemNand> gMemNandSaved;  // by boundary
+std::map<std::string, std::optional<MemNand::Entry>> gMemNandOnDisk;  // as written to the host's files
+
+bool nand_in_memory() {
+    static const bool in_memory = [] {
+        if (!deterministic()) return false;
+        if (std::getenv("GALAXY_SNAPSHOT_TEST") != nullptr) return true;
+        return galaxy::net::session().active() && galaxy::net::session().settings().rollback != 0;
+    }();
+    return in_memory;
+}
+
+// The entry at a host path, from the host's files the first time.
+const std::optional<MemNand::Entry>& mem_lookup(const fs::path& path) {
+    const std::string key = path.generic_string();
+    if (const auto it = gMemNand.entries.find(key); it != gMemNand.entries.end()) {
+        return it->second;
+    }
+    std::optional<MemNand::Entry> entry;
+    std::error_code error;
+    if (fs::is_directory(path, error)) {
+        entry = MemNand::Entry{true, nullptr};
+    } else if (fs::is_regular_file(path, error)) {
+        auto data = std::make_shared<std::vector<uint8_t>>();
+        if (std::ifstream in(path, std::ios::binary); in) {
+            data->assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        entry = MemNand::Entry{false, std::move(data)};
+    }
+    gMemNandOnDisk.emplace(key, entry);
+    return gMemNand.entries.emplace(key, std::move(entry)).first->second;
+}
+
+// The keys under a directory (from the host's files too), deepest last.
+std::vector<std::string> mem_descendants(const fs::path& dir) {
+    std::error_code error;
+    if (fs::is_directory(dir, error)) {
+        for (fs::recursive_directory_iterator it(dir, error), end; !error && it != end; it.increment(error)) {
+            (void)mem_lookup(it->path());
+        }
+    }
+    const std::string prefix = dir.generic_string() + "/";
+    std::vector<std::string> keys;
+    for (auto it = gMemNand.entries.lower_bound(prefix); it != gMemNand.entries.end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it) {
+        if (it->second.has_value()) keys.push_back(it->first);
+    }
+    return keys;
+}
+
+void mem_remove(const fs::path& path) {
+    for (const std::string& key : mem_descendants(path)) gMemNand.entries[key] = std::nullopt;
+    (void)mem_lookup(path);
+    gMemNand.entries[path.generic_string()] = std::nullopt;
+}
+
+// A file's bytes to write: its own unless a kept state shares them.
+std::vector<uint8_t>& mem_writable(std::shared_ptr<std::vector<uint8_t>>& data) {
+    if (data.use_count() > 1) data = std::make_shared<std::vector<uint8_t>>(*data);
+    return *data;
+}
+
+int32_t mem_fs_run(const NebulaFsRequest& r) {
+    fs::path path;
+    auto open_at = [](int32_t fd) -> MemNand::Open* {
+        return fd >= 0 && fd < (int32_t)gMemNand.files.size() && gMemNand.files[fd].used ? &gMemNand.files[fd] : nullptr;
+    };
+    // An open file's bytes: a safe open's copy, else the file's.
+    auto bytes_of = [](MemNand::Open& f) -> std::shared_ptr<std::vector<uint8_t>>& {
+        if (f.data) return f.data;
+        return gMemNand.entries[f.key]->data;
+    };
+    switch (r.op) {
+    case NEBULA_FS_OPEN:
+    case NEBULA_FS_SAFE_OPEN: {
+        if (!nand_path(r.path, &path)) return kNandInvalid;
+        const auto& entry = mem_lookup(path);
+        if (!entry.has_value() || entry->dir) return kNandNoExists;
+        int32_t fd = 0;
+        while (fd < (int32_t)gMemNand.files.size() && gMemNand.files[fd].used) fd++;
+        if (fd == (int32_t)gMemNand.files.size()) return kNandMaxFd;
+        MemNand::Open& f = gMemNand.files[fd];
+        f = {};
+        f.used = true;
+        f.key = path.generic_string();
+        f.mode = r.mode;
+        if (r.op == NEBULA_FS_SAFE_OPEN && r.mode != 1) f.data = entry->data;  // written apart (copy on write)
+        return fd;
+    }
+    case NEBULA_FS_CLOSE:
+    case NEBULA_FS_SAFE_CLOSE: {
+        MemNand::Open* f = open_at(r.fd);
+        if (f == nullptr) return kNandInvalid;
+        if (f->data) gMemNand.entries[f->key] = MemNand::Entry{false, f->data};
+        *f = {};
+        return kNandOk;
+    }
+    case NEBULA_FS_READ: {
+        MemNand::Open* f = open_at(r.fd);
+        if (f == nullptr) return kNandInvalid;
+        const std::vector<uint8_t>& data = *bytes_of(*f);
+        const uint32_t count = f->pos >= data.size() ? 0u : (std::min<uint32_t>)(r.size, (uint32_t)data.size() - f->pos);
+        if (count != 0) std::memcpy(r.buffer, data.data() + f->pos, count);
+        f->pos += count;
+        return (int32_t)count;
+    }
+    case NEBULA_FS_WRITE: {
+        MemNand::Open* f = open_at(r.fd);
+        if (f == nullptr || f->mode == 1) return kNandInvalid;
+        std::vector<uint8_t>& data = mem_writable(bytes_of(*f));
+        if (data.size() < (size_t)f->pos + r.size) data.resize((size_t)f->pos + r.size);
+        if (r.size != 0) std::memcpy(data.data() + f->pos, r.buffer, r.size);
+        f->pos += r.size;
+        return (int32_t)r.size;
+    }
+    case NEBULA_FS_SEEK: {
+        MemNand::Open* f = open_at(r.fd);
+        if (f == nullptr) return kNandInvalid;
+        const int64_t base = r.whence == 0 ? 0 : r.whence == 1 ? (int64_t)f->pos : (int64_t)bytes_of(*f)->size();
+        const int64_t at = base + r.offset;
+        if (at < 0) return kNandInvalid;
+        f->pos = (uint32_t)at;
+        return (int32_t)at;
+    }
+    case NEBULA_FS_LENGTH: {
+        MemNand::Open* f = open_at(r.fd);
+        return f == nullptr ? kNandInvalid : (int32_t)bytes_of(*f)->size();
+    }
+    case NEBULA_FS_CREATE:
+    case NEBULA_FS_CREATE_DIR: {
+        if (!nand_path(r.path, &path)) return kNandInvalid;
+        if (mem_lookup(path).has_value()) return kNandExists;
+        const auto& parent = mem_lookup(path.parent_path());
+        if (!parent.has_value() || !parent->dir) return kNandNoExists;
+        gMemNand.entries[path.generic_string()] = r.op == NEBULA_FS_CREATE_DIR
+            ? MemNand::Entry{true, nullptr}
+            : MemNand::Entry{false, std::make_shared<std::vector<uint8_t>>()};
+        return kNandOk;
+    }
+    case NEBULA_FS_DELETE: {
+        if (!nand_path(r.path, &path)) return kNandInvalid;
+        if (!mem_lookup(path).has_value()) return kNandNoExists;
+        mem_remove(path);
+        return kNandOk;
+    }
+    case NEBULA_FS_RENAME: {
+        fs::path to;
+        if (!nand_path(r.path, &path) || !nand_path(r.path2, &to)) return kNandInvalid;
+        const std::optional<MemNand::Entry> from = mem_lookup(path);
+        if (!from.has_value()) return kNandNoExists;
+        const auto& target = mem_lookup(to);
+        if (target.has_value() && target->dir && !mem_descendants(to).empty()) return kNandNotEmpty;
+        // What `to` becomes: `path` and everything under it, moved.
+        std::vector<std::pair<std::string, std::optional<MemNand::Entry>>> moved;
+        moved.emplace_back(to.generic_string(), from);
+        const std::string old_prefix = path.generic_string();
+        for (const std::string& key : mem_descendants(path)) {
+            moved.emplace_back(to.generic_string() + key.substr(old_prefix.size()), gMemNand.entries[key]);
+        }
+        mem_remove(path);
+        if (target.has_value()) mem_remove(to);
+        for (auto& [key, entry] : moved) gMemNand.entries[key] = std::move(entry);
+        return kNandOk;
+    }
+    }
+    return kNandInvalid;
+}
+
+// The host's files brought to a kept state: what was removed, then what is new or changed (parents first).
+void nand_flush(const std::map<std::string, std::optional<MemNand::Entry>>& state) {
+    auto same = [](const std::optional<MemNand::Entry>& a, const std::optional<MemNand::Entry>& b) {
+        if (a.has_value() != b.has_value()) return false;
+        return !a.has_value() || (a->dir == b->dir && a->data == b->data);
+    };
+    std::error_code error;
+    for (const auto& [key, entry] : state) {
+        const auto on_disk = gMemNandOnDisk.find(key);
+        if (!entry.has_value() && (on_disk == gMemNandOnDisk.end() || on_disk->second.has_value())) {
+            fs::remove_all(fs::path(key), error);
+        }
+    }
+    for (const auto& [key, entry] : state) {
+        const auto on_disk = gMemNandOnDisk.find(key);
+        if (!entry.has_value() || (on_disk != gMemNandOnDisk.end() && same(on_disk->second, entry))) continue;
+        const fs::path path(key);
+        if (entry->dir) {
+            fs::create_directories(path, error);
+        } else {
+            fs::create_directories(path.parent_path(), error);
+            // As a save does: a new file beside it, moved over it.
+            fs::path temp = path;
+            temp += L".nebula-flush";
+            if (std::ofstream out(temp, std::ios::binary | std::ios::trunc); out) {
+                out.write(reinterpret_cast<const char*>(entry->data->data()), (std::streamsize)entry->data->size());
+            }
+            move_path(temp, path, error);
+            if (error) {
+                std::fprintf(stderr, "[nand] could not write %s\n", key.c_str());
+            }
+        }
+    }
+    for (const auto& [key, entry] : state) gMemNandOnDisk[key] = entry;
+}
+
+int32_t disk_fs_run(const NebulaFsRequest& r);
+
 int32_t fs_run(const NebulaFsRequest& r) {
+    return nand_in_memory() ? mem_fs_run(r) : disk_fs_run(r);
+}
+
+int32_t disk_fs_run(const NebulaFsRequest& r) {
     std::error_code error;
     fs::path path;
     auto file_at = [](int32_t fd) -> OpenFile* {
@@ -790,6 +1024,33 @@ void ai_thread() {
     }
 }
 
+// Rollback (deterministic mode; svc_det_boundary): the retraces granted so far, a restore's frame (the frame clock goes
+// on from it), and the frame up to which it grants without pacing (the frames a restore undid, run again).
+std::atomic<uint32_t> gGranted{0};
+std::atomic<bool> gRewindPending{false};
+std::atomic<uint32_t> gRewindFrame{0};
+std::atomic<uint32_t> gCatchUpTo{0};
+
+// Rollback netplay (net_lockstep.h, settings.rollback): the other PC's input each frame ran with, predicted (its last
+// known) or confirmed. A late input that differs from the prediction sends the game back to the boundary before its
+// frame (svc_det_boundary). The game runs at most kRollbackAhead frames past the confirmed input.
+struct UsedRemote {
+    galaxy::input::WiimoteInputSnapshot snapshot{};
+    bool confirmed = false;
+};
+std::mutex gRollbackLock;
+std::map<uint32_t, UsedRemote> gUsedRemote;
+constexpr uint32_t kRollbackAhead = 15;
+// Every 600 frames: how rollback went (frames run again, time waiting for the game and for the other PC).
+struct RollbackStats {
+    uint32_t frames = 0;
+    uint32_t rollbacks = 0;
+    uint32_t rerun = 0;
+    double wait_game_ms = 0;
+    double wait_ahead_ms = 0;
+};
+RollbackStats gRollbackStats;
+
 // Deterministic mode's frame clock (vi_thread) needs these, defined below.
 bool deterministic();
 void send_wpad_reports(uint32_t frame);
@@ -823,7 +1084,13 @@ void vi_thread() {
             sleep_until_precise(next);
         }
 #else
-        sleep_until_precise(next);
+        // Catching up after a rollback: the undone frames run again at once, off the schedule (it goes on from the
+        // first frame not run before).
+        const bool catching_up =
+            deterministic() && gGranted.load(std::memory_order_acquire) < gCatchUpTo.load(std::memory_order_acquire);
+        if (!catching_up) {
+            sleep_until_precise(next);
+        }
 #endif
         if (wait_while_suspended()) {
             next = Clock::now() + period;
@@ -832,15 +1099,69 @@ void vi_thread() {
         // The last frame's work (the game and render threads' CPU time), to the performance hints (Android).
         [[maybe_unused]] const int64_t work = galaxy::host::perf_hint_retrace();
         if (deterministic()) {
-            // Retrace N once the game has taken N - 1 (vi_frame counts them), with frame N's remote reports.
-            static uint32_t granted = 0;
-            while (gRetraces.load(std::memory_order_acquire) < granted) {
+            // Retrace N once the game has taken N - 1 (vi_frame counts them), with frame N's remote reports. After a
+            // restore the game is back at an earlier boundary: the clock goes on from there.
+            uint32_t granted = gGranted.load(std::memory_order_acquire);
+            const auto wait_start = Clock::now();
+            for (;;) {
+                if (gRewindPending.exchange(false, std::memory_order_acq_rel)) {
+                    granted = gRewindFrame.load(std::memory_order_acquire);
+                    gGranted.store(granted, std::memory_order_release);
+                }
+                if (gRetraces.load(std::memory_order_acquire) >= granted) break;
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
             }
             // Online: this PC's player's input for frame N + delay goes out, then frame N waits for both players'.
             galaxy::input::WiimoteInputSnapshot net_inputs[2];
             gNetInputs = nullptr;
-            if (galaxy::net::session().active()) {
+            if (galaxy::net::session().active() && galaxy::net::session().settings().rollback != 0) {
+                // Rollback: this PC's input goes out once per frame (a frame run again keeps it); the other's is
+                // the confirmed one, else predicted.
+                galaxy::net::Session& net = galaxy::net::session();
+                const uint32_t frame = granted + 1;
+                static uint32_t last_sent = 0;
+                if (frame + net.settings().delay > last_sent) {
+                    last_sent = frame + net.settings().delay;
+                    galaxy::net::FrameInput local;
+                    local.snapshot = galaxy::host::native_game_wiimote_snapshot(
+                        last_sent, gWpadDpd.load(std::memory_order_relaxed) != 0,
+                        gStarPointerMode.load(std::memory_order_relaxed),
+                        static_cast<uint8_t>(gTiltSection.load(std::memory_order_relaxed)));
+                    net.send_input(last_sent, local);
+                }
+                gRollbackStats.wait_game_ms += std::chrono::duration<double, std::milli>(Clock::now() - wait_start).count();
+                const auto ahead_start = Clock::now();
+                while (frame > net.remote_confirmed() + kRollbackAhead) {
+                    if (net.ended()) {
+                        if (nand_in_memory()) nand_flush(gMemNand.entries);
+                        std::fprintf(stderr, "[netplay] the session ended: closing\n");
+                        std::fflush(stderr);
+                        std::_Exit(0);
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                gRollbackStats.wait_ahead_ms += std::chrono::duration<double, std::milli>(Clock::now() - ahead_start).count();
+                if (frame < gCatchUpTo.load(std::memory_order_acquire)) ++gRollbackStats.rerun;
+                if (++gRollbackStats.frames == 600) {
+                    const RollbackStats& r = gRollbackStats;
+                    std::fprintf(stderr, "[netplay] last 600 frames: %u rollbacks, %u frames run again, %.0f ms waiting for the game, "
+                                 "%.0f ms for the other PC\n", r.rollbacks, r.rerun, r.wait_game_ms, r.wait_ahead_ms);
+                    gRollbackStats = {};
+                }
+                galaxy::net::FrameInput remote;
+                const bool confirmed = net.remote_input(frame, remote);
+                if (!confirmed) {
+                    (void)net.remote_input(net.remote_confirmed(), remote);
+                }
+                {
+                    std::lock_guard<std::mutex> lock(gRollbackLock);
+                    gUsedRemote[frame] = {remote.snapshot, confirmed};
+                }
+                const unsigned local_channel = net.local_channel();
+                net_inputs[local_channel] = net.local_input(frame).snapshot;
+                net_inputs[1 - local_channel] = remote.snapshot;
+                gNetInputs = net_inputs;
+            } else if (galaxy::net::session().active()) {
                 galaxy::net::Session& net = galaxy::net::session();
                 const uint32_t frame = granted + 1;
                 galaxy::net::FrameInput local;
@@ -866,9 +1187,12 @@ void vi_thread() {
                 send_wpad_reports(granted + 1);
             }
             gNetInputs = nullptr;
-            ++granted;
+            gGranted.store(granted + 1, std::memory_order_release);
         }
         gModule.vi_retrace();
+#if !defined(NEBULA_HOST_SDL)
+        if (catching_up) continue;
+#endif
         next += period;
         const auto now = Clock::now();
         if (now >= next) {
@@ -1962,7 +2286,9 @@ void svc_vi_frame(void*, uint32_t xfb, int black, uint32_t retrace) {
     if (!gRegions.empty()) prompts_tick();
 #endif
     if (!gRegions.empty()) {
-        submit_frame(true, xfb == 0 || black ? galaxy::gx::kNoDisplayedXfbAddr : xfb);
+        // Frames a rollback runs again are not shown (the clock grants them at once).
+        const bool catching_up = deterministic() && retrace < gCatchUpTo.load(std::memory_order_acquire);
+        submit_frame(!catching_up, xfb == 0 || black ? galaxy::gx::kNoDisplayedXfbAddr : xfb);
     }
     // GALAXY_TEST_MII_IMPORT=<retrace>:<file>: imports the file at that retrace, as the settings do.
     {
@@ -2290,10 +2616,14 @@ size_t idle_wiimote_report(uint8_t id, uint8_t* report) {
 // Online (net_lockstep.h): both players' input for the frame being granted, by channel (the frame clock sets it).
 const galaxy::input::WiimoteInputSnapshot* gNetInputs = nullptr;
 
+// Whether the remotes' connections were sent (send_wpad_reports; a rollback takes them back with the game).
+bool gWpadConnected = false;
+bool gPartnerConnected = false;
+
 void send_wpad_reports(uint32_t frame) {
     static NebulaWiimoteConnection connection{};
-    static bool connected = false;
-    static bool partner_connected = false;
+    bool& connected = gWpadConnected;
+    bool& partner_connected = gPartnerConnected;
     if (!connected) {
 #if defined(NEBULA_HOST_RENDERER)
         galaxy::host::native_game_wiimote_calibration(connection.eeprom, connection.extension_calibration);
@@ -2502,6 +2832,9 @@ std::atomic<bool> gTourDone{false};
 // GALAXY_STATE_HASH=<file>: every GALAXY_STATE_HASH_EVERY scene frames (60), a line "<scene frame> <hash>" of the
 // game's memory (each region, FNV-1a over 64-bit words), and with GALAXY_STATE_HASH_CHUNKS=1 a hash per megabyte
 // after it. Two runs with the same input that write the same lines computed the same game (netplay's determinism).
+// Scene frames so far (the state hash's and the test actions' count; a rollback takes it back with the game).
+uint64_t gSceneFrame = 0;
+
 void write_state_hash(uint64_t scene_frame) {
     static FILE* file = [] {
         const char* path = std::getenv("GALAXY_STATE_HASH");
@@ -2510,7 +2843,8 @@ void write_state_hash(uint64_t scene_frame) {
         return opened;
     }();
     // Online, the two PCs compare this hash every galaxy::net::kHashEvery scene frames (a desync is logged).
-    const bool net_due = galaxy::net::session().active() && scene_frame % galaxy::net::kHashEvery == 0;
+    const bool net_due = galaxy::net::session().active() && galaxy::net::session().settings().rollback == 0 &&
+                         scene_frame % galaxy::net::kHashEvery == 0;
     if (file == nullptr && !net_due) return;
     static const uint64_t every = [] {
         const char* value = std::getenv("GALAXY_STATE_HASH_EVERY");
@@ -2604,9 +2938,204 @@ void write_state_hash(uint64_t scene_frame) {
     }
 }
 
+// Deterministic mode, at each retrace boundary: keep it, or go back to one kept (sdk/os/snapshot.c). The host's own part
+// of the game's state goes with it: the DSP program's (it writes the game's memory) and the scene frame count the
+// tests and the state hash use. GALAXY_SNAPSHOT_TEST="<save>,<restore>": keeps boundary <save> and, the first time
+// boundary <restore> comes, goes back to it; the frames between run twice (the state hash shows whether the second
+// run matched the first).
+std::map<uint32_t, uint64_t> gSavedSceneFrames;
+struct TestRunState;
+void keep_test_run(uint32_t frame);
+void restore_test_run(uint32_t frame);
+
+// What the game told the host about its remotes and pointer (services), which the next frames' reports follow: kept
+// and restored with the game, as the console's remotes would have been told again.
+struct HostInputState {
+    uint32_t report[2];
+    int dpd;
+    bool motor;
+    int32_t pointer_mode;
+    uint32_t tilt_section;
+    int wpad_started;
+    uint32_t wpad_start_retrace;
+    bool connected;
+    bool partner_connected;
+
+    static HostInputState take() {
+        return {{gWpadReport[0].load(), gWpadReport[1].load()}, gWpadDpd.load(), gMotor.load(), gStarPointerMode.load(),
+                gTiltSection.load(), gWpadStarted.load(), gWpadStartRetrace.load(), gWpadConnected, gPartnerConnected};
+    }
+    void put() const {
+        gWpadReport[0] = report[0];
+        gWpadReport[1] = report[1];
+        gWpadDpd = dpd;
+        gMotor = motor;
+        gStarPointerMode = pointer_mode;
+        gTiltSection = tilt_section;
+        gWpadStarted = wpad_started;
+        gWpadStartRetrace = wpad_start_retrace;
+        gWpadConnected = connected;
+        gPartnerConnected = partner_connected;
+    }
+};
+std::map<uint32_t, HostInputState> gSavedInputState;
+
+uint32_t svc_det_boundary(void*, uint32_t frame, uint32_t* arg) {
+    static const std::pair<uint32_t, uint32_t> test = [] {
+        const char* value = std::getenv("GALAXY_SNAPSHOT_TEST");
+        unsigned save = 0, restore = 0;
+        if (value == nullptr || sscanf_s(value, "%u,%u", &save, &restore) != 2 || restore <= save) return std::pair{0u, 0u};
+        return std::pair{save, restore};
+    }();
+    static uint32_t last_saved = 0;
+    static bool test_restored = false;
+    auto save = [&] {
+        last_saved = frame;
+        gSavedSceneFrames[frame] = gSceneFrame;
+        while (gSavedSceneFrames.size() > 32) gSavedSceneFrames.erase(gSavedSceneFrames.begin());
+        gSavedInputState[frame] = HostInputState::take();
+        keep_test_run(frame);
+        while (gSavedInputState.size() > 32) gSavedInputState.erase(gSavedInputState.begin());
+        if (nand_in_memory()) {
+            gMemNandSaved[frame] = gMemNand;
+            while (gMemNandSaved.size() > 32) gMemNandSaved.erase(gMemNandSaved.begin());
+        }
+#if defined(NEBULA_HOST_RENDERER)
+        gAudio->save_dsp(frame);
+        // The renderer's registers as of every command so far (those waiting for a PE marker or the retrace first),
+        // and its writes to the game's memory (EFB copies) done, so that the snapshot has them.
+        if (gPendingSize != 0) {
+            submit_frame(false, galaxy::gx::kNoDisplayedXfbAddr);
+        }
+        galaxy::gx::stream_checkpoint(frame);
+        galaxy::gx::wait_for_render_idle();
+#endif
+        return static_cast<uint32_t>(NEBULA_DET_SAVE);
+    };
+    auto restore = [&](uint32_t to) {
+#if defined(NEBULA_HOST_RENDERER)
+        // Commands of the undone frames not yet given to the renderer: dropped; the renderer's registers back, once
+        // it has written what the undone frames had it write (the restore then takes the game's memory back).
+        if (gPendingSize != 0) {
+            gModule.gx_release(gPendingSize);
+            gPendingSize = 0;
+        }
+        galaxy::gx::wait_for_render_idle();
+        galaxy::gx::stream_rewind(to);
+        if (!gAudio->restore_dsp(to)) {
+            std::fprintf(stderr, "[rollback] the DSP state of frame %u is gone\n", to);
+        }
+#endif
+        if (const auto saved = gSavedSceneFrames.find(to); saved != gSavedSceneFrames.end()) {
+            gSceneFrame = saved->second;
+        }
+        gSavedSceneFrames.erase(gSavedSceneFrames.upper_bound(to), gSavedSceneFrames.end());
+        if (const auto input = gSavedInputState.find(to); input != gSavedInputState.end()) {
+            input->second.put();
+        }
+        restore_test_run(to);
+        gSavedInputState.erase(gSavedInputState.upper_bound(to), gSavedInputState.end());
+        if (const auto nand = gMemNandSaved.find(to); nand != gMemNandSaved.end()) {
+            gMemNand = nand->second;
+        }
+        gMemNandSaved.erase(gMemNandSaved.upper_bound(to), gMemNandSaved.end());
+        last_saved = to;
+        // The game took grant `to` (and has not shown its retrace yet); the clock grants from to + 1, at once up to
+        // where it was.
+        gCatchUpTo.store(std::max(gCatchUpTo.load(), frame), std::memory_order_release);
+        gRetraces.store(to - 1, std::memory_order_release);
+        gRewindFrame.store(to, std::memory_order_release);
+        gRewindPending.store(true, std::memory_order_release);
+        *arg = to;
+        std::fprintf(stderr, "[rollback] back from frame %u to %u\n", frame, to);
+        return static_cast<uint32_t>(NEBULA_DET_RESTORE);
+    };
+    // Rollback netplay: a confirmed input that differs from the one its frame ran with sends the game back to the
+    // boundary before that frame; else every boundary is kept.
+    if (galaxy::net::session().active() && galaxy::net::session().settings().rollback != 0) {
+        if (const uint32_t granted = gGranted.load(); granted != frame) {
+            static uint32_t reported = 0;
+            if (reported++ < 20) std::fprintf(stderr, "[rollback] boundary %u while %u granted\n", frame, granted);
+        }
+        uint32_t mismatch = 0;
+        {
+            std::lock_guard<std::mutex> lock(gRollbackLock);
+            gUsedRemote.erase(gUsedRemote.begin(), gUsedRemote.lower_bound(frame > 64 ? frame - 64 : 0));
+            for (auto& [used_frame, used] : gUsedRemote) {
+                if (used.confirmed || used_frame > frame) continue;
+                galaxy::net::FrameInput real;
+                if (!galaxy::net::session().remote_input(used_frame, real)) break;
+                if (std::memcmp(&real.snapshot, &used.snapshot, sizeof(real.snapshot)) != 0) {
+                    mismatch = used_frame;
+                    break;
+                }
+                used.confirmed = true;
+            }
+            if (mismatch != 0) {
+                gUsedRemote.erase(gUsedRemote.lower_bound(mismatch), gUsedRemote.end());
+            }
+        }
+        if (mismatch == 0 && nand_in_memory()) {
+            uint32_t safe = frame;
+            {
+                std::lock_guard<std::mutex> lock(gRollbackLock);
+                for (const auto& [used_frame, used] : gUsedRemote) {
+                    if (!used.confirmed && used_frame <= frame) {
+                        safe = used_frame - 1;
+                        break;
+                    }
+                }
+            }
+            static uint32_t flushed = 0;
+            auto kept = gMemNandSaved.upper_bound(safe);
+            if (kept != gMemNandSaved.begin() && (--kept)->first != flushed) {
+                flushed = kept->first;
+                nand_flush(kept->second.entries);
+            }
+        }
+        if (mismatch != 0 && gSavedSceneFrames.count(mismatch - 1) != 0) {
+            static uint32_t rollbacks = 0;
+            ++gRollbackStats.rollbacks;
+            if (++rollbacks % 60 == 1) {
+                std::fprintf(stderr, "[netplay] rollback %u: frame %u ran with a predicted input\n", rollbacks, mismatch);
+            }
+            return restore(mismatch - 1);
+        }
+        if (last_saved != frame) return save();
+        return NEBULA_DET_NONE;
+    }
+    if (test.first != 0) {
+        if (frame == test.first && last_saved != frame) return save();
+        if (frame == test.second && !test_restored) {
+            test_restored = true;
+            return restore(test.first);
+        }
+    }
+    return NEBULA_DET_NONE;
+}
+
+// The test scripts' progress (svc_test_scene_frame): game state as far as a rollback goes (svc_det_boundary).
+struct TestRunState {
+    size_t next = 0;
+    uint64_t scene_frames = 0, since_stop = 0, stop_frame = 0;
+    size_t event_flags_taken = 0;
+    bool grand_stars_set = false;
+};
+TestRunState gTestRun;
+std::map<uint32_t, TestRunState> gSavedTestRun;
+
+void keep_test_run(uint32_t frame) {
+    gSavedTestRun[frame] = gTestRun;
+    while (gSavedTestRun.size() > 32) gSavedTestRun.erase(gSavedTestRun.begin());
+}
+
+void restore_test_run(uint32_t frame) {
+    if (const auto kept = gSavedTestRun.find(frame); kept != gSavedTestRun.end()) gTestRun = kept->second;
+    gSavedTestRun.erase(gSavedTestRun.upper_bound(frame), gSavedTestRun.end());
+}
+
 int svc_test_scene_frame(void*, NebulaTestAction* action) {
-    static uint64_t sHashFrame = 0;
-    write_state_hash(++sHashFrame);
+    write_state_hash(++gSceneFrame);
     struct Stop {
         std::string stage;
         int32_t scenario;
@@ -2626,8 +3155,10 @@ int svc_test_scene_frame(void*, NebulaTestAction* action) {
     static uint64_t tour_frames = 1200;
     static bool touring = false;
     static bool loaded = false;
-    static size_t next = 0;
-    static uint64_t scene_frames = 0, since_stop = 0, stop_frame = 0;
+    size_t& next = gTestRun.next;
+    uint64_t& scene_frames = gTestRun.scene_frames;
+    uint64_t& since_stop = gTestRun.since_stop;
+    uint64_t& stop_frame = gTestRun.stop_frame;
     if (!loaded) {
         loaded = true;
         if (const char* tour = std::getenv("GALAXY_TEST_GALAXY_TOUR")) {
@@ -2706,18 +3237,17 @@ int svc_test_scene_frame(void*, NebulaTestAction* action) {
         }
         return names;
     }();
-    if (!event_flags.empty() && scene_frames >= 2u) {
+    if (gTestRun.event_flags_taken < event_flags.size() && scene_frames >= 2u) {
         action->kind = NEBULA_TEST_SET_EVENT_FLAG;
-        std::snprintf(action->stage, sizeof(action->stage), "%s", event_flags.front().c_str());
+        std::snprintf(action->stage, sizeof(action->stage), "%s", event_flags[gTestRun.event_flags_taken++].c_str());
         log_line("test: event flag", action->stage);
-        event_flags.erase(event_flags.begin());
         return 1;
     }
     static const int32_t grand_stars = [] {
         const char* value = std::getenv("GALAXY_TEST_GRAND_STARS");
         return value != nullptr ? std::atoi(value) : 0;
     }();
-    static bool grand_stars_set = false;
+    bool& grand_stars_set = gTestRun.grand_stars_set;
     if (grand_stars > 0 && !grand_stars_set && scene_frames >= 2u) {
         grand_stars_set = true;
         action->kind = NEBULA_TEST_SET_GRAND_STARS;
@@ -3132,6 +3662,9 @@ void start_netplay(const fs::path& module) {
         const char* delay = std::getenv("GALAXY_NET_DELAY");
         settings.delay = std::clamp(delay != nullptr ? static_cast<uint32_t>(std::strtoul(delay, nullptr, 10)) : 3u,
                                     1u, 15u);
+        // GALAXY_NET_ROLLBACK=1: rollback (each PC runs ahead on the other's predicted input) instead of lockstep.
+        const char* rollback = std::getenv("GALAXY_NET_ROLLBACK");
+        settings.rollback = rollback != nullptr && rollback[0] == '1' ? 1u : 0u;
         // The save, and the Mii database the game reads at boot.
         std::vector<galaxy::net::SaveFile> save;
         for (const fs::path& part : {fs::path(gSaveDataPath.substr(1)), fs::path("shared2/menu/FaceLib")}) {
@@ -3370,6 +3903,7 @@ int main(int argc, char** argv) {
     services.gx_scene_marker = svc_gx_scene_marker;
     services.gx_split_clip = svc_gx_split_clip;
     services.luigi_swap = svc_luigi_swap;
+    services.det_boundary = svc_det_boundary;
     services.movie_frame = svc_movie_frame;
     services.code_patch = svc_code_patch;
     services.presence = svc_presence;

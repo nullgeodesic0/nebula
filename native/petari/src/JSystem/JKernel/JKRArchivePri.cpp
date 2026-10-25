@@ -36,13 +36,73 @@ JKRArchive::~JKRArchive() {
 }
 
 #ifdef TARGET_PC
+namespace {
+    // The tables live outside the game's heaps (the console spent no game heap on these pointers), but in the module's
+    // own data: a netplay snapshot (sdk/os/snapshot.c) takes and restores them with the archives that point at them.
+    // First fit over blocks with a header each; a free block merges with the free ones after it as the search passes.
+    struct TableBlock {
+        u32 mSize;  // bytes, header included
+        u32 mUsed;
+    };
+    const u32 cTablePoolSize = 512 * 1024;
+    alignas(16) u8 sTablePool[cTablePoolSize];
+    bool sTablePoolReady;
+
+    void* allocTable(u32 bytes) {
+        if (!sTablePoolReady) {
+            TableBlock* first = reinterpret_cast< TableBlock* >(sTablePool);
+            first->mSize = cTablePoolSize;
+            first->mUsed = 0;
+            sTablePoolReady = true;
+        }
+        const u32 need = (bytes + sizeof(TableBlock) + 15) & ~15u;
+        for (u32 at = 0; at < cTablePoolSize;) {
+            TableBlock* block = reinterpret_cast< TableBlock* >(sTablePool + at);
+            if (!block->mUsed) {
+                while (at + block->mSize < cTablePoolSize) {
+                    TableBlock* next = reinterpret_cast< TableBlock* >(sTablePool + at + block->mSize);
+                    if (next->mUsed) {
+                        break;
+                    }
+                    block->mSize += next->mSize;
+                }
+                if (block->mSize >= need) {
+                    if (block->mSize - need >= 64) {
+                        TableBlock* rest = reinterpret_cast< TableBlock* >(sTablePool + at + need);
+                        rest->mSize = block->mSize - need;
+                        rest->mUsed = 0;
+                        block->mSize = need;
+                    }
+                    block->mUsed = 1;
+                    void* table = block + 1;
+                    memset(table, 0, block->mSize - sizeof(TableBlock));
+                    return table;
+                }
+            }
+            at += block->mSize;
+        }
+        // The pool is full: host memory (a snapshot cannot take these back).
+        return ::calloc(bytes, 1);
+    }
+
+    void freeTable(void* table) {
+        u8* const at = static_cast< u8* >(table);
+        if (at >= sTablePool && at < sTablePool + cTablePoolSize) {
+            reinterpret_cast< TableBlock* >(at)[-1].mUsed = 0;
+        } else {
+            ::free(table);
+        }
+    }
+}  // namespace
+
 void JKRArchive::allocFileDataTable() const {
-    // Host memory: the console spent no game heap on these pointers.
-    mFileDataTable = static_cast< void** >(::calloc(mInfoBlock->mNrFiles, sizeof(void*)));
+    mFileDataTable = static_cast< void** >(allocTable(mInfoBlock->mNrFiles * sizeof(void*)));
 }
 
 void JKRArchive::freeFileDataTable() {
-    ::free(mFileDataTable);
+    if (mFileDataTable != nullptr) {
+        freeTable(mFileDataTable);
+    }
     mFileDataTable = nullptr;
 }
 #endif

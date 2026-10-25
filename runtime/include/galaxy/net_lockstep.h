@@ -36,6 +36,7 @@ struct SessionSettings {
     std::uint32_t text_speed = 1;
     std::uint32_t language = 0;
     std::uint32_t delay = 3;          // input delay in frames
+    std::uint32_t rollback = 0;       // 1: rollback (each PC runs ahead on the other's predicted input)
 };
 
 struct SaveFile {
@@ -77,6 +78,12 @@ public:
     // Both players' input for `frame`, by channel: waits for the other PC's (false when the session ended). Frames
     // up to the delay are neutral on both PCs.
     bool frame_inputs(std::uint32_t frame, FrameInput (&inputs)[2]);
+    // Rollback: the other PC's input for `frame` when it has come (false: not yet), the newest frame up to which all
+    // of it has, and this PC's own input for a frame (neutral up to the delay).
+    bool remote_input(std::uint32_t frame, FrameInput& input);
+    [[nodiscard]] std::uint32_t remote_confirmed() const;
+    [[nodiscard]] FrameInput local_input(std::uint32_t frame);
+    [[nodiscard]] bool ended() const;
     // The game memory's hash at a scene frame: sent, and compared with the other PC's.
     void report_hash(std::uint32_t scene_frame, std::uint64_t hash);
     [[nodiscard]] std::uint32_t desyncs() const noexcept;

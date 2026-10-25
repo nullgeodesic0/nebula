@@ -45,6 +45,9 @@ static BOOL sInitialized;
 NEBULA_GAME_API void nebula_game_fs_complete(uint32_t slot, int32_t result) {
     if (slot < kSlots) {
         sSlots[slot].result = result;
+        if (result > 0 && sSlots[slot].request.buffer != NULL) {
+            nebula_snapshot_touch(sSlots[slot].request.buffer, sSlots[slot].request.size);
+        }
         atomic_store_explicit(&sSlots[slot].done, 1, memory_order_release);
         nebula_raise_interrupt(__OS_INTERRUPT_PI_ACR);
         nebula_io_end();

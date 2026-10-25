@@ -56,6 +56,7 @@
 #include "galaxy/frame_telemetry.h"
 
 #include <array>
+#include <map>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -205,6 +206,9 @@ public:
         std::uint32_t displayed_xfb_addr,
         bool present_swap_chain = true);
     void wait_for_render_idle();
+    // Netplay's rollback (gx_d3d12.h): the register state kept and set back in stream order.
+    void stream_checkpoint(std::uint32_t id);
+    void stream_rewind(std::uint32_t id);
     [[nodiscard]] bool wait_for_frame_pe_completion_for(
         FramePeCompletionToken token,
         std::uint32_t timeout_ms);
@@ -597,6 +601,8 @@ private:
         std::size_t dirty_range_count = 0;
         bool dependency_cache_hit = false;
         MemorySnapshot memory_snapshot;
+        // Rollback's register checkpoints and rewinds due before this chunk's commands, in order.
+        std::vector<std::pair<bool, std::uint32_t>> stream_ops;  // (rewind, id)
     };
 
     struct PendingFrameEffects {
@@ -1317,6 +1323,16 @@ private:
     // top-level command tail and prepend the next capture chunk.
     // (Render-thread state, like everything below it down to the stats.)
     std::vector<std::byte> pending_fifo_;
+    // Rollback (stream_checkpoint/stream_rewind): the ops for the next chunk (simulation thread), and the kept
+    // states of the simulation thread's parsers and of the render thread's.
+    std::vector<std::pair<bool, std::uint32_t>> pending_stream_ops_;
+    struct ProducerStreamState {
+        GxState event_state;
+        GxState dependency_state;
+    };
+    std::map<std::uint32_t, ProducerStreamState> producer_stream_states_;
+    std::map<std::uint32_t, GxState> render_stream_states_;
+    void apply_stream_ops(const std::vector<std::pair<bool, std::uint32_t>>& ops);
     GxState event_state_;
     std::vector<std::byte> event_pending_fifo_;
     GxState dependency_state_;

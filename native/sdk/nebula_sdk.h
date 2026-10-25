@@ -3,6 +3,7 @@
 #define NEBULA_SDK_H
 
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include <revolution/types.h>
@@ -47,6 +48,22 @@ void nebula_fatal(const char* format, ...) __attribute__((noreturn, format(print
 
 /* The data tables the game keeps in main.dol, read from the user's disc (dol_data.c). */
 void nebula_load_dol_data(void);
+
+/* Module data the host's threads share with the simulation (event handoffs, the GPU command ring's writer, staged
+   input): kept out of netplay's snapshots (os/snapshot.c), which restore only the game's own state. */
+#define NEBULA_HOST_STATE __attribute__((section(".nbhost")))
+
+/* Snapshots (os/snapshot.c, deterministic mode): the retrace boundary's save or restore as the host asks
+   (det_boundary), the staged remote input and the GPU ring's unsent commands dropped on a restore. */
+void nebula_snapshot_boundary(uint32_t frame);
+/* Deterministic mode: [addr, addr + size) of the game's memory was written by the host, maybe by the system (a file
+   read straight into it, which the snapshots' write watch does not see): marks those pages written. */
+void nebula_snapshot_touch(void* addr, uint32_t size);
+void nebula_det_clear_staged(void);
+void nebula_gx_drop_unsubmitted(void);
+void nebula_gx_wait_idle(void);
+size_t nebula_gx_pending(const uint8_t** bytes, uint8_t** ptr, uint8_t** end);
+void nebula_gx_restore_pending(const uint8_t* bytes, size_t size, uint8_t* ptr, uint8_t* end);
 
 /* The OS core (os/os_native.c). */
 /* A device interrupt by its SDK number (__OS_INTERRUPT_*), from any host thread: the handler registered with

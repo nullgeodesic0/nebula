@@ -53,18 +53,18 @@ extern volatile void* __peReg;
 extern volatile void* __piReg;
 extern volatile void* __memReg;
 
-NebulaGXWriter __NebulaGXWriter;
+NEBULA_HOST_STATE NebulaGXWriter __NebulaGXWriter;
 
 enum { kRingSize = 16u << 20 };
 
-static uint8_t* sRing;          /* kRingSize bytes, mapped again at sRing + kRingSize */
-static uint8_t* sSpanStart;     /* the first byte not yet handed to the host */
-static uint64_t sSubmitted;     /* bytes handed to the host, ever */
-static _Atomic uint64_t sReleased; /* bytes the host has released, ever */
-static atomic_int sWaitingForRoom;
+static NEBULA_HOST_STATE uint8_t* sRing;          /* kRingSize bytes, mapped again at sRing + kRingSize */
+static NEBULA_HOST_STATE uint8_t* sSpanStart;     /* the first byte not yet handed to the host */
+static NEBULA_HOST_STATE uint64_t sSubmitted;     /* bytes handed to the host, ever */
+static NEBULA_HOST_STATE _Atomic uint64_t sReleased; /* bytes the host has released, ever */
+static NEBULA_HOST_STATE atomic_int sWaitingForRoom;
 
 #if defined(_WIN32)
-static HANDLE sRoomEvent;
+static NEBULA_HOST_STATE HANDLE sRoomEvent;
 #else
 static pthread_mutex_t sRoomLock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t sRoomCond = PTHREAD_COND_INITIALIZER;
@@ -86,7 +86,10 @@ static uint8_t* map_ring(void) {
     MapViewOfFile3Fn mapViewOfFile3 = kernelbase ? (MapViewOfFile3Fn)(void*)GetProcAddress(kernelbase, "MapViewOfFile3") : NULL;
     if (virtualAlloc2 != NULL && mapViewOfFile3 != NULL) {
         /* Windows 10 1803 and later: two placeholders, each replaced by a view of the section. */
-        uint8_t* p = (uint8_t*)virtualAlloc2(NULL, NULL, 2 * (SIZE_T)kRingSize, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+        /* Deterministic mode: at one address in every process (the game keeps pointers into it; live join loads them
+           into another process). */
+        void* const wanted = nebula_deterministic() ? (void*)(uintptr_t)0x7C0000000000ull : NULL;
+        uint8_t* p = (uint8_t*)virtualAlloc2(NULL, wanted, 2 * (SIZE_T)kRingSize, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
                                               PAGE_NOACCESS, NULL, 0);
         if (p != NULL && VirtualFree(p, kRingSize, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) &&
             mapViewOfFile3(section, NULL, p, 0, kRingSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, NULL, 0) == p &&
@@ -206,7 +209,7 @@ static void update_markers(void) {
 }
 /* Where a display list's writes go once it has overflowed (the SDK then reports the wrap and the list as empty);
    larger than any single reservation. */
-static u8 sOverflowSink[4096];
+static NEBULA_HOST_STATE u8 sOverflowSink[4096];
 
 static void point_writer(void) {
     if (sLinked) {
@@ -315,7 +318,7 @@ void __NebulaGXStripeParticle(u32 particle, u32 ageLifetime, u8 strip) {
 }
 
 /* The draw-sync token whose callback runs (GXTokenInterruptHandler): its peeks read the EFB as the stream reached it. */
-static u16 sPeekToken;
+static NEBULA_HOST_STATE u16 sPeekToken;
 
 void __NebulaGXPeekToken(u16 token) {
     sPeekToken = token;
@@ -487,6 +490,57 @@ void __GXFifoInit(void) {
 }
 
 /* GXAbortFrame: what the GPU has not read yet is dropped, as the console's FIFO reset drops it. */
+/* A restore (os/snapshot.c): commands written since the last submission belong to frames that are undone. */
+void nebula_gx_drop_unsubmitted(void) {
+    if (sLinked) {
+        __NebulaGXWriter.ptr = sSpanStart;
+        point_writer();
+    }
+}
+
+/* A snapshot's part of the writer (os/snapshot.c): on the main FIFO, the commands written since the last submission
+   (the game wrote them before the save point; a restore writes them again); in a display list, where its writes go. */
+size_t nebula_gx_pending(const uint8_t** bytes, uint8_t** ptr, uint8_t** end) {
+    *ptr = __NebulaGXWriter.ptr;
+    *end = __NebulaGXWriter.end;
+    if (!sLinked) {
+        *bytes = NULL;
+        return 0;
+    }
+    *bytes = sSpanStart;
+    return (size_t)(__NebulaGXWriter.ptr - sSpanStart);
+}
+
+/* After a restore (the GX state is the save's, the renderer idle): the writer as it was at the save. */
+void nebula_gx_restore_pending(const uint8_t* bytes, size_t size, uint8_t* ptr, uint8_t* end) {
+    if (sLinked) {
+        if (size != 0) {
+            memcpy(sSpanStart, bytes, size); /* the ring is mapped twice: contiguous past its end */
+        }
+        __NebulaGXWriter.ptr = sSpanStart + size;
+        point_writer();
+    } else {
+        __NebulaGXWriter.ptr = ptr;
+        __NebulaGXWriter.end = end;
+    }
+}
+
+/* Until the renderer has done all the work handed to it (it reads the game's memory as it goes: display lists,
+   textures, vertices), as a restore must before it rewrites that memory. */
+void nebula_gx_wait_idle(void) {
+    while (atomic_load(&sReleased) < sSubmitted) {
+        atomic_store(&sWaitingForRoom, 1);
+        if (atomic_load(&sReleased) < sSubmitted) {
+#if defined(_WIN32)
+            WaitForSingleObject(sRoomEvent, 1);
+#else
+            usleep(200);
+#endif
+        }
+    }
+    atomic_store(&sWaitingForRoom, 0);
+}
+
 void __GXCleanGPFifo(void) {
     if (sLinked) {
         __NebulaGXWriter.ptr = sSpanStart;

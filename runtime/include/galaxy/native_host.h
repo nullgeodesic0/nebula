@@ -164,6 +164,10 @@ public:
     void load_voices(const std::filesystem::path& folder);
     // The DSP program's counters for the [jaudio] log line.
     [[nodiscard]] std::string stats_line() const;
+    // Netplay's rollback (deterministic mode): the DSP program's state as of a frame's boundary, kept for the last
+    // frames, and back to a kept frame (its later ones dropped). Call on the simulation thread.
+    void save_dsp(std::uint32_t frame);
+    bool restore_dsp(std::uint32_t frame);
 
 private:
     struct State;

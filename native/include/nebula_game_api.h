@@ -23,7 +23,7 @@ extern "C" {
 #define NEBULA_GAME_API __attribute__((visibility("default")))
 #endif
 
-#define NEBULA_GAME_API_VERSION 23u
+#define NEBULA_GAME_API_VERSION 24u
 
 /* A physical range of the game's memory and where it is in the host process: what the GPU's addresses resolve to. */
 typedef struct NebulaGameMemoryRegion {
@@ -179,6 +179,13 @@ enum {
     NEBULA_LIGHT_PLAYER,        /* the player's current light: ambient (3), then the key and the fill light each:
                                    colour (3), position (3; the camera's eye space when it follows the camera),
                                    follows the camera (1) */
+};
+
+/* det_boundary's answers. */
+enum {
+    NEBULA_DET_NONE = 0,
+    NEBULA_DET_SAVE,    /* keep this boundary (a rollback may come back to it) */
+    NEBULA_DET_RESTORE, /* go back to the kept boundary *arg */
 };
 
 /* NEBULA_OPTION_TEST_PUT's kinds. */
@@ -457,6 +464,10 @@ typedef struct NebulaHostServices {
     /* Luigi's animation swap table from the enabled mods (the first with a luigi_swap.txt: "<bck> <bck>" lines,
        # comments), as text into `out` (at most `size` bytes, NUL-terminated); its length, 0 when no mod has one. */
     uint32_t (*luigi_swap)(void* user, char* out, uint32_t size);
+    /* Deterministic mode, at each retrace boundary (frame: the boundaries so far, counted by the module): what to do
+       there (NEBULA_DET_*; *arg: the frame to restore). After a save the host is asked again; a restore resumes the
+       saved boundary (netplay's rollback, sdk/os/snapshot.c). */
+    uint32_t (*det_boundary)(void* user, uint32_t frame, uint32_t* arg);
 } NebulaHostServices;
 
 enum {
