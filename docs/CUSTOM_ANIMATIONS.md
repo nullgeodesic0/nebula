@@ -170,6 +170,28 @@ is opaque, and Luigi's pupil sheet covers the whole eye but is about 82% see-thr
 is composited over an eye white instead of filled with its average colour, which made the eyes solid blue
 (Mario's pupil sheet is opaque and needs neither).
 
+### Building without the .blend (`--export`, `--from-export`)
+
+`build_animation_mod.py ... --export custom_animations.zip` also writes the converted animations as a zip:
+`manifest.json` (format, `MAP`, notes) and one `<variant>/<animation>.ank1` per converted animation: the
+ANK1 section the converter wrote, without the BCK's file header. `build_animation_mod.py --content <content>
+--from-export custom_animations.zip [--luigi-originals]` builds `mods/animations` from it and the player's
+own game.pak (each BCK's header is taken from the disc), byte for byte what the .blend build writes; with
+`--model`, also `mods/animations-model`. The custom model's variant is only exported when no face animation
+file drove it, since Odyssey's face animations are the game's data. The export carries no meshes, textures
+or game clips; whether its contents may be shared depends on where the .blend's actions come from.
+
+### Animation packs (drop-in, no build step)
+
+A pack is a folder of `.ank1` files: `build_animation_mod.py ... --pack <folder>` (with `--blend`, or with
+`--from-export`) writes one per converted animation, named after the MarioAnime.arc animation it replaces,
+plus `pack.txt`. Put the folder in `<content>\mods\animation-packs\` and turn on F1 > General > Custom
+animations. At boot (`runtime/src/animation_packs.cpp`) Nebula reads the game's own MarioAnime.arc from
+game.pak, replaces each animation that a pack has (with the game's own BCK header), and serves the rebuilt
+archive from an unused disc area through the file table; the log says `[mods] animation packs: N animations
+from M pack(s)`. A pack takes the place of a built `mods\animations` mod; the model mod still loads. Packs
+load in name order, later ones winning; with the custom model on, a pack's `model\` files win over its own.
+
 ## Voices (F1 > General > Custom voice)
 
 `build_voice_mod.py` converts the SMO voice clips to 16-bit mono 32 kHz WAVs in `<content>\mods\voice`,
