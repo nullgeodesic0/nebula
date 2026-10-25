@@ -58,8 +58,6 @@ version stays for rollback. Update both PCs.
 - Wrong port: if the host starts `Host online game.cmd 7800`, the joiner types `address:7800`, and that port is the
   one forwarded.
 - The join is refused: both PCs must run the same Nebula Plus version with the same mods.
-- Known issue: in split screen, Honeyhive Galaxy's waterfall is drawn as a solid blue column in one half; it is only
-  a picture problem.
 - Logs for a bug report: `data\logs` in the Nebula Plus folder.
 
 **The pre-Nebula 2 build** (releases tagged `plus-v`, the recompiled game) is kept as a legacy download. It installs
