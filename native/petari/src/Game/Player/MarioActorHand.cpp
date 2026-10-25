@@ -87,6 +87,11 @@ void MarioActor::updateHand() {
     if (mCurrModel == 1) {
         hideHands = true;
     }
+#ifdef TARGET_PC
+    if (isCustomBodyWithOwnParts()) {
+        hideHands = true;
+    }
+#endif
     if (getMovementStates()._F) {
         hideHands = true;
     }

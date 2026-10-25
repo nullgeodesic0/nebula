@@ -644,7 +644,19 @@ void MarioActorDraw_FORCE_MATCH_SDATA2_2() {
     (void)0.00001f;
 }
 
+#ifdef TARGET_PC
+bool MarioActor::isCustomBodyWithOwnParts() const {
+    return mCurrModel == 0 && mModels[0] != nullptr && mModels[0]->getModelData()->getJointNum() > 30;
+}
+#endif
+
 void MarioActor::updateFace() {
+#ifdef TARGET_PC
+    if (isCustomBodyWithOwnParts()) {
+        MR::hideModel(_A5C);
+        return;
+    }
+#endif
     switch (mCurrModel) {
     case 1:
     case 3:
