@@ -525,6 +525,7 @@ target_link_libraries(galaxy_jaudio_mixer_tests PRIVATE galaxy_jaudio_mixer)
 
 add_library(galaxy_native_host STATIC
     runtime/src/native_host.cpp
+    runtime/src/animation_packs.cpp
     runtime/src/wii_device_data.cpp
     runtime/src/mii_import.cpp
     runtime/src/mii_formats.cpp
@@ -567,6 +568,7 @@ endif()
 # product runtime cannot re-enable that mixer with an environment variable.
 add_library(galaxy_native_host_test_support STATIC
     runtime/src/native_host.cpp
+    runtime/src/animation_packs.cpp
     runtime/src/wii_device_data.cpp
     runtime/src/mii_import.cpp
     runtime/src/mii_formats.cpp
@@ -1069,7 +1071,6 @@ add_executable(NebulaRuntime
     runtime/src/agent_guest.cpp
     runtime/src/voice_replacement.cpp
     runtime/src/hot_join.cpp
-    runtime/src/animation_packs.cpp
 )
 # Exported releases pass their source identity; working checkouts report Git
 # identity/dirty state at build time. This is runtime provenance, not a label
