@@ -1,5 +1,9 @@
 # Nebula Plus
 
+> **Legacy.** This branch is Nebula Plus for the recompiled Nebula 1 (releases tagged `plus-v`). Upstream Nebula
+> has moved to the native game (Nebula 2), and Nebula Plus with it: use branch `nebula2` and the `plus2-v`
+> releases (see that branch's README, "For friends"). The two never update into each other.
+
 Nebula Plus is a separate Nebula install with this fork's additions: Mario and Luigi co-op (local split screen,
 drop-in/drop-out, online netplay with live join and rollback), the Odyssey moveset, the Odyssey Mario and Luigi
 models, animations and voice, the graphics and controller additions, and the fixes that came with them. It sits
