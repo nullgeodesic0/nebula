@@ -13738,6 +13738,11 @@ void GxBackend::render_frame_on_thread(FrameChunk& chunk) {
 
     ++frame_index_;
     timing_frame_index_.store(frame_index_, std::memory_order_relaxed);
+    // A SplitClip marker holds for the rest of its frame only. Split screen sends its halves' markers again every
+    // frame; online, the other player's cursor is clipped away (coop_guest.cpp) and, with no split open (the
+    // title, the menus, a joinable game no one has joined), nothing else would ever lift that clip: every later
+    // draw, the EFB clears too, would be clipped and the picture would freeze under the cursors.
+    split_clip_ = {0.0f, 0.0f, 0.0f};
     if (trace_xfb_causal_enabled() || trace_xfb_causal_deferred_enabled()) {
         causal_trace_frame_index_.store(
             frame_index_, std::memory_order_relaxed);
