@@ -21,7 +21,9 @@ param(
     [string]$SigningKey = (Join-Path $env:USERPROFILE '.nebula-plus\plus-release-key.xml'),
     [string]$Notes = '',
     [string]$WorkRoot = '',
-    [switch]$Draft
+    [switch]$Draft,
+    # A test build: listed on GitHub as a pre-release.
+    [switch]$Prerelease
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
@@ -39,6 +41,7 @@ $body = "Nebula Plus $Version for Nebula 2 (the native game), built from $commit
 $ghArgs = @('release', 'create', "plus2-v$Version", '--repo', $Repository, '--target', $commit, '--title', "Nebula Plus $Version", '--notes', $body,
     (Join-Path $out "NebulaPlus-Setup-$Version.zip"), $zip, "$zip.sig", (Join-Path $out 'plus-release.json'))
 if ($Draft) { $ghArgs += '--draft' }
+if ($Prerelease) { $ghArgs += '--prerelease' }
 & gh @ghArgs
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
 Write-Host "Published plus2-v$Version ($commit) on $Repository."
