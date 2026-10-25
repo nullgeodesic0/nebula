@@ -1,7 +1,7 @@
 """Contact sheet of the converted animations: Galaxy's Mario posed by the built mod's BCKs (blue)
 over the source action in the .blend (orange), front and side views, a few frames each.
 
-    py -3 tools/animations/preview.py --blend file.blend --content C:/nb/build/content --out sheet.png
+    py -3 tools/animations/preview.py --blend file.blend --content C:/path/to/content --out sheet.png
 Needs matplotlib.
 """
 import argparse

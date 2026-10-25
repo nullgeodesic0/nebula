@@ -1,7 +1,7 @@
 """Builds Nebula's custom-model mod: a skinned model from a COLLADA file (made for the Smash Bros.
 Ultimate Mario rip) re-skinned onto Galaxy Mario's skeleton.
 
-    py -3 tools/animations/build_model_mod.py --dae C:/path/mario.dae --content C:/nb/build/content
+    py -3 tools/animations/build_model_mod.py --dae C:/path/mario.dae --content C:/path/to/content
 
 The model is scaled onto Galaxy's rest skeleton (both are T-poses), its bones are folded onto
 Galaxy's 30 joints, and it is written into mario.bdl with Galaxy's own skeleton, scene graph and

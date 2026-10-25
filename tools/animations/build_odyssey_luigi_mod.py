@@ -1,7 +1,7 @@
 """Adds an Odyssey Luigi to Nebula's custom-model mod, from a glTF export of Super Mario Odyssey's Luigi
 (skinned to the Odyssey player rig, textures embedded or next to it).
 
-    py -3 tools/animations/build_odyssey_luigi_mod.py --gltf C:/path/Luigi.gltf --content C:/nb/content-mp
+    py -3 tools/animations/build_odyssey_luigi_mod.py --gltf C:/path/Luigi.gltf --content C:/path/to/content
 
 Run it after build_odyssey_model_mod.py on the same content: Galaxy plays Mario's animations on Luigi, so
 Luigi gets the Odyssey Mario model's skeleton (Galaxy's 30 joints, which Galaxy's Luigi shares, and the

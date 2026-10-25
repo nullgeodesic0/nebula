@@ -1,6 +1,6 @@
-﻿"""Builds Nebula's custom-animation mod from a Blender file of Mario animations.
+"""Builds Nebula's custom-animation mod from a Blender file of Mario animations.
 
-    py -3 tools/animations/build_animation_mod.py --blend "C:/path/file.blend" --content C:/nb/build/content
+    py -3 tools/animations/build_animation_mod.py --blend "C:/path/file.blend" --content C:/path/to/content
 
 Converts the mapped actions (MAP below) of the file's armature to Galaxy BCKs, puts them into the
 player's MarioAnime.arc taken from the user's own game.pak, and writes a disc mod to

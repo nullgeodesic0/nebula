@@ -1,7 +1,7 @@
-﻿"""Builds Nebula's custom-voice mod: Mario's voice lines from a folder of clips (made for the
+"""Builds Nebula's custom-voice mod: Mario's voice lines from a folder of clips (made for the
 "Super Mario Odyssey Voice" sm64ex character pack: "(Mario) Jump 1.ogg" and so on).
 
-    py -3 tools/animations/build_voice_mod.py --clips "C:/path/SMO Mario Voice/sound" --content C:/nb/build/content
+    py -3 tools/animations/build_voice_mod.py --clips "C:/path/SMO Mario Voice/sound" --content C:/path/to/content
 
 Writes <content>/mods/voice: each clip as 16-bit mono WAV at 32000 Hz (the rate Galaxy's DSP mixes at;
 band-limited resampling), loudness-normalised with a true-peak ceiling (report.txt),
