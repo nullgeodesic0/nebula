@@ -2489,6 +2489,13 @@ uint32_t svc_option(void*, uint32_t what) {
         }();
         return put;
     }
+    case NEBULA_OPTION_TEST_FACE_CAMERA: {
+        static const uint32_t distance = [] {
+            const char* value = std::getenv("GALAXY_TEST_FACE_CAMERA");
+            return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+        }();
+        return distance;
+    }
     case NEBULA_OPTION_TEST_LAUNCH_STAR: {
         static const uint32_t turn = [] {
             const char* value = std::getenv("GALAXY_TEST_LAUNCH_STAR");

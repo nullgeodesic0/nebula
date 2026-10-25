@@ -1,5 +1,8 @@
 #include "Game/Camera/CameraContext.hpp"
 #include "Game/Util/MathUtil.hpp"
+#include "Game/Player/MarioAccess.hpp"
+#include "Game/Scene/SceneObjHolder.hpp"
+#include "Game/Util/PlayerUtil.hpp"
 #include "Game/Util/ScreenUtil.hpp"
 #include "Game/Util/SystemUtil.hpp"
 
@@ -69,7 +72,23 @@ f32 CameraContext::getRenderFovy() const {
 
 void CameraContext::setViewMtx(const TPos3f& rMtx, bool b1, bool b2, const TVec3f& rVec) {
     mView.set(rMtx);
-    mViewInv.invert(rMtx);
+#ifdef TARGET_PC
+    // Tests: a close-up of the player's face (NEBULA_OPTION_TEST_FACE_CAMERA).
+    static const u32 sFaceDistance = __NebulaOption(NEBULA_OPTION_TEST_FACE_CAMERA);
+    if (sFaceDistance != 0 && MR::isExistSceneObj(SceneObj_MarioHolder) && MarioAccess::getPlayerActor() != nullptr) {
+        TVec3f up;
+        TVec3f front;
+        MR::getPlayerUpVec(&up);
+        MR::getPlayerFrontVec(&front);
+        const TVec3f& pos = *MR::getPlayerPos();
+        const TVec3f head(pos.x + up.x * 125.0f, pos.y + up.y * 125.0f, pos.z + up.z * 125.0f);
+        const f32 distance = static_cast< f32 >(sFaceDistance);
+        const TVec3f eye(head.x + front.x * distance + up.x * 10.0f, head.y + front.y * distance + up.y * 10.0f,
+                         head.z + front.z * distance + up.z * 10.0f);
+        mView.setPositionFromLookAt(eye, up, head);
+    }
+#endif
+    mViewInv.invert(mView);
 }
 
 void CameraContext::setNearZ(f32 near) {

@@ -155,6 +155,8 @@ enum {
     NEBULA_OPTION_TEST_PUT,         /* tests (GALAXY_TEST_PUT="<kind>,<player>,<turn>"): at the co-op second player's
                                        turn, a player (0 first, 1 second) put on the scene's nearest object of a kind
                                        (NEBULA_TEST_PUT_*): turn | kind << 20 | player << 28; 0 never */
+    NEBULA_OPTION_TEST_FACE_CAMERA, /* tests (GALAXY_TEST_FACE_CAMERA=<distance>): the camera that far in front of the
+                                       player's head, looking at it (close-ups of the face); 0 the game's */
 };
 
 /* NEBULA_OPTION_MOVESET: the moves on, then each of them, and whether a co-op second player has them too. */
