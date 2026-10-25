@@ -184,4 +184,5 @@ from their own disc and files, and never uploaded.
 
 - Install and update logs: `logs\install-<time>.log`. The game's: `data\logs\<launcher>-<time>.log`.
 - `NebulaPlusCli.exe status` shows the version, the commit, the custom mod's parts and the update source.
-- An install that stops leaves the previous version as it was: nothing switches until the new one is complete.
+- An install or update that stops (closed, crashed, no network) leaves the installed version as it was: nothing
+  switches until the new one is complete. Running it again resumes a half-finished download.
