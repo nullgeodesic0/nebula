@@ -30,7 +30,7 @@ namespace Nebula.Plus
                 "rem the model, animations and voice in F1 > General.", saves, "nebula-plus", "shadercache", "", "run");
             Write(layout, "Host online game.cmd", "Online co-op, host (Mario). Your friend runs \"Join online game.cmd\" with this PC's address.\r\n" +
                 "rem Usage: \"Host online game.cmd\" [port, default 7777 UDP] [input delay in frames, default 3]",
-                saves, "nebula-plus-host", "shadercache",
+                saves, "nebula-plus-host", "shadercache-host",
                 "set \"PORT=%~1\"\r\nif \"%PORT%\"==\"\" set \"PORT=7777\"\r\nset \"DELAY=%~2\"\r\nif \"%DELAY%\"==\"\" set \"DELAY=3\"\r\n" +
                 "set \"GALAXY_NET_HOST=%PORT%\"\r\nset \"GALAXY_NET_DELAY=%DELAY%\"\r\n" +
                 "echo Hosting on UDP port %PORT%. The game waits at the start until your friend connects.\r\n", "host");
