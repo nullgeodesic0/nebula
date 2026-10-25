@@ -1,4 +1,4 @@
-﻿"""Builds Nebula's custom-animation mod from a Blender file of Mario animations.
+"""Builds Nebula's custom-animation mod from a Blender file of Mario animations.
 
     py -3 tools/animations/build_animation_mod.py --blend "C:/path/file.blend" --content C:/nb/build/content
 
@@ -10,9 +10,11 @@ Everything is built on the user's machine from their own files; nothing from the
 """
 import argparse
 import hashlib
+import json
 import os
 import struct
 import sys
+import zipfile
 
 import numpy as np
 
@@ -345,9 +347,53 @@ def convert(rig, act, original, faces=False, defaults=None, face=None, frames=No
     return j3d.write_bck(original, loop_mode, dur, tracks), dur, loop, period, sorted(set(rig.map) - animated)
 
 
+EXPORT_FORMAT = 'nebula-custom-animations 1'
+
+
+def write_export(path, export, lines):
+    """The converted animations without any game data: per variant and Galaxy animation, the ANK1 section the
+    converter wrote. Building from it (--from-export) adds back the game's own BCK header from the player's
+    disc, so no Blender file is needed."""
+    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.writestr('manifest.json', json.dumps({
+            'format': EXPORT_FORMAT, 'game': 'RMGE01', 'archive': ARCHIVE,
+            'map': {k: list(v) for k, v in MAP.items()}, 'moveset': sorted(MOVESET),
+            'variants': {f: sorted(v) for f, v in export['variants'].items()},
+            'notes': export['notes'], 'lines': lines}, indent=1, ensure_ascii=False))
+        for folder, anims in export['variants'].items():
+            for name, ank in sorted(anims.items()):
+                z.writestr('%s/%s.ank1' % (folder, name), ank)
+        if export['neutral']:
+            z.writestr('neutral_joints.txt', export['neutral'])
+    print('exported', path, os.path.getsize(path), 'bytes')
+
+
+def read_export(path, bcks):
+    """From a file --export wrote: variants (folder -> (BCK name -> bytes, notes)) completed with the game's own
+    BCK headers from bcks, the report's lines and the model's neutral pose."""
+    with zipfile.ZipFile(path) as z:
+        m = json.loads(z.read('manifest.json'))
+        if m.get('format') != EXPORT_FORMAT:
+            raise ValueError('%s is not a %s file' % (path, EXPORT_FORMAT))
+        variants = {}
+        for folder, names in m['variants'].items():
+            replace = {}
+            for name in names:
+                ank = z.read('%s/%s.ank1' % (folder, name))
+                head = bytearray(bcks[name + '.bck'][:32])
+                struct.pack_into('>I', head, 8, 32 + len(ank))
+                replace[name + '.bck'] = bytes(head) + ank
+            variants[folder] = (replace, m['notes'].get(folder, []))
+        neutral = z.read('neutral_joints.txt').decode() if 'neutral_joints.txt' in z.namelist() else None
+    return variants, m['lines'] + ['(built from %s)' % os.path.basename(path)], neutral
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--blend', required=True)
+    ap.add_argument('--blend', help='the .blend with the actions (or --from-export)')
+    ap.add_argument('--export', help='also write the converted animations, without any game data, to this file '
+                    '(a zip: one ANK1 section per animation and variant, the neutral pose, notes)')
+    ap.add_argument('--from-export', help='build from a file written by --export instead of a .blend')
     ap.add_argument('--content', required=True, help='Nebula content folder (holds game.pak)')
     ap.add_argument('--only', help='comma-separated Galaxy animation names to convert')
     ap.add_argument('--model', help='the custom model mod folder (mods/model): its skeleton, with any joints '
@@ -359,6 +405,8 @@ def main():
     ap.add_argument('--luigi-originals', action='store_true',
                     help='co-op: keep Galaxy\'s clips for Luigi outside the Odyssey moveset (luigi_swap.txt)')
     args = ap.parse_args()
+    if not args.blend and not args.from_export:
+        ap.error('--blend or --from-export is needed')
 
     pak = disc.Pak(os.path.join(args.content, 'game.pak'))
     model = disc.rarc_files(disc.yaz0_decode(pak.read(MODEL)))['mario.bdl']
@@ -366,6 +414,18 @@ def main():
     original_arc = pak.read(ARCHIVE)
     arc = disc.yaz0_decode(original_arc)
     bcks = disc.rarc_files(arc)
+
+    if args.from_export:
+        variants, lines, neutral = read_export(args.from_export, bcks)
+        if neutral and args.model:
+            with open(os.path.join(args.model, 'neutral_joints.txt'), 'w', newline='\n') as f:
+                f.write(neutral)
+        for folder, (replace, notes) in variants.items():
+            if folder == 'animations-model' and not args.model:
+                continue  # the custom model's variant only goes with that model
+            write_variant(args, pak, arc, bcks, folder, replace, notes, lines, False)
+        return
+    export = {'variants': {}, 'notes': {}, 'neutral': None} if args.export else None
 
     blend = blendfile.Blend(args.blend)
     order, bones = blendfile.read_armature(blend)
@@ -401,13 +461,15 @@ def main():
             for j in sorted(defaults):
                 v = [defaults[j][axis * 3 + comp][0][1] for comp in range(3) for axis in range(3)]
                 f.write('%d %s\n' % (j, ' '.join('%.6g' % x for x in v)))
+        if export is not None and driver is None:
+            with open(os.path.join(args.model, 'neutral_joints.txt')) as f:
+                export['neutral'] = f.read()
     lines = ['Custom animations: Galaxy animation <- action in %s' % os.path.basename(args.blend),
              'blend scene rate %s fps; rest-pose difference per joint (degrees): %s' % (
                  blendfile.scene_fps(blend),
                  ', '.join('%s %.0f' % kv for kv in rig.rest_difference().items())), '']
     # Two archives: "animations" for Galaxy's own model, and "animations-model" for the custom model, whose
     # extra faces the converted animations switch (Nebula picks the second while the custom model is on).
-    offset, size, entry_pos = pak.files[ARCHIVE]
     # With a model that adds face joints, its faces come from those joints and no faces are switched.
     for folder, faces, frig in (('animations', False, rig), ('animations-model', defaults is None, rig_model)):
         replace = {}
@@ -429,6 +491,10 @@ def main():
                 kept = [i for i in kept if i not in driver.joints]
                 label = '%s (face: %s)' % (action, face[1].name)
             replace[name + '.bck'] = data
+            # The ANK1 section alone. The custom model's variant is left out when Odyssey's face animations drive
+            # it: those are the game's data, not the .blend's.
+            if export is not None and not (driver is not None and frig is rig_model):
+                export['variants'].setdefault(folder, {})[name] = bytes(data[32:])
             if loop and len(entry) > 2 and entry[2] is not None:
                 timing = 'held pose (source frame %s), game loop of %d' % ('last' if entry[2] < 0 else entry[2], dur)
             elif loop:
@@ -458,53 +524,63 @@ def main():
             for name in bcks:
                 if name.endswith('.bck') and name not in replace and len(bcks[name]) > 64:
                     replace[name] = hide_extra_faces(rig, bcks[name])
-        new_arc = disc.rarc_replace(arc, replace)
-        swaps = []
-        if args.luigi_originals:
-            # Co-op: Luigi keeps Galaxy's animations where Mario has converted ones, except the Odyssey
-            # moveset's. Galaxy gives Luigi his own clips through a swap table of BCK names (run -> luigirun);
-            # the clips Mario's conversions replace are added as luigi<name>, and luigi_swap.txt lists the
-            # whole table for the runtime to install for Luigi.
-            own = {name: 'luigi' + name for name in LUIGI_OWN}
-            added = {'luigi%s.bck' % name: bcks[name + '.bck'] for name in replace_names(replace)
-                     if name not in MOVESET and name not in own and 'luigi%s.bck' % name not in bcks}
-            new_arc = disc.rarc_add(new_arc, added)
-            swaps = sorted(own.items()) + sorted((n[5:-4], n[:-4]) for n in added)
-            notes += ['', 'Luigi (co-op): his own Galaxy clips for %d animations, Mario\'s converted ones for the '
-                      'moveset (%s)' % (len(swaps), ', '.join(sorted(MOVESET & set(replace_names(replace)))))]
-        packed = disc.yaz0_encode(new_arc)
-        if disc.yaz0_decode(packed) != new_arc:
-            raise RuntimeError('Yaz0 round trip failed')
-        packed += b'\0' * ((-len(packed)) % 32)
-        # Only one of the two is loaded at a time, so both use the same unused area of the disc.
-        target = pak.filler_area(len(packed))
-        entry = bytearray(pak.m[entry_pos:entry_pos + 12])
-        struct.pack_into('>II', entry, 4, target >> 2, len(packed))
+        if export is not None:
+            export['notes'][folder] = notes
+        write_variant(args, pak, arc, bcks, folder, replace, notes, lines, faces)
+    if export is not None:
+        write_export(args.export, export, lines)
 
-        out = os.path.join(args.content, 'mods', folder)
-        os.makedirs(out, exist_ok=True)
-        with open(os.path.join(out, 'MarioAnime.arc.yaz0'), 'wb') as f:
-            f.write(packed)
-        with open(os.path.join(out, 'fst_marioanime.bin'), 'wb') as f:
-            f.write(entry)
-        with open(os.path.join(out, 'manifest.txt'), 'w', newline='\n') as f:
-            f.write('# Nebula custom animations, built by tools/animations/build_animation_mod.py\n'
-                    'version 1\ngame RMGE01\nmain_dol_sha1 %s\n' % MAIN_DOL_SHA1)
-            f.write('0x%X 12 fst_marioanime.bin  # %s: 0x%X -> 0x%X\n' % (entry_pos, ARCHIVE, offset, target))
-            f.write('0x%X %d MarioAnime.arc.yaz0\n' % (target, len(packed)))
-        report = lines + notes + ['', 'archive %d bytes (game %d), at disc offset 0x%X; sha1 %s' % (
-            len(packed), size, target, hashlib.sha1(packed).hexdigest())]
-        with open(os.path.join(out, 'report.txt'), 'w', newline='\n') as f:
-            f.write('\n'.join(report) + '\n')
-        swap_file = os.path.join(out, 'luigi_swap.txt')
-        if swaps:
-            with open(swap_file, 'w', newline='\n') as f:
-                f.write('# Luigi\'s animation swap table (BCK name -> BCK name, without .bck), built by '
-                        'build_animation_mod.py --luigi-originals\n')
-                f.writelines('%s %s\n' % s for s in swaps)
-        elif os.path.exists(swap_file):
-            os.remove(swap_file)
-        print('\n'.join(notes) if not faces else '', 'wrote', out)
+
+def write_variant(args, pak, arc, bcks, folder, replace, notes, lines, faces):
+    """Writes <content>/mods/<folder>: the game's MarioAnime.arc with these animations replaced."""
+    offset, size, entry_pos = pak.files[ARCHIVE]
+    new_arc = disc.rarc_replace(arc, replace)
+    swaps = []
+    if args.luigi_originals:
+        # Co-op: Luigi keeps Galaxy's animations where Mario has converted ones, except the Odyssey
+        # moveset's. Galaxy gives Luigi his own clips through a swap table of BCK names (run -> luigirun);
+        # the clips Mario's conversions replace are added as luigi<name>, and luigi_swap.txt lists the
+        # whole table for the runtime to install for Luigi.
+        own = {name: 'luigi' + name for name in LUIGI_OWN}
+        added = {'luigi%s.bck' % name: bcks[name + '.bck'] for name in replace_names(replace)
+                 if name not in MOVESET and name not in own and 'luigi%s.bck' % name not in bcks}
+        new_arc = disc.rarc_add(new_arc, added)
+        swaps = sorted(own.items()) + sorted((n[5:-4], n[:-4]) for n in added)
+        notes += ['', 'Luigi (co-op): his own Galaxy clips for %d animations, Mario\'s converted ones for the '
+                  'moveset (%s)' % (len(swaps), ', '.join(sorted(MOVESET & set(replace_names(replace)))))]
+    packed = disc.yaz0_encode(new_arc)
+    if disc.yaz0_decode(packed) != new_arc:
+        raise RuntimeError('Yaz0 round trip failed')
+    packed += b'\0' * ((-len(packed)) % 32)
+    # Only one of the two is loaded at a time, so both use the same unused area of the disc.
+    target = pak.filler_area(len(packed))
+    entry = bytearray(pak.m[entry_pos:entry_pos + 12])
+    struct.pack_into('>II', entry, 4, target >> 2, len(packed))
+
+    out = os.path.join(args.content, 'mods', folder)
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, 'MarioAnime.arc.yaz0'), 'wb') as f:
+        f.write(packed)
+    with open(os.path.join(out, 'fst_marioanime.bin'), 'wb') as f:
+        f.write(entry)
+    with open(os.path.join(out, 'manifest.txt'), 'w', newline='\n') as f:
+        f.write('# Nebula custom animations, built by tools/animations/build_animation_mod.py\n'
+                'version 1\ngame RMGE01\nmain_dol_sha1 %s\n' % MAIN_DOL_SHA1)
+        f.write('0x%X 12 fst_marioanime.bin  # %s: 0x%X -> 0x%X\n' % (entry_pos, ARCHIVE, offset, target))
+        f.write('0x%X %d MarioAnime.arc.yaz0\n' % (target, len(packed)))
+    report = lines + notes + ['', 'archive %d bytes (game %d), at disc offset 0x%X; sha1 %s' % (
+        len(packed), size, target, hashlib.sha1(packed).hexdigest())]
+    with open(os.path.join(out, 'report.txt'), 'w', newline='\n') as f:
+        f.write('\n'.join(report) + '\n')
+    swap_file = os.path.join(out, 'luigi_swap.txt')
+    if swaps:
+        with open(swap_file, 'w', newline='\n') as f:
+            f.write('# Luigi\'s animation swap table (BCK name -> BCK name, without .bck), built by '
+                    'build_animation_mod.py --luigi-originals\n')
+            f.writelines('%s %s\n' % s for s in swaps)
+    elif os.path.exists(swap_file):
+        os.remove(swap_file)
+    print('\n'.join(notes) if not faces else '', 'wrote', out)
 
 if __name__ == '__main__':
     main()

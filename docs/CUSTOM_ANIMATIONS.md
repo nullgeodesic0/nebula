@@ -167,6 +167,17 @@ one overall scale holds. The export wrote its normals Z-up while the positions a
 the frame in which the normals agree with the triangles' winding. glTF's texture v runs downward, Blender's
 up. The closed eyelids are left out; the cap-off hair stays (it is also the hair below the cap).
 
+### Building without the .blend (`--export`, `--from-export`)
+
+`build_animation_mod.py ... --export custom_animations.zip` also writes the converted animations as a zip:
+`manifest.json` (format, `MAP`, notes) and one `<variant>/<animation>.ank1` per converted animation: the
+ANK1 section the converter wrote, without the BCK's file header. `build_animation_mod.py --content <content>
+--from-export custom_animations.zip [--luigi-originals]` builds `mods/animations` from it and the player's
+own game.pak (each BCK's header is taken from the disc), byte for byte what the .blend build writes; with
+`--model`, also `mods/animations-model`. The custom model's variant is only exported when no face animation
+file drove it, since Odyssey's face animations are the game's data. The export carries no meshes, textures
+or game clips; whether its contents may be shared depends on where the .blend's actions come from.
+
 ## Voices (F1 > General > Custom voice)
 
 `build_voice_mod.py` converts the SMO voice clips to 16-bit mono 32 kHz WAVs in `<content>\mods\voice`,
