@@ -2,6 +2,7 @@
 // Mods (mods.h, virtual_disc.h, mod_xml.h): the XML reader, the disc's patching and reads, Riivolution mods, files
 // mods, load order, saved choices, savegames, main.dol's memory patches, the mods' layouts and languages, and importing.
 
+#include "galaxy/animation_packs.h"
 #include "galaxy/mod_import.h"
 #include "galaxy/mod_xml.h"
 #include "galaxy/mods.h"
@@ -16,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -519,10 +521,98 @@ bool importing() {
     return ok;
 }
 
+// Animation packs: a folder of .ank1 files (and its pack.txt) is a mod, as is a mod's animations/ folder; the
+// archive rebuilt with a pack's section keeps the animation's own header and the other files.
+bool animation_packs() {
+    bool ok = true;
+    const fs::path root = fs::temp_directory_path() / "nebula_mods_animation_packs";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    const fs::path mods = root / "mods";
+    write(mods / "Pack" / "walk.ank1", "ANK1....");
+    write(mods / "Pack" / "pack.txt", "Nebula animation pack");
+    write(mods / "Model" / "animations" / "run.ank1", "ANK1....");
+    write(mods / "Model" / "files" / "ObjectData" / "Mario.arc", "MODEL");
+    galaxy::mods::set_mods_folder(mods, root / "mods.ini", "RMGE01");
+    const std::vector<galaxy::mods::ModInfo> list = galaxy::mods::scan_mods();
+    const auto find = [&](std::string_view id) -> const galaxy::mods::ModInfo* {
+        for (const auto& m : list) {
+            if (m.id == id) return &m;
+        }
+        return nullptr;
+    };
+    ok &= expect(find("Pack") && find("Pack")->animations && !find("Pack")->loose && find("Pack")->problem.empty() &&
+                     galaxy::mods::changes_disc(*find("Pack")),
+                 "a folder of .ank1 files is an animation pack");
+    ok &= expect(find("Model") && find("Model")->animations && find("Model")->files, "a mod's animations/ folder");
+
+    // An archive of one directory with two files: walk.bck (a 32-byte J3D header, then a section) and other.bin.
+    const auto put16 = [](std::vector<std::uint8_t>& b, std::size_t at, std::uint16_t v) {
+        b[at] = std::uint8_t(v >> 8);
+        b[at + 1] = std::uint8_t(v);
+    };
+    std::vector<std::uint8_t> bck(64, 0);
+    std::memcpy(bck.data(), "J3D1bck1", 8);
+    std::memcpy(bck.data() + 32, "ANK1OLD.", 8);
+    const std::string other = "OTHERDATA";
+    const std::string names = std::string("root") + '\0' + "." + '\0' + ".." + '\0' + "walk.bck" + '\0' + "other.bin" + '\0';
+    std::vector<std::uint8_t> arc(0x40 + 0x10 + 4 * 0x14, 0);
+    const std::size_t strings_at = arc.size();
+    arc.insert(arc.end(), names.begin(), names.end());
+    arc.resize((arc.size() + 31u) & ~std::size_t{31u}, 0);
+    const std::size_t data_at = arc.size();
+    arc.insert(arc.end(), bck.begin(), bck.end());
+    arc.insert(arc.end(), other.begin(), other.end());
+    arc.resize((arc.size() + 31u) & ~std::size_t{31u}, 0);
+    std::memcpy(arc.data(), "RARC", 4);
+    put32(arc, 0x04, static_cast<std::uint32_t>(arc.size()));
+    put32(arc, 0x08, 0x20);
+    put32(arc, 0x0C, static_cast<std::uint32_t>(data_at - 0x20));
+    put32(arc, 0x10, static_cast<std::uint32_t>(arc.size() - data_at));
+    put32(arc, 0x14, static_cast<std::uint32_t>(arc.size() - data_at));
+    put32(arc, 0x20, 1);     // nodes
+    put32(arc, 0x24, 0x20);  // node table (from 0x20)
+    put32(arc, 0x28, 4);     // entries
+    put32(arc, 0x2C, 0x30);  // entry table
+    put32(arc, 0x30, static_cast<std::uint32_t>(data_at - strings_at));
+    put32(arc, 0x34, static_cast<std::uint32_t>(strings_at - 0x20));
+    put16(arc, 0x38, 4);
+    arc[0x3A] = 1;
+    std::memcpy(arc.data() + 0x40, "ROOT", 4);
+    put16(arc, 0x4A, 4);
+    const auto entry = [&](std::size_t i, std::uint16_t id, std::uint8_t flags, std::uint16_t name, std::uint32_t off,
+                           std::uint32_t size) {
+        const std::size_t e = 0x50 + i * 0x14;
+        put16(arc, e, id);
+        arc[e + 4] = flags;
+        put16(arc, e + 6, name);
+        put32(arc, e + 8, off);
+        put32(arc, e + 12, size);
+    };
+    entry(0, 0, 0x11, 10, 0, static_cast<std::uint32_t>(bck.size()));  // walk.bck
+    entry(1, 1, 0x11, 19, static_cast<std::uint32_t>(bck.size()), static_cast<std::uint32_t>(other.size()));  // other.bin
+    entry(2, 0xFFFF, 0x02, 5, 0, 0x10);            // .
+    entry(3, 0xFFFF, 0x02, 7, 0xFFFFFFFFu, 0x10);  // ..
+    std::map<std::string, std::vector<std::uint8_t>> pack;
+    const std::string section = "ANK1NEWSECTION..";
+    pack["walk.bck"].assign(section.begin(), section.end());
+    pack["absent.bck"].assign(section.begin(), section.end());
+    unsigned replaced = 0;
+    const std::vector<std::uint8_t> rebuilt = galaxy::mods::replace_animations(arc, pack, &replaced);
+    ok &= expect(replaced == 1u, "one animation of the archive replaced (one it lacks left out)");
+    const auto contains = [&](std::string_view needle) {
+        return std::search(rebuilt.begin(), rebuilt.end(), needle.begin(), needle.end()) != rebuilt.end();
+    };
+    ok &= expect(contains("J3D1bck1") && contains(section) && !contains("ANK1OLD.") && contains(other),
+                 "the animation's own header, the pack's section, the other file kept");
+    fs::remove_all(root, ec);
+    return ok;
+}
+
 }  // namespace
 
 int main() {
-    const bool ok = xml() & disc() & riivolution() & layouts() & importing();
+    const bool ok = xml() & disc() & riivolution() & layouts() & importing() & animation_packs();
     std::cout << (ok ? "mods tests passed" : "mods tests FAILED") << '\n';
     return ok ? 0 : 1;
 }
