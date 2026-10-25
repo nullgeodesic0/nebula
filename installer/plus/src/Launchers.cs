@@ -27,7 +27,7 @@ namespace Nebula.Plus
             Write(layout, "Play Nebula Plus.cmd", "One player. Settings (Esc or the pause menu > Settings) and Settings > Mods switch the Odyssey\r\n" +
                 "rem model and moves; \"Play co-op.cmd\" starts with two players.", saves, "", "run", false);
             Write(layout, "Play co-op.cmd", "Mario and Luigi on one PC, split screen. Luigi joins when a second controller presses +\r\n" +
-                "rem (Start, Menu or Options).", saves, "set \"GALAXY_TWO_PLAYERS=1\"\r\n", "coop", false);
+                "rem (Start, Menu or Options).", saves, "set \"GALAXY_TWO_PLAYERS=1\"\r\necho Two players: Luigi joins when a second controller presses + (Start, Menu or Options).\r\n", "coop", false);
             Write(layout, "Host online game.cmd", "Online co-op, host (you play Mario, in your save). Your friend runs \"Join online game.cmd\"\r\n" +
                 "rem with this PC's address. TCP port 7777 by default: forward it on your router for a friend outside your network.\r\n" +
                 "rem Both PCs need the same Nebula Plus version and the same mods on.\r\n" +
