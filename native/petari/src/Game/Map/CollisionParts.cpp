@@ -477,7 +477,8 @@ void CollisionParts::projectToPlane(TVec3f* pProjected, const TVec3f& rPos, cons
 u32 CollisionParts::checkStrikeLine(HitInfo* pHitInfo, u32 maxHits, const TVec3f& rPos, const TVec3f& rDirection, const TriangleFilterBase* pFilter) {
     f32 distances[64];
     KC_PrismData* prisms[64];
-    u8 classifications[64];
+    // checkArrow does not classify its hits: none (the console kept whatever its stack held there).
+    u8 classifications[64] = {};
     f32 length = rDirection.length();
     TVec3f localPos;
     TVec3f localDirection;

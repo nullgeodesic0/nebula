@@ -21,6 +21,18 @@ switches the voice alone. For animations without the model, pack the animations 
 Odyssey model, use the animations built for it (`animations-model`, with its face). Luigi's animation swap
 table (`luigi_swap.txt`) is not read yet.
 
+## Animation packs (drop-in, no build step)
+
+An animation pack is a folder of `<animation>.ank1` files (each the ANK1 section of the MarioAnime.arc animation of
+that name) and a `pack.txt`; `build_animation_mod.py --pack <folder>` on the odyssey-animations tools writes one.
+Put the folder in `%LOCALAPPDATA%\Nebula\mods` as it is (or give any mod an `animations\` folder of `.ank1`
+files): it shows in Settings > Mods like any mod and applies at the next start. When the mods are applied
+(`runtime/src/animation_packs.cpp`), MarioAnime.arc as the other mods left it (the game's, or a model mod's) is
+rebuilt with each animation a pack has, keeping the animation's own BCK header, written to
+`%LOCALAPPDATA%\Nebula\generated\MarioAnime.arc` and served in its place; `mods-report.txt` says how many were
+replaced. Where two packs have the same animation, the one higher in the list wins. A pack holds no game data, but
+one converted from another game's animations is that game's content: keep it on the player's machine.
+
 ## Building the mod
 
 ```

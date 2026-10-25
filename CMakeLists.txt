@@ -135,6 +135,7 @@ add_library(galaxy_native_host STATIC
     runtime/src/mod_xml.cpp
     runtime/src/virtual_disc.cpp
     runtime/src/mods.cpp
+    runtime/src/animation_packs.cpp
     runtime/src/mod_import.cpp
     runtime/src/crash_report.cpp
     runtime/src/discord_presence.cpp
@@ -606,7 +607,7 @@ galaxy_test(galaxy_frame_telemetry_tests SOURCES ${rt}/frame_telemetry_tests.cpp
 galaxy_test(galaxy_mii_import_tests SOURCES ${rt}/mii_import_tests.cpp ${rt}/mii_import.cpp ${rt}/mii_formats.cpp
     ${rt}/wii_device_data.cpp LIBS galaxy_atomic_file)
 galaxy_test(galaxy_mods_tests SOURCES ${rt}/mods_tests.cpp ${rt}/mod_xml.cpp ${rt}/virtual_disc.cpp ${rt}/mods.cpp
-    ${rt}/mod_import.cpp LIBS galaxy_atomic_file nebula_archive)
+    ${rt}/animation_packs.cpp ${rt}/gx/game_asset_extract.cpp ${rt}/mod_import.cpp LIBS galaxy_atomic_file nebula_archive)
 galaxy_test(galaxy_crash_report_tests SOURCES ${rt}/crash_report_tests.cpp ${rt}/crash_report.cpp)
 galaxy_test(galaxy_discord_presence_tests SOURCES ${rt}/discord_presence_tests.cpp ${rt}/discord_presence.cpp)
 

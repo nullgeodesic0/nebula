@@ -5,6 +5,7 @@
 
 #include "galaxy/mods.h"
 
+#include "galaxy/animation_packs.h"
 #include "galaxy/atomic_file.h"
 #include "galaxy/mod_xml.h"
 
@@ -396,7 +397,19 @@ struct ModLayout {
     fs::path textures;
     fs::path movies;
     std::vector<fs::path> loose;  // files placed by their names
+    std::vector<fs::path> animations;  // an animation pack's .ank1 files
 };
+
+// The .ank1 files of a folder (an animation pack), by name.
+std::vector<fs::path> pack_animations(const fs::path& dir) {
+    std::vector<fs::path> out;
+    std::error_code error;
+    for (const auto& entry : fs::directory_iterator(dir, error)) {
+        if (entry.is_regular_file(error) && lower(entry.path().extension().string()) == ".ank1") out.push_back(entry.path());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
 
 constexpr const char* kLanguageFolders[] = {"UsEnglish", "UsFrench", "UsSpanish", "EuEnglish", "EuFrench", "EuGerman",
                                             "EuItalian", "EuSpanish", "EuDutch", "JpJapanese", "KrKorean",
@@ -505,6 +518,13 @@ ModLayout layout_of(const fs::path& mod) {
     }
     if (std::optional<fs::path> textures = child_any_case(mod, "textures", true)) layout.textures = *textures;
     if (std::optional<fs::path> movies = child_any_case(mod, "movies", true)) layout.movies = *movies;
+    if (std::optional<fs::path> animations = child_any_case(mod, "animations", true)) {
+        layout.animations = pack_animations(*animations);
+    } else {
+        // A pack folder itself (its .ank1 files and pack.txt).
+        layout.animations = pack_animations(mod);
+        if (!layout.animations.empty()) return layout;
+    }
     if (layout.xmls.empty() && layout.files_root.empty()) {
         // Loose files beside nothing else: each goes where the disc has a file of its name.
         for (const auto& entry : fs::directory_iterator(mod, error)) {
@@ -780,6 +800,7 @@ std::vector<ModInfo> scan_mods(const std::string& requested_game_id) {
         mod.textures = !layout.textures.empty();
         mod.movies = !layout.movies.empty();
         mod.loose = !layout.loose.empty();
+        mod.animations = !layout.animations.empty();
         const auto it = saved.find(mod.id);
         const SavedMod* s = it != saved.end() ? &it->second : nullptr;
         mod.enabled = s == nullptr || s->enabled;
@@ -868,11 +889,14 @@ std::vector<ModInfo> scan_mods(const std::string& requested_game_id) {
         mod.languages.assign(languages.begin(), languages.end());
         if (!layout.files_root.empty()) list_files(layout.files_root, std::string(), changed_paths[mod.id]);
         for (const fs::path& loose_file : layout.loose) changed_paths[mod.id].insert("name:" + lower(utf8_name(loose_file)));
+        for (const fs::path& animation : layout.animations) {
+            changed_paths[mod.id].insert("animation:" + lower(utf8_name(animation.stem())));
+        }
         if (!layout.textures.empty()) list_textures(layout.textures, changed_textures[mod.id]);
         mod.changed_files = static_cast<unsigned>(changed_paths[mod.id].size());
         mod.changed_textures = static_cast<unsigned>(changed_textures[mod.id].size());
-        if (!mod.riivolution && !mod.files && !mod.textures && !mod.movies && !mod.loose) {
-            mod.problem = "NOTHING NEBULA CAN USE (NO RIIVOLUTION, GAME FILES, TEXTURES OR MOVIES)";
+        if (!mod.riivolution && !mod.files && !mod.textures && !mod.movies && !mod.loose && !mod.animations) {
+            mod.problem = "NOTHING NEBULA CAN USE (NO RIIVOLUTION, GAME FILES, TEXTURES, MOVIES OR ANIMATIONS)";
         }
         mods.push_back(std::move(mod));
     }
@@ -1066,7 +1090,7 @@ bool patch_dol(std::vector<std::uint8_t>& dol, std::uint32_t address, std::span<
 }
 
 bool changes_disc(const ModInfo& mod) noexcept {
-    return mod.riivolution || mod.files || mod.loose;
+    return mod.riivolution || mod.files || mod.loose || mod.animations;
 }
 
 std::vector<std::filesystem::path> texture_folders(std::span<const ModInfo> mods) {
@@ -1149,6 +1173,9 @@ std::unique_ptr<ActiveMods> apply_mods(std::span<const std::uint8_t> partition_f
     dol_node.partition_offset = dol_offset;
     dol_node.pieces.push_back({DiscPiece::Source::Partition, 0, dol_node.size, dol_offset, {}});
     std::vector<std::pair<std::string, MemoryPatch>> memory;  // (mod, patch) in load order
+    // Animation packs' animations by file name ("walk.bck"): the mod on top wins one both have.
+    std::map<std::string, fs::path> pack_animations_by_bck;
+    std::map<std::string, std::string> pack_animation_owner;
     std::vector<Loader> memory_loaders;
     std::map<std::string, std::string> save_owner;
 
@@ -1266,6 +1293,14 @@ std::unique_ptr<ActiveMods> apply_mods(std::span<const std::uint8_t> partition_f
             patch_folder(patch_folder, loader, FolderPatch{"/", "/", true, true, true, 0}, "/", "/");
         }
         unsigned loose_unplaced = 0;
+        for (const fs::path& animation : layout.animations) {
+            const std::string bck = lower(utf8_name(animation.stem())) + ".bck";
+            pack_animations_by_bck[bck] = animation;
+            pack_animation_owner[bck] = mod.id;
+        }
+        if (!layout.animations.empty()) {
+            notes.push_back("animation pack: " + std::to_string(layout.animations.size()) + " animation(s)");
+        }
         for (const fs::path& file : layout.loose) {
             // Loose files: every disc file of the name (Riivolution's file name alone).
             std::error_code ec;
@@ -1347,6 +1382,38 @@ std::unique_ptr<ActiveMods> apply_mods(std::span<const std::uint8_t> partition_f
         if (!problem.empty()) report << " (" << problem << ")";
         report << '\n';
         for (const std::string& n : notes) report << "  " << n << '\n';
+    }
+
+    // Animation packs: MarioAnime.arc as the mods left it (the game's, or a mod's), each pack animation in place,
+    // written beside the settings and served in its place.
+    if (!pack_animations_by_bck.empty()) {
+        DiscNode* node = active->disc.find_path("ObjectData/MarioAnime.arc", false);
+        std::map<std::string, std::vector<std::uint8_t>> sections;
+        for (const auto& [bck, path] : pack_animations_by_bck) {
+            const std::string bytes = read_text(path);
+            sections[bck].assign(bytes.begin(), bytes.end());
+        }
+        unsigned replaced = 0;
+        const std::vector<std::uint8_t> rebuilt =
+            node != nullptr && !node->directory
+                ? replace_animations(VirtualDisc::materialize(*node, partition, partition_size), sections, &replaced)
+                : std::vector<std::uint8_t>{};
+        const fs::path out = settings().file.parent_path() / "generated" / "MarioAnime.arc";
+        std::error_code ec;
+        fs::create_directories(out.parent_path(), ec);
+        if (rebuilt.empty() || replaced == 0u) {
+            report << "animation packs: nothing replaced (" << (node == nullptr ? "no MarioAnime.arc" : "no animation of "
+                                                                                                        "MarioAnime.arc in the packs")
+                   << ")\n";
+        } else if (!io::write_text_file_atomically(out, std::string_view(reinterpret_cast<const char*>(rebuilt.data()),
+                                                                          rebuilt.size()))) {
+            report << "animation packs: could not write " << utf8_name(out) << "\n";
+        } else {
+            VirtualDisc::patch(*node, out, rebuilt.size(), 0u, 0u, 0u, true);
+            ++active->files_changed;
+            report << "animation packs: " << replaced << " of " << sections.size()
+                   << " animation(s) replaced in MarioAnime.arc\n";
+        }
     }
 
     // Memory patches: the native game runs no PowerPC code; those over main.dol's data it reads are kept.

@@ -111,6 +111,9 @@ target_compile_options(smg_game PRIVATE
     -fno-strict-aliasing -fno-strict-float-cast-overflow -fno-math-errno -fno-stack-protector
     # The same float results on every x86 PC (netplay): never fused multiply-adds or AVX code paths.
     $<$<OR:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},AMD64>,$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},x86_64>>:-mno-fma -mno-avx -ffp-contract=off>
+    # Locals the game reads before it writes them (the console's stack held the same leftovers on every run; here
+    # the host's calls leave this PC's own there) start at zero: the same game on every PC (netplay).
+    -ftrivial-auto-var-init=zero
     $<$<NOT:$<PLATFORM_ID:Windows>>:-fno-plt>
     -fno-ms-compatibility -fno-delayed-template-parsing
     ${diagnostics}

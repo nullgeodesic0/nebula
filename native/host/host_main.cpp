@@ -2889,14 +2889,26 @@ void write_state_hash(uint64_t scene_frame) {
     if (dump != nullptr && std::strtoull(dump, nullptr, 10) == scene_frame && std::strchr(dump, ':') != nullptr) {
         FILE* out = nullptr;
         if (fopen_s(&out, std::strchr(dump, ':') + 1, "wb") == 0 && out != nullptr) {
+            // By runs of pages alike (a query per page takes seconds over the watched memory).
+            static const std::byte zeros[1 << 16]{};
             for (const galaxy::GuestMemoryRegion& region : gRegions) {
-                for (size_t at = 0; at < region.size; at += 4096) {
+                for (size_t at = 0; at < region.size;) {
                     MEMORY_BASIC_INFORMATION info{};
-                    const bool ok = VirtualQuery(region.host_base + at, &info, sizeof(info)) != 0 &&
-                                    info.State == MEM_COMMIT && (info.Protect & PAGE_GUARD) == 0 &&
+                    if (VirtualQuery(region.host_base + at, &info, sizeof(info)) == 0) break;
+                    const size_t run = std::min<size_t>(
+                        static_cast<size_t>(static_cast<const std::byte*>(info.BaseAddress) + info.RegionSize -
+                                            (region.host_base + at)),
+                        region.size - at);
+                    const bool ok = info.State == MEM_COMMIT && (info.Protect & PAGE_GUARD) == 0 &&
                                     (info.Protect & (PAGE_READONLY | PAGE_READWRITE)) != 0;
-                    static const std::byte zeros[4096]{};
-                    std::fwrite(ok ? region.host_base + at : zeros, 1, std::min<size_t>(4096, region.size - at), out);
+                    if (ok) {
+                        std::fwrite(region.host_base + at, 1, run, out);
+                    } else {
+                        for (size_t done = 0; done < run; done += sizeof(zeros)) {
+                            std::fwrite(zeros, 1, std::min(sizeof(zeros), run - done), out);
+                        }
+                    }
+                    at += run;
                 }
             }
             std::fclose(out);

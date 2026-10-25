@@ -7,7 +7,9 @@
 //                      Riivolution's disc paths without a '/' do,
 //   textures/          a texture pack (the community's tex1_ names, as Dolphin loads them); tex1_ files anywhere in a
 //                      mod with nothing else make it a pack,
-//   movies/            HD videos for the game's movies (movie_replacement.h).
+//   movies/            HD videos for the game's movies (movie_replacement.h),
+//   animations/        an animation pack: <bck name>.ank1 files replacing Mario's animations of those names
+//                      (animation_packs.h); a mod of .ank1 files only is a pack too.
 // A mod whose text covers some of the disc's languages but not the one played shows its own text in that language
 // (the same language of another region first, else English) unless its TEXT choice keeps the game's.
 // The mods are one list, as layers: where two change the same file or texture, the one higher in the list wins (order 1
@@ -56,6 +58,7 @@ struct ModInfo {
     bool textures = false;
     bool movies = false;
     bool loose = false;                       // loose files placed by name
+    bool animations = false;                  // an animation pack (animation_packs.h)
     std::vector<std::string> languages;       // the language folders it changes (UsEnglish, EuFrench, ...)
     bool own_text = true;                     // its text stands in for a language it lacks
     unsigned code_patches = 0;                // patches over the game's code with no native equivalent
