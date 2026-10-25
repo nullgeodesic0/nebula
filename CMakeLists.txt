@@ -756,6 +756,7 @@ add_executable(NebulaRuntime
     runtime/src/coop_scheduler.cpp
     runtime/src/site_hooks.cpp
     runtime/src/voice_replacement.cpp
+    runtime/src/animation_packs.cpp
 )
 # Exported releases pass their source identity; working checkouts report Git
 # identity/dirty state at build time. This is runtime provenance, not a label

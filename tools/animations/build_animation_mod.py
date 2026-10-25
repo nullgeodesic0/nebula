@@ -368,6 +368,29 @@ def write_export(path, export, lines):
     print('exported', path, os.path.getsize(path), 'bytes')
 
 
+def write_pack(folder, variants, notes):
+    """An animation pack: a folder to drop into <content>/mods/animation-packs, which Nebula loads at boot
+    (runtime animation_packs.cpp). Galaxy's model's variant as <name>.ank1, the custom model's in model/."""
+    os.makedirs(folder, exist_ok=True)
+    for sub in (folder, os.path.join(folder, 'model')):
+        if os.path.isdir(sub):
+            for f in os.listdir(sub):
+                if f.endswith('.ank1'):
+                    os.remove(os.path.join(sub, f))
+    for variant, anims in variants.items():
+        out = folder if variant == 'animations' else os.path.join(folder, 'model')
+        os.makedirs(out, exist_ok=True)
+        for name, ank in anims.items():
+            with open(os.path.join(out, name + '.ank1'), 'wb') as f:
+                f.write(ank)
+    with open(os.path.join(folder, 'pack.txt'), 'w', newline='\n') as f:
+        f.write('Nebula animation pack (%s): put this folder in <content>\\mods\\animation-packs and turn on\n'
+                'F1 > General > Custom animations. Each .ank1 replaces the MarioAnime.arc animation of the same\n'
+                'name; the rest of the archive comes from your own game.\n\n' % EXPORT_FORMAT)
+        f.write('\n'.join(notes) + '\n')
+    print('wrote pack', folder, sum(len(v) for v in variants.values()), 'animations')
+
+
 def read_export(path, bcks):
     """From a file --export wrote: variants (folder -> (BCK name -> bytes, notes)) completed with the game's own
     BCK headers from bcks, the report's lines and the model's neutral pose."""
@@ -394,6 +417,8 @@ def main():
     ap.add_argument('--export', help='also write the converted animations, without any game data, to this file '
                     '(a zip: one ANK1 section per animation and variant, the neutral pose, notes)')
     ap.add_argument('--from-export', help='build from a file written by --export instead of a .blend')
+    ap.add_argument('--pack', help='also write the converted animations as an animation pack folder (for '
+                    '<content>/mods/animation-packs, which Nebula loads at boot without a build step)')
     ap.add_argument('--content', required=True, help='Nebula content folder (holds game.pak)')
     ap.add_argument('--only', help='comma-separated Galaxy animation names to convert')
     ap.add_argument('--model', help='the custom model mod folder (mods/model): its skeleton, with any joints '
@@ -417,6 +442,9 @@ def main():
 
     if args.from_export:
         variants, lines, neutral = read_export(args.from_export, bcks)
+        if args.pack:
+            write_pack(args.pack, {f: {n[:-4]: b[32:] for n, b in r.items()} for f, (r, _) in variants.items()},
+                       lines + variants.get('animations', ({}, []))[1])
         if neutral and args.model:
             with open(os.path.join(args.model, 'neutral_joints.txt'), 'w', newline='\n') as f:
                 f.write(neutral)
@@ -425,7 +453,7 @@ def main():
                 continue  # the custom model's variant only goes with that model
             write_variant(args, pak, arc, bcks, folder, replace, notes, lines, False)
         return
-    export = {'variants': {}, 'notes': {}, 'neutral': None} if args.export else None
+    export = {'variants': {}, 'notes': {}, 'neutral': None} if args.export or args.pack else None
 
     blend = blendfile.Blend(args.blend)
     order, bones = blendfile.read_armature(blend)
@@ -527,8 +555,10 @@ def main():
         if export is not None:
             export['notes'][folder] = notes
         write_variant(args, pak, arc, bcks, folder, replace, notes, lines, faces)
-    if export is not None:
+    if args.export:
         write_export(args.export, export, lines)
+    if args.pack:
+        write_pack(args.pack, export['variants'], lines + export['notes'].get('animations', []))
 
 
 def write_variant(args, pak, arc, bcks, folder, replace, notes, lines, faces):
