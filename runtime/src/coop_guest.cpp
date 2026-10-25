@@ -662,6 +662,7 @@ struct State {
     bool join_seen_connected = false;  // his controller has been connected since he dropped in
     bool drop_in_requested = false;    // online live join: NetCommand::Join came (coop_request_drop_in)
     bool second_inert = false;         // last turn the second player sat still out of play (second_inert)
+    bool inert_held = false;           // this frame's movement pass has held him so (hold_second_inert)
     bool second_hidden_for_start = false;
     std::uint32_t star_traced = 0u;
     bool hud_tried = false;
@@ -2987,6 +2988,18 @@ void keep_second_inert(const Guest& guest, State& s) {
     guest.call(fn::kInvalidateHitSensors, s.second);
 }
 
+// Once a frame, after the first of the scene's movement categories: the same, whether or not his turn comes. His turn
+// follows the game's player movement, which the game can leave out for seconds while the rest of the stage runs on
+// (seen in Good Egg: 292 frames, a few minutes apart); sensors something turned on meanwhile stayed on that long. Not
+// at the controller read: there, between scenes' work, the player lookup crashed. Only for this stage's players.
+void hold_second_inert(const Guest& guest, State& s) {
+    if (!s.second_inert || !second_inert(s) || !plausible(s.first) || !plausible(s.second)) return;
+    SavedContext saved(guest.context());
+    const std::uint32_t holder = guest.call(fn::kGetMarioHolder);
+    if (!plausible(holder) || guest.call(fn::kGetMarioActor, holder) != s.first) return;
+    guest.call(fn::kInvalidateHitSensors, s.second);
+}
+
 // Out of the game: as a player out of lives (update_down_player carries him along), at once.
 void sit_out(const Guest& guest, State& s) {
     s.down[1] = coop::DownState{true, true, coop::kDownHideFrames + 1u};
@@ -4173,6 +4186,7 @@ void coop_before_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memo
     case call::kKpadRead:
         s.kpad_channel = context->gpr[3];
         s.kpad_buffer = context->gpr[4];
+        if (context->gpr[3] == 0u) s.inert_held = false;  // a new frame
         return;
     case call::kCategoryListExecuteMovement:
         if (s.category_depth < s.categories.size()) s.categories[s.category_depth] = context->gpr[3];
@@ -4444,6 +4458,10 @@ void coop_after_call(std::uint32_t id, PpcContext* context, GuestMemoryV1* memor
         --s.category_depth;
         const std::uint32_t category = s.category_depth < s.categories.size() ? s.categories[s.category_depth] : 0u;
         if (s.moving_second || !plausible(s.first) || !plausible(s.second)) return;
+        if (!s.inert_held) {
+            s.inert_held = true;
+            hold_second_inert(guest, s);
+        }
         if (category == kMovementTypeCamera) {
             run_second_director(guest, s);
             return;

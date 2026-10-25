@@ -123,7 +123,16 @@ def out_on_enemy(c, first, second, enemy, label, rounds=40):
             # The game turning his sensors back on (a bind's or a held talk's end) lasts no longer than a frame.
             c.inst.command('call 0x%X 0x%X' % (VALIDATE_HIT_SENSORS, second))
             c.inst.command('wait 2')
-            revalidated_ok = revalidated_ok and not any(c.sensors_on(second))
+            if any(c.sensors_on(second)):
+                revalidated_ok = False
+                # How long they stay on, and what the first player was doing (his turn drives the second's).
+                before = c.players()[0]['bck']
+                frames = 2
+                while frames < 60 and any(c.sensors_on(second)):
+                    c.inst.command('wait 1')
+                    frames += 1
+                print('   step %d: sensors on for %d frames after validateHitSensors; first player %s -> %s'
+                      % (i, frames, before, c.players()[0]['bck']))
         c.inst.command('wait 4')
         p = c.players()
         g = c.floats(enemy + 0xC, 3)
