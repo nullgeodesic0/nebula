@@ -32,6 +32,16 @@ namespace Nebula.Plus
         // Nebula Plus for Nebula 2. The Nebula 1 (recompiled) Plus releases are tagged plus-v and stay apart.
         public const string TagPrefix = "plus2-v";
 
+        /// <summary>GitHub's API; NEBULA_PLUS_API_BASE points tests at a local stand-in (never set for players).</summary>
+        private static string ApiBase
+        {
+            get
+            {
+                string test = Environment.GetEnvironmentVariable("NEBULA_PLUS_API_BASE");
+                return string.IsNullOrEmpty(test) ? "https://api.github.com" : test.TrimEnd('/');
+            }
+        }
+
         public static PlusUpdate FindNewer(PlusConfig config, PlusInstalled installed)
         {
             return config.Channel == "branch" ? NewerCommit(config, installed) : NewerRelease(config, installed);
@@ -39,7 +49,7 @@ namespace Nebula.Plus
 
         private static PlusUpdate NewerRelease(PlusConfig config, PlusInstalled installed)
         {
-            string json = Downloader.GetString("https://api.github.com/repos/" + config.Repository + "/releases?per_page=50",
+            string json = Downloader.GetString(ApiBase + "/repos/" + config.Repository + "/releases?per_page=50",
                 "application/vnd.github+json");
             return SelectRelease(json, installed == null ? null : PackageVersion(installed));
         }
