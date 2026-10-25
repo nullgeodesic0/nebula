@@ -69,6 +69,9 @@ struct RuntimeSettings {
     bool custom_voice = true;
     // The Odyssey moveset. Changes live.
     OdysseyMovesetSettings moveset{};
+    // Mario and Luigi co-op on one screen (docs/MULTIPLAYER.md): a second player with the second controller.
+    // The second character's model loads with the first's, so a change takes effect at the next start.
+    bool coop = false;
 };
 
 // The language the game runs in this session: the setting when the game first asks (at boot), then
@@ -91,6 +94,8 @@ struct RuntimeSettings {
 // The same two for the custom model.
 [[nodiscard]] bool custom_model_for_boot() noexcept;
 [[nodiscard]] bool running_custom_model(bool& enabled) noexcept;
+// The same for co-op: the setting when the game first asks (as the player's archives load), then fixed.
+[[nodiscard]] bool coop_for_boot() noexcept;
 
 // A coherent input-source snapshot. The generation changes only when the selected input mode changes,
 // so device FIFOs can reject reports acquired under an older source. Unrelated audio-setting writes are

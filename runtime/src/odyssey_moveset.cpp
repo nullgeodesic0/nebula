@@ -1,5 +1,6 @@
 #include "galaxy/odyssey_moveset_guest.h"
 
+#include "galaxy/coop_guest.h"
 #include "galaxy/odyssey_moveset.h"
 #include "galaxy/runtime_settings.h"
 
@@ -361,6 +362,8 @@ void tick_odyssey_moveset(PpcContext* context, GuestMemoryV1* memory, const Nati
     }
     const std::uint32_t self = context->gpr[3];
     if (!plausible_mario(self)) return;
+    // One moveset state follows one Mario: the co-op second player keeps Galaxy's moves.
+    if (coop_is_second_player_mario(self)) return;
 
     s_in_tick = true;
     const PpcContext saved = *context;

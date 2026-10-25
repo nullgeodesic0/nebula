@@ -251,6 +251,14 @@ namespace Nebula.Launcher
             Check(GeneralSettings.Load().MotionStyle == 1, "the runtime's motion style values read in any case");
             File.WriteAllText(path, "motion_style=wobbly\n");
             Check(GeneralSettings.Load().MotionStyle == 0, "an unknown motion style reads as the game's");
+            Check(!GeneralSettings.Load().Coop, "co-op starts off");
+            general = GeneralSettings.Load();
+            general.Coop = true;
+            general.Save();
+            saved = File.ReadAllText(path);
+            Check(saved.Contains("coop=on") && GeneralSettings.Load().Coop, "co-op is saved for the runtime");
+            File.WriteAllText(path, "coop=ON\n");
+            Check(GeneralSettings.Load().Coop, "the runtime's co-op values read in any case");
             File.Delete(path);
         }
 

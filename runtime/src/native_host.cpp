@@ -5,6 +5,8 @@
 #include "galaxy/native_audio_queue.h"
 #include "galaxy/button_prompts.h"
 #include "galaxy/controller_hid.h"
+#include "galaxy/coop.h"
+#include "galaxy/coop_guest.h"
 #include "galaxy/input_bindings.h"
 #include "galaxy/native_input.h"
 #include "galaxy/native_settings_pad.h"
@@ -8753,11 +8755,26 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     const galaxy::input::tilt::Vec3* tilt_up = nullptr;
     // Scheme of the controller whose button prompts the game shows (button_prompts.h).
     std::optional<galaxy::input::ControlScheme> prompt_scheme;
+    // Mario and Luigi co-op: the second connected controller is the second player's (the only one, when
+    // a single controller is connected: the keyboard and mouse are then the first player's). It leaves the
+    // first player's input and goes to coop_guest.cpp as Wii Remote channel 1.
+    constexpr std::size_t kNoPartnerPad = static_cast<std::size_t>(-1);
+    std::size_t partner_pad = kNoPartnerPad;
+    galaxy::coop::PartnerInput partner_input{};
+    if (galaxy::coop_for_boot() && use_pads) {
+        std::size_t connected = 0u;
+        for (std::size_t index = 0; index < live_pads.size(); ++index) {
+            if (!live_pads[index].sample.connected) continue;
+            if (connected < 2u) partner_pad = index;
+            ++connected;
+        }
+    }
     if (use_pads) {
         const LivePad* driving = nullptr;
         const LivePad* first_connected = nullptr;
-        for (const LivePad& pad : live_pads) {
-            if (!pad.sample.connected) continue;
+        for (std::size_t pad_index = 0; pad_index < live_pads.size(); ++pad_index) {
+            const LivePad& pad = live_pads[pad_index];
+            if (!pad.sample.connected || pad_index == partner_pad) continue;
             if (first_connected == nullptr) first_connected = &pad;
             const bool moved = pad_has_input(pad.sample) || pad.shake_remote || pad.shake_nunchuk ||
                                std::fabs(pad.gyro_x) + std::fabs(pad.gyro_y) > 0.003f;
@@ -8782,6 +8799,10 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
                 controls.config.table(pad.sample.scheme), pad.sample, trigger_threshold,
                 s_pad_previous_pressed[index], gyro_pointing);
             s_pad_previous_pressed[index] = pad_logic.pressed;
+            if (index == partner_pad) {
+                partner_input = galaxy::coop::partner_input_from(pad_logic, pad.shake_remote || pad.shake_nunchuk);
+                continue;
+            }
             const float speed = pad.sample.scheme == galaxy::input::ControlScheme::Xbox
                 ? xinput_pointer_speed_or(tuning.pointer_speed) : tuning.pointer_speed;
             if (tuning.invert_pointer_y) pad_logic.pointer_y = -pad_logic.pointer_y;
@@ -8807,6 +8828,7 @@ galaxy::input::WiimoteInputSnapshot build_native_hid_input_snapshot(
     } else {
         s_pad_previous_pressed = {};
     }
+    if (galaxy::coop_for_boot()) galaxy::coop_publish_partner_input(partner_input);
     galaxy::input::LogicalInput keyboard_logic{};
     if (use_keyboard) {
         keyboard_logic = galaxy::input::evaluate_keyboard_bindings(keyboard_table, keyboard_levels);
