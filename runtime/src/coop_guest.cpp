@@ -661,6 +661,7 @@ struct State {
     unsigned leave_frames = 0u;        // frames − has been held
     bool join_seen_connected = false;  // his controller has been connected since he dropped in
     bool drop_in_requested = false;    // online live join: NetCommand::Join came (coop_request_drop_in)
+    bool second_inert = false;         // last turn the second player sat still out of play (second_inert)
     bool second_hidden_for_start = false;
     std::uint32_t star_traced = 0u;
     bool hud_tried = false;
@@ -1953,8 +1954,10 @@ void talk_end(const Guest& guest, State& s) {
 // After MarioAccess::readyRemoteDemo inside a talk call: the other brother is held too.
 void talk_hold_other(const Guest& guest, State& s) {
     if (s.talk.depth == 0u || s.talk.other_held || !plausible(s.first) || !plausible(s.second)) return;
-    SavedContext saved(guest.context());
     const bool talker = s.moving_second;
+    // Not a brother out of play: the hold's end (MarioAccess::endRemoteDemo) turns his hit sensors back on.
+    if (s.down[talker ? 0u : 1u].down) return;
+    SavedContext saved(guest.context());
     set_game_player(guest, s, !talker);
     guest.call(fn::kReadyRemoteDemo);
     set_game_player(guest, s, talker);
@@ -2963,14 +2966,46 @@ void hide_second_hud(const Guest& guest, const State& s) {
     }
 }
 
+// The second player out of play and unseen: sitting out (hot join), out of lives, or down and hidden until he comes
+// back (update_down_player hid him). Then he is not moved at all (move_second_player): his MarioActor::movement is the
+// game's player code, which ran on unseen beside the first, landing, falling, colliding with the map and taking its
+// damage (floors, objects' damaging collision) with its voice and sounds, none of which the hit sensors govern; and
+// the game re-validates a player's hit sensors itself (MarioActor::endRush, MarioAccess::endRemoteDemo).
+bool second_inert(const State& s) {
+    return s.down[1].down && s.down[1].frames >= coop::kDownHideFrames;
+}
+
+// In the second player's turn, in place of his movement while inert: still hidden and untouchable, whatever turned
+// his sensors back on since (MR::invalidateHitSensors takes each sensor out of its sensor group).
+void keep_second_inert(const Guest& guest, State& s) {
+    if (!s.second_inert) {
+        s.second_inert = true;
+        trace("second player inert: not moved, hidden, no hit sensors");
+    }
+    SavedContext saved(guest.context());
+    guest.set_u8(s.second + kMarioActorHidden, 1u);
+    guest.call(fn::kInvalidateHitSensors, s.second);
+}
+
 // Out of the game: as a player out of lives (update_down_player carries him along), at once.
 void sit_out(const Guest& guest, State& s) {
     s.down[1] = coop::DownState{true, true, coop::kDownHideFrames + 1u};
     if (!plausible(s.second)) return;
     SavedContext saved(guest.context());
+    // A bind of his own (a pole, a swing) ends, in his turn as release_dropped_bind does: its object lets go of him
+    // rather than drive an unseen rider (its steps would run as the first player). Launch stars, pipes and the like
+    // see to their rider themselves. The end re-validates his sensors: before the invalidation below.
+    if (s.moving_second) {
+        const std::uint32_t host = bound_host(guest, s.second);
+        if (host != 0u && !bind_has_own_handling(guest.u32(host))) {
+            guest.call(kEndBindAndPlayerWait, host);
+            trace("second player sits out bound to %08X: the bind ends", host);
+        }
+    }
     guest.call(fn::kHideModel, s.second);
     guest.set_u8(s.second + kMarioActorHidden, 1u);
     guest.call(fn::kInvalidateHitSensors, s.second);
+    guest.call(fn::kForceDeleteEffectAll, s.second);
     hide_second_hud(guest, s);
     s.pointers.capture_second = false;
     if (s.pipe.rider == s.second) s.pipe = {};  // a pipe he waited in takes the first through alone
@@ -3411,7 +3446,15 @@ void move_second_player(const Guest& guest, State& s) {
     const coop::CameraMatrices first_camera = camera_ctx != 0u ? read_camera(guest, camera_ctx) : coop::CameraMatrices{};
     if (camera_ctx != 0u) write_camera(guest, camera_ctx, s.camera2);
     release_dropped_bind(guest, s);
-    guest.call(fn::kMarioActorMovement, s.second);
+    if (second_inert(s)) {
+        keep_second_inert(guest, s);
+    } else {
+        if (s.second_inert) {
+            s.second_inert = false;
+            trace("second player moves again");
+        }
+        guest.call(fn::kMarioActorMovement, s.second);
+    }
     if (camera_ctx != 0u) write_camera(guest, camera_ctx, first_camera);
     if (s.agent_mode >= 0) {
         guest.call(fn::kSetPlayerMode, s.second, static_cast<std::uint32_t>(s.agent_mode), 1u);

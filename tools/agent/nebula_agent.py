@@ -144,10 +144,14 @@ class Instance:
         startup = subprocess.STARTUPINFO()
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startup.wShowWindow = 4  # SW_SHOWNOACTIVATE
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP
+        # NEBULA_AGENT_BELOW_NORMAL=1: test copies yield to a game being played on the same PC.
+        if os.environ.get('NEBULA_AGENT_BELOW_NORMAL', '0') not in ('', '0'):
+            flags |= subprocess.BELOW_NORMAL_PRIORITY_CLASS
         process = subprocess.Popen(
             [os.path.join(self.run, 'NebulaRuntime.exe'), self.content, os.path.join(self.run, 'RMGE01_game.dll')],
             cwd=self.dir, env=env, stdout=open(self.stdout_path, 'wb'), stderr=open(self.stderr_path, 'wb'),
-            startupinfo=startup, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+            startupinfo=startup, creationflags=flags)
         with open(self._pid_file, 'w') as f:
             f.write(str(process.pid))
         return process.pid
