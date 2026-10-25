@@ -306,7 +306,9 @@ void step(Lobby& l, std::unique_lock<std::mutex>& lock) {
     while (receive_message(l.listen, from, header, text)) {
         if (static_cast<Message>(header.type) != Message::Ask) continue;
         if (header.build != l.build) {
-            send_message(l.listen, from, Message::Decline, l.build, "A DIFFERENT BUILD OF NEBULA");
+            // What happened, then what to do (the joiner's card shows a line each).
+            send_message(l.listen, from, Message::Decline, l.build,
+                         "THE HOST HAS A DIFFERENT VERSION OF NEBULA. BOTH PLAYERS NEED THE SAME RELEASE.");
             continue;
         }
         // Different game files or game mods (the custom model or animations) load different data into the game:
@@ -315,7 +317,8 @@ void step(Lobby& l, std::unique_lock<std::mutex>& lock) {
             std::string mods = content_mods();
             for (char& c : mods) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
             send_message(l.listen, from, Message::Decline, l.build,
-                         "DIFFERENT GAME FILES OR MODS: THE HOST PLAYS WITH " + (mods.empty() ? std::string("NO MODS") : mods));
+                         "THE HOST PLAYS WITH " + (mods.empty() ? std::string("NO MODS") : "THESE MODS: " + mods) +
+                             ". BOTH PLAYERS NEED THE SAME GAME FILES AND MODS.");
             std::fprintf(stderr, "[lobby] refused a join: different game files or mods (this PC: %s)\n",
                          mods.empty() ? "no mods" : mods.c_str());
             continue;
@@ -470,7 +473,8 @@ NetLobbyView view() {
     } else if (!l.message.empty()) {
         v.phase = NetLobbyPhase::Outcome;
         (void)strncpy_s(v.outcome, sizeof(v.outcome), l.message.c_str(), _TRUNCATE);
-        status = l.message;
+        // F1's one-line status: what happened (the card says what to do as well).
+        status = l.message.substr(0, l.message.find(". "));
     } else if (settings.net_joinable && l.listen_failed) {
         v.phase = NetLobbyPhase::PortInUse;
         status = "PORT " + std::to_string(settings.net_port) + " IS IN USE";

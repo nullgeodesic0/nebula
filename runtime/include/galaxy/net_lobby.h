@@ -49,7 +49,7 @@ struct NetLobbyView {
     bool in_session = false;
     NetLobbyPhase phase = NetLobbyPhase::Off;
     char address[64]{};   // Joinable: this PC's address:port; Asking/Waiting: the host's
-    char outcome[96]{};   // upper case, as `status` shows it
+    char outcome[160]{};  // upper case, as `status` shows it
     bool host = false;    // in a session as its host
 };
 using NetLobbyViewFn = NetLobbyView (*)();

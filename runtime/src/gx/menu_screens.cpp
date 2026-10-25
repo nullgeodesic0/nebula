@@ -522,7 +522,8 @@ std::u16string sentence(std::u16string_view words) {
     for (const char16_t c : words) {
         char16_t d = c;
         if (c >= u'A' && c <= u'Z' && !first) d = static_cast<char16_t>(c - u'A' + u'a');
-        if (c != u' ') first = false;
+        // A new sentence starts after a full stop.
+        if (c != u' ') first = c == u'.' || c == u'!' || c == u'?';
         out.push_back(d);
     }
     if (!out.empty() && out.back() != u'.' && out.back() != u'!' && out.back() != u'?') out.push_back(u'.');
@@ -751,6 +752,11 @@ void Screens::online_cards(const ScreensInput& in, const Assets& assets, const S
     if (o.phase == OnlinePhase::Outcome && in.seconds < lobby_card_until_) {
         show = OnlinePhase::Outcome;
         words[0] = sentence(o.outcome);
+        // "What happened. What to do.": a line each.
+        if (const std::size_t stop = words[0].find(u". "); stop != std::u16string::npos) {
+            words[1] = words[0].substr(stop + 2u);
+            words[0].resize(stop + 1u);
+        }
     } else if (in.seconds < session_ended_until_ && show == OnlinePhase::Unavailable) {
         show = OnlinePhase::Outcome;
         words[0] = u"Your friend left. Playing on alone.";
@@ -771,18 +777,32 @@ void Screens::online_cards(const ScreensInput& in, const Assets& assets, const S
     const float x = lobby_card_anim_.slide_x();
     // Above the Online window (300 high, centred) when it is up.
     const float y = online_anim_.visible() ? 188.0f : 110.0f;
-    TextStyle style = body_text(0.9f);
+    const bool prompt = lobby_card_phase_ == OnlinePhase::AskedToJoin;
+    // An outcome of two sentences (what happened, what to do) takes two lines, the second smaller.
+    const bool two_lines = !prompt && !lobby_card_words_[1].empty();
+    const float size = two_lines ? 0.8f : 0.9f, second_size = 0.65f;
+    TextStyle style = body_text(size);
+    TextStyle second = body_text(second_size);
     // A long refusal (the host's mods) narrows to fit the picture.
     const float room = in.extent_x * 2.0f - 96.0f;
     if (const float wide = text_width(assets, style, lobby_card_words_[0]); wide > room) {
-        style = body_text(0.9f * room / wide);
+        style = body_text(size * room / wide);
     }
-    const bool prompt = lobby_card_phase_ == OnlinePhase::AskedToJoin;
-    const float width = text_width(assets, style, lobby_card_words_[0]) + 64.0f;
-    const float height = prompt ? 96.0f : 64.0f;
-    window(list, assets, space, x, y, width, height, alpha);
+    if (const float wide = two_lines ? text_width(assets, second, lobby_card_words_[1]) : 0.0f; wide > room) {
+        second = body_text(second_size * room / wide);
+    }
+    const float width = std::max(text_width(assets, style, lobby_card_words_[0]),
+                                 two_lines ? text_width(assets, second, lobby_card_words_[1]) : 0.0f) + 64.0f;
+    const float height = prompt ? 96.0f : (two_lines ? 80.0f : 64.0f);
+    const float card_y = two_lines && online_anim_.visible() ? 186.0f : y;
+    window(list, assets, space, x, card_y, width, height, alpha);
     if (!prompt) {
-        text(list, assets, space, style, x, y, lobby_card_words_[0], alpha);
+        if (two_lines) {
+            text(list, assets, space, style, x, card_y + 13.0f, lobby_card_words_[0], alpha);
+            text(list, assets, space, second, x, card_y - 17.0f, lobby_card_words_[1], alpha);
+        } else {
+            text(list, assets, space, style, x, card_y, lobby_card_words_[0], alpha);
+        }
         return;
     }
     text(list, assets, space, style, x, y + 16.0f, lobby_card_words_[0], alpha);
