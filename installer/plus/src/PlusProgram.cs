@@ -156,6 +156,8 @@ namespace Nebula.Plus
                 if (options.ContainsKey("check")) return 0;
                 request.Channel = config.Channel;
                 request.Package = Fetch(layout, config, update, options.ContainsKey("allow-unsigned"), Console.WriteLine);
+                int code = InstallWithNewVersion(layout, request, Console.WriteLine, CancellationToken.None);
+                if (code >= 0) return code;
             }
             var engine = new PlusEngine(request, progress, CancellationToken.None);
             Console.WriteLine("Log: " + engine.LogPath);
@@ -195,6 +197,45 @@ namespace Nebula.Plus
             }
             if (inputs.Count != 0) request.ModInputs = inputs;
             return request;
+        }
+
+        /// <summary>
+        /// An update is installed by the new version's own NebulaPlusCli.exe (its install steps and launchers, not this
+        /// version's), from the downloaded package: a signed zip checked by <see cref="Fetch"/>, unpacked and checked file
+        /// by file against its manifest, or a folder this PC built. The download is removed afterwards. Returns the new
+        /// installer's exit code, or -1 when the package has no NebulaPlusCli.exe (the caller installs it itself).
+        /// </summary>
+        public static int InstallWithNewVersion(PlusLayout layout, PlusRequest request, Action<string> log, CancellationToken cancel)
+        {
+            string downloads = Path.Combine(layout.Root, "downloads");
+            string folder = request.Package;
+            if (File.Exists(folder))
+            {
+                folder = Path.Combine(downloads, "package-" + Path.GetFileNameWithoutExtension(request.Package));
+                PlusPackage.Extract(request.Package, folder);
+            }
+            var package = PlusPackage.OpenFolder(folder);
+            string cli = package.File("NebulaPlusCli.exe");
+            if (!File.Exists(cli)) return -1;
+            var arguments = new List<string> { "install", "--root", layout.Root, "--package", folder, "--channel", request.Channel ?? "release" };
+            if (request.ForceMods) arguments.Add("--force-mods");
+            if (request.SkipMods) arguments.Add("--skip-mods");
+            if (request.AllowPythonVenv) arguments.Add("--allow-python-venv");
+            log("Installing with Nebula Plus " + package.Version + "'s own installer.");
+            int code = Proc.Run(cli, arguments, folder, null, log, cancel);
+            if (code == 0)
+            {
+                // Done: the version folder keeps its own copy of the package.
+                foreach (var path in new[] { request.Package, request.Package + ".sig" })
+                    if (File.Exists(path) && path.StartsWith(downloads, StringComparison.OrdinalIgnoreCase))
+                        try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+                // The unpacked package, or the whole branch build (source and package), under downloads\.
+                string top = Path.GetFullPath(folder);
+                while (top != null && !string.Equals(Path.GetDirectoryName(top), Path.GetFullPath(downloads), StringComparison.OrdinalIgnoreCase))
+                    top = Path.GetDirectoryName(top);
+                if (top != null) try { FileUtil.DeleteTree(top); } catch (Exception) { }
+            }
+            return code;
         }
 
         /// <summary>The update's package: a downloaded, authenticated zip, or a folder built from the branch's commit.</summary>

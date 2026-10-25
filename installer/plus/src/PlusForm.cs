@@ -280,6 +280,10 @@ namespace Nebula.Plus
                 if (!yes) return "Update not installed.";
                 var request = new PlusRequest { Root = layout.Root, Channel = config.Channel };
                 request.Package = PlusProgram.Fetch(layout, config, available, false, Log);
+                Report(0.5, "Installing " + available.Describe());
+                int code = PlusProgram.InstallWithNewVersion(layout, request, Log, cancel);
+                if (code > 0) throw new InvalidOperationException("The update did not install (exit " + code + "); the current version is unchanged. See the log above.");
+                if (code == 0) { Report(1.0, "Updated."); return available.Describe() + " is installed. Saves, settings and mods were not touched."; }
                 var engine = new PlusEngine(request, this, cancel);
                 Log("Log: " + engine.LogPath);
                 engine.Run();

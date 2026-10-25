@@ -194,7 +194,7 @@ namespace Nebula.Plus
                     "-Repository", config.Repository, "-Branch", config.Branch, "-Version", update.Version, "-OutputDirectory", output
                 }, src, null, log, cancel);
             if (code != 0) throw new InvalidOperationException("Building commit " + update.Commit.Substring(0, 12) + " failed (exit " + code + "). See the log.");
-            return output;
+            return Path.Combine(output, "package");
         }
 
         /// <summary>Compare MAJOR.MINOR.PATCH[-pre.N]; a release sorts after its previews.</summary>
