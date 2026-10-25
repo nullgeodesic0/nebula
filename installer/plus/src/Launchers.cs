@@ -38,7 +38,9 @@ namespace Nebula.Plus
                 "set \"DELAY=%~2\"\r\nif \"%DELAY%\"==\"\" if /i \"%MODE%\"==\"lockstep\" (set \"DELAY=3\") else (set \"DELAY=2\")\r\n" +
                 "set \"GALAXY_NET_HOST=%PORT%\"\r\nset \"GALAXY_NET_DELAY=%DELAY%\"\r\n" +
                 "if /i \"%MODE%\"==\"live\" set \"GALAXY_NET_LIVE=1\"\r\nif /i \"%MODE%\"==\"rollback\" set \"GALAXY_NET_ROLLBACK=1\"\r\n" +
-                "echo Hosting on TCP port %PORT% (%MODE%). Give your friend this PC's address.\r\n", "host", false);
+                "echo Hosting on TCP port %PORT% (%MODE%). Give your friend this PC's address: on the same network one of these,\r\n" +
+                "echo from elsewhere your public address (the router forwards TCP port %PORT% to this PC).\r\n" +
+                "for /f \"tokens=2 delims=:\" %%a in ('ipconfig ^| findstr /c:\"IPv4\"') do echo    %%a\r\n", "host", false);
             Write(layout, "Join online game.cmd", "Online co-op, join (you play Luigi, in the host's save: it comes from the host at the start\r\n" +
                 "rem and is kept in data-join\\Nebula\\netplay; your own saves are not touched).\r\n" +
                 "rem Usage: \"Join online game.cmd\" <host address>[:port]", null,
